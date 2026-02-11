@@ -541,13 +541,6 @@ class SwinVITModel(nn.Module):
                 input_resolution=ds,
                 drop_path=drop_path[level]
             ),
-            # AttentionBlock(
-            #     ch,
-            #     use_checkpoint=use_checkpoint,
-            #     num_heads=num_heads,
-            #     num_head_channels=num_head_channels,
-            #     use_new_attention_order=use_new_attention_order,
-            # ),
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -693,8 +686,8 @@ def build_model(image_size):
     print("[DEBUG] device:", device)
 
     num_channels = 128
-    channel_mult = (1, 1, 2, 2, 4, 4)
-    attention_resolutions = "64,32,16,8"
+    channel_mult = (1, 1, 2, 2, 4)
+    attention_resolutions = "64,32,16"
     num_heads = [4, 4, 4, 8, 16, 16]
     window_size = [[4, 4], [4, 4], [4, 4], [8, 8], [8, 8], [4, 4]]
     num_res_blocks = [2, 2, 1, 1, 1, 1]
