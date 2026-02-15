@@ -61,9 +61,9 @@ from monai.transforms import (CastToTyped,
                               RandZoomd, SpatialCrop, SpatialPadd, EnsureTyped)
 
 #The diffusion module adpated from https://github.com/openai/guided-diffusion
-from Diffusion.Create_diffusion import *
-from Diffusion.resampler import *
-from Diffusion.normal_diffusion import GaussianDiffusionSampler, GaussianDiffusionTrainer
+from Swin_origin_Diffusion.Create_diffusion import *
+from Swin_origin_Diffusion.resampler import *
+from Swin_origin_Diffusion.normal_diffusion import GaussianDiffusionSampler, GaussianDiffusionTrainer
 import matplotlib.pyplot as plt
 
 # Here are the dataloader hyper-parameters, including the batch size,
@@ -79,44 +79,6 @@ channels = 1
 # load image using PILreader (read nii) -> add channel dimension to the image -> ensure orientation -> respacing all image to
 # a same spacing -> intensity normalization -> padding or crop the boundary to ensure all images have same size
 
-class CustomDataset(Dataset):
-    def __init__(self, imgs_path):
-        self.imgs_path = imgs_path
-        file_list = natsorted(glob.glob(self.imgs_path + "*"), key=lambda y: y.lower())
-        self.data = []
-        for img_path in file_list:
-            class_name = img_path.split("/")[-1]
-            self.data.append([img_path, class_name])
-        self.train_transforms = Compose(
-            [
-                LoadImaged(keys=["image"], reader='PILreader'),
-                AddChanneld(keys=["image"]),
-                # Orientationd(keys=["image"], axcodes="RAS"),
-                Spacingd(
-                    keys=["image"],
-                    pixdim=spacing,
-                    mode=("bilinear"),
-                ),
-                ScaleIntensityd(keys=["image"], minv=-1, maxv=1.0),
-                ResizeWithPadOrCropd(
-                    keys=["image"],
-                    spatial_size=(256, 256),
-                    constant_values=-1,
-                ),
-                ToTensord(keys=["image"]),
-            ]
-        )
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx, ):
-        img_path, class_name = self.data[idx]
-        cao = {"image": img_path}
-        affined_data_dict = self.train_transforms(cao)
-        img_tensor = affined_data_dict['image'].to(torch.float)
-
-        return img_tensor
 
 # These three parameters: training steps number, learning variance or not (using improved DDPM or original DDPM), and inference
 # timesteps number (only effective when using improved DDPM)
@@ -172,7 +134,7 @@ class_cond = False
 use_scale_shift_norm=True
 resblock_updown = False
 
-from Model.swin_transformer import *
+from Swin_origin_Model.swin_transformer import *
 model = SwinVITModel(
         image_size=(image_size,image_size),
         in_channels=1,
@@ -277,7 +239,7 @@ train_loader1 = torch.utils.data.DataLoader(training_set1, **params)
 N_EPOCHS = 500
 
 # Enter the address you save the checkpoint and the evaluation examples
-path ="C:/Pan research/Diffusion model/result/ACDC/"
+path ="C:/Pan research/Swin_origin_Diffusion model/result/ACDC/"
 PATH = path+'ViTRes1.pt' # Use your own path
 best_loss = 1
 if not os.path.exists(path):

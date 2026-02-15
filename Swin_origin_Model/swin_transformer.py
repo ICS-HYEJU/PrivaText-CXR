@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # from nnFormer import *
-from Model.SwinUnet import *
-from Model.util_network import (
+from Swin_origin_Model.SwinUnet import *
+from Swin_origin_Model.util_network import (
     checkpoint,
     conv_nd,
     linear,
@@ -740,10 +740,10 @@ if __name__ == "__main__":
         drop_last=True,
     )
 
-    # 2) Model INIT
+    # 2) Swin_origin_Model INIT
     model, device = build_model(args.image_size)
 
-    # 3) Model Forward
+    # 3) Swin_origin_Model Forward
     batch = next(iter(loader))
     x, label_str = batch  # x: (B,1,H,W), label_str: list[str]
 
@@ -752,7 +752,7 @@ if __name__ == "__main__":
 
     x = x.to(device, non_blocking=True)
 
-    # Diffusion Timestep
+    # Swin_origin_Diffusion Timestep
     # 0~999
     timesteps = torch.randint(low=0, high=1000, size=(x.shape[0],), device=device, dtype=torch.long)
     print("[DEBUG] timesteps:", timesteps)

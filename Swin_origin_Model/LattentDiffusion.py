@@ -1105,7 +1105,7 @@ class LatentDiffusion(DDPM):
             #     print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             #     params = params + list(self.cond_stage_model.parameters())
             if self.learn_logvar:
-                print('  Diffusion model optimizing logvar')
+                print('  Swin_origin_Diffusion model optimizing logvar')
                 params.append(self.logvar)
 
         num_model_params = sum(p.numel() for p in self.model.parameters())
@@ -1140,7 +1140,7 @@ class LatentDiffusion(DDPM):
                 #   DP, so the noise multiplier needs to be doubled in DPSGD
                 noise_multiplier=self.noise_scale,
                 max_grad_norm=self.dp_config.max_grad_norm,
-                # NOTE: The data loader is recreated in main.py, so these parameters do nothing
+                # NOTE: The data loader is recreated in swin_main.py, so these parameters do nothing
                 data_loader=data_loader,
                 poisson_sampling=self.dp_config.poisson_sampling,
             )
