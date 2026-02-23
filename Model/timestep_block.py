@@ -6,19 +6,17 @@ from typing import Iterable
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-
+from attention_module import *
 
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
     """
-
     @abstractmethod
     def forward(self, x, emb):
         """
         Apply the module to `x` given `emb` timestep embeddings.
         """
-
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """
@@ -34,7 +32,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
-                # If using class SpatialTransformer, passing context. (for CrossAttention)
+                # If using 'class SpatialTransformer', passing context. (for CrossAttention)
                 x = layer(x, context)
             else:
                 x = layer(x)
