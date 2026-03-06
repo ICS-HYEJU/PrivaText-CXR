@@ -8,50 +8,17 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from swin_attention import SwinTransformerBlock
-from UNetBlock_module import Downsample
-from util_network import conv_nd, normalization, zero_module
+from UNetBlock_module import ResBlock, Downsample
+from util_network import conv_nd, normalization
 
 
 # ============================================================================
-# Helper modules
+# SwinWrapper2D  –  NCHW ↔ NHWC adapter for SwinTransformerBlock
 # ============================================================================
-
-class ResBlock2D(nn.Module):
-    """
-    Residual block for the VAE Encoder (no timestep embedding).
-
-    GroupNorm + SiLU + Conv → GroupNorm + SiLU + Dropout + Conv(zero-init)
-    with skip connection.
-    """
-
-    def __init__(self, channels: int, out_channels: int, dropout: float = 0.0):
-        super().__init__()
-        self.in_layers = nn.Sequential(
-            normalization(channels),
-            nn.SiLU(),
-            nn.Conv2d(channels, out_channels, kernel_size=3, padding=1),
-        )
-        self.out_layers = nn.Sequential(
-            normalization(out_channels),
-            nn.SiLU(),
-            nn.Dropout(p=dropout),
-            zero_module(nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)),
-        )
-        self.skip_connection = (
-            nn.Identity() if channels == out_channels
-            else nn.Conv2d(channels, out_channels, kernel_size=1)
-        )
-
-    def forward(self, x):
-        h = self.in_layers(x)
-        h = self.out_layers(h)
-        return self.skip_connection(x) + h
-
 
 class SwinWrapper2D(nn.Module):
     """
     Adapts SwinTransformerBlock (expects NHWC) for NCHW feature maps.
-
     Permutes NCHW → NHWC before Swin, then NHWC → NCHW after.
     """
 
@@ -84,15 +51,17 @@ class Encoder(nn.Module):
 
     ConvIn : in_channels → ch
 
-    Level 0 : ResBlock2D×num_res_blocks  → Downsample
-    Level 1 : ResBlock2D×num_res_blocks  → Downsample
-    Level 2 : ResBlock2D×num_res_blocks  → Downsample
-    Level 3 : (ResBlock2D + SwinBlock)×num_res_blocks → Downsample   # attn_res=32
-    Level 4 : (ResBlock2D + SwinBlock)×num_res_blocks                # attn_res=16
+    Level 0 : ResBlock×num_res_blocks  → Downsample
+    Level 1 : ResBlock×num_res_blocks  → Downsample
+    Level 2 : ResBlock×num_res_blocks  → Downsample
+    Level 3 : (ResBlock + SwinBlock)×num_res_blocks → Downsample   # attn_res=32
+    Level 4 : (ResBlock + SwinBlock)×num_res_blocks                # attn_res=16
 
-    Middle  : ResBlock2D → SwinBlock → ResBlock2D
+    Middle  : ResBlock → SwinBlock → ResBlock
 
     Output  : Norm → SiLU → ConvOut (block_in → z_channels*2 if double_z)
+
+    ResBlock is used with emb_channels=0 (no timestep embedding).
     """
 
     SWIN_NUM_HEADS   = 8
@@ -112,11 +81,12 @@ class Encoder(nn.Module):
         self.resolution       = args.resolution
         self.z_channels       = args.z_channels
         self.double_z         = args.double_z
+        self.dims             = args.dims
 
         self.num_resolutions = len(self.ch_mult)
 
         # ── input projection ─────────────────────────────────────────────────
-        self.conv_in = nn.Conv2d(self.in_channels, self.ch, kernel_size=3, stride=1, padding=1)
+        self.conv_in = conv_nd(self.dims, self.in_channels, self.ch, kernel_size=3, stride=1, padding=1)
 
         # ── downsampling levels ───────────────────────────────────────────────
         curr_res   = self.resolution
@@ -131,10 +101,12 @@ class Encoder(nn.Module):
 
             for i_block in range(self.num_res_blocks):
                 block.append(
-                    ResBlock2D(
+                    ResBlock(
                         channels=block_in,
-                        out_channels=block_out,
+                        emb_channels=0,       # Encoder: no timestep embedding
                         dropout=self.dropout,
+                        out_channels=block_out,
+                        dims=self.dims,
                     )
                 )
                 block_in = block_out
@@ -155,25 +127,26 @@ class Encoder(nn.Module):
             down.attn  = attn
 
             if i_level != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, self.resamp_with_conv, dims=2)
+                down.downsample = Downsample(block_in, self.resamp_with_conv, dims=self.dims)
                 curr_res = curr_res // 2
 
             self.down.append(down)
 
         # ── middle ────────────────────────────────────────────────────────────
         self.mid = nn.Module()
-        self.mid.block_1 = ResBlock2D(block_in, block_in, self.dropout)
+        self.mid.block_1 = ResBlock(block_in, emb_channels=0, dropout=self.dropout, dims=self.dims)
         self.mid.attn_1  = SwinWrapper2D(
             dim=block_in,
             num_heads=self.SWIN_NUM_HEADS,
             window_size=self.SWIN_WINDOW_SIZE,
             shift_size=(0, 0),
         )
-        self.mid.block_2 = ResBlock2D(block_in, block_in, self.dropout)
+        self.mid.block_2 = ResBlock(block_in, emb_channels=0, dropout=self.dropout, dims=self.dims)
 
         # ── output ────────────────────────────────────────────────────────────
         self.norm_out = normalization(block_in)
-        self.conv_out = nn.Conv2d(
+        self.conv_out = conv_nd(
+            self.dims,
             block_in,
             2 * self.z_channels if self.double_z else self.z_channels,
             kernel_size=3,
@@ -188,9 +161,9 @@ class Encoder(nn.Module):
 
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](h)
+                h = self.down[i_level].block[i_block](h)   # emb=None (default)
                 if verbose:
-                    print(f"  L{i_level} block[{i_block}] : ResBlock2D → {h.shape}")
+                    print(f"  L{i_level} block[{i_block}] : ResBlock → {h.shape}")
 
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
@@ -205,19 +178,19 @@ class Encoder(nn.Module):
 
         h = self.mid.block_1(h)
         if verbose:
-            print(f"  mid block_1 : ResBlock2D → {h.shape}")
+            print(f"  mid block_1 : ResBlock → {h.shape}")
         h = self.mid.attn_1(h)
         if verbose:
-            print(f"  mid attn_1  : Swin       → {h.shape}")
+            print(f"  mid attn_1  : Swin     → {h.shape}")
         h = self.mid.block_2(h)
         if verbose:
-            print(f"  mid block_2 : ResBlock2D → {h.shape}")
+            print(f"  mid block_2 : ResBlock → {h.shape}")
 
         h = self.norm_out(h)
         h = nn.SiLU()(h)
         h = self.conv_out(h)
         if verbose:
-            print(f"  conv_out    :             → {h.shape}")
+            print(f"  conv_out    :           → {h.shape}")
 
         return h
 
@@ -237,7 +210,7 @@ class Encoder(nn.Module):
 
             for i_block in range(self.num_res_blocks):
                 ch_in = block_in if i_block == 0 else block_out
-                print(f"     block[{i_block}] : ResBlock2D  {ch_in} → {block_out}")
+                print(f"     block[{i_block}] : ResBlock  {ch_in} → {block_out}  (emb_channels=0)")
                 if has_attn:
                     shift = self.down[i_level].attn[i_block].swin.shift_size
                     print(f"      attn[{i_block}] : SwinWrapper2D  dim={block_out}"
@@ -251,12 +224,12 @@ class Encoder(nn.Module):
 
         print("  ── Middle ────────────────────────────────────────────")
         mid_ch = self.ch * self.ch_mult[-1]
-        print(f"     block_1 : ResBlock2D    {mid_ch} → {mid_ch}")
+        print(f"     block_1 : ResBlock      {mid_ch} → {mid_ch}  (emb_channels=0)")
         print(f"     attn_1  : SwinWrapper2D dim={mid_ch}"
               f"  heads={self.SWIN_NUM_HEADS}"
               f"  win={self.SWIN_WINDOW_SIZE}"
               f"  shift=(0, 0)")
-        print(f"     block_2 : ResBlock2D    {mid_ch} → {mid_ch}")
+        print(f"     block_2 : ResBlock      {mid_ch} → {mid_ch}  (emb_channels=0)")
         print()
 
         out_ch = 2 * self.z_channels if self.double_z else self.z_channels
@@ -331,6 +304,7 @@ if __name__ == "__main__":
     parser.add_argument("--resolution",       default=256,          type=int)
     parser.add_argument("--z_channels",       default=256,          type=int)
     parser.add_argument("--double_z",         default=True,         type=bool)
+    parser.add_argument("--dims",             default=2,            type=int)
 
     args = parser.parse_args()
 

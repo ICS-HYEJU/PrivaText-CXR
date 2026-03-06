@@ -4,13 +4,14 @@ Shared Block: ResBlock, DownSample, UpSample
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from timestep_block import *
 from util_network import *
 
 class ResBlock(TimestepBlock):
     """
-    Pure CNN Residual block without Swin Transformer.
-    Works for both DP-LDM and MT-DDPM.
+    A residual block that can optionally change the number of channels.
+    Supports both timestep-conditioned (UNet) and non-conditioned (Encoder) usage.
     """
     def __init__(
             self,
@@ -50,13 +51,17 @@ class ResBlock(TimestepBlock):
             conv_nd(dims, channels, self.out_channels, 3, padding=1),
         )
 
-        self.emb_layers = nn.Sequential(
-            nn.SiLU(),
-            linear(
-                emb_channels,
-                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
-            ),
-        )
+        # Only create emb_layers if emb_channels > 0
+        if self.emb_channels > 0:
+            self.emb_layers = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(
+                    emb_channels,
+                    2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+                ),
+            )
+        else:
+            self.emb_layers = None
 
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
@@ -76,12 +81,13 @@ class ResBlock(TimestepBlock):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self, x, emb):
-        return checkpoint(
-            self._forward, (x, emb), self.parameters(), self.use_checkpoint
-        )
-
-    def _forward(self, x, emb):
+    def forward(self, x, emb=None):
+        """
+        Apply the block to a Tensor, conditioned on a timestep embedding.
+        :param x: input tensor [B, C, ...]
+        :param emb: timestep embedding [B, emb_channels] or None for Encoder
+        :return: output tensor [B, out_channels, ...]
+        """
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -91,18 +97,23 @@ class ResBlock(TimestepBlock):
         else:
             h = self.in_layers(x)
 
-        emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
+        # Process timestep embedding
+        if self.emb_layers is not None and emb is not None:
+            emb_out = self.emb_layers(emb).type(h.dtype)
+            while len(emb_out.shape) < len(h.shape):
+                emb_out = emb_out[..., None]
+        else:
+            emb_out = 0
 
-        # Need ??
-        if self.use_scale_shift_norm:
+        # Apply scale-shift normalization or simple addition
+        if self.use_scale_shift_norm and self.emb_layers is not None and emb is not None:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = out_norm(h) * (1 + scale) + shift
             h = out_rest(h)
         else:
-            h = h + emb_out
+            if not isinstance(emb_out, int):
+                h = h + emb_out
             h = self.out_layers(h)
 
         return self.skip_connection(x) + h
@@ -142,12 +153,9 @@ class Upsample(nn.Module):
 
     def forward(self, x):
         assert x.shape[1] == self.channels
-
         x = self._upsample(x)
-
         if self.use_conv:
             x = self.conv(x)
-
         return x
 
     def _upsample(self, x):
@@ -223,7 +231,6 @@ class Downsample(nn.Module):
                 assert len(sample_kernel) == 1, "1D requires 1 scale factor"
                 self.sample_kernel = sample_kernel[0]
         else:
-            # int: same scale for all dimensions
             self.sample_kernel = sample_kernel
 
         if use_conv:
