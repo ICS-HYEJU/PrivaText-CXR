@@ -31,7 +31,7 @@ class NIH(Dataset):
         self.args = args
         self.task = args.task
 
-        # ���� Automatically set label_path and data_path based on task ����
+        # === Automatically set label_path and data_path based on task ===
         # If task is 'train' or 'val', use train_val split folder
         # If task is 'test', use test split folder
         if self.task in ("train", "val"):
@@ -49,7 +49,7 @@ class NIH(Dataset):
         print(f"[INFO] label_path : {self.label_path}")
         print(f"[INFO] data_path  : {self.data_path}")
 
-        # ���� Load CSV and build image path list ����
+        # === Load CSV and build image path list ===
         self.df = pd.read_csv(self.label_path)
 
         # Drop unnamed columns if present (artifact from some CSV exports)
@@ -65,21 +65,21 @@ class NIH(Dataset):
 
         print(f"[INFO] Total images loaded: {len(self.img_paths)}")
 
-        # ���� Build transform pipeline ����
+        # ===  Build transform pipeline ===
         self.fn_transform = self.get_transform()
 
     def __len__(self):
         return len(self.img_paths)
 
     def __getitem__(self, idx):
-        # ���� Load and convert image to grayscale ����
+        # === Load and convert image to grayscale ===
         img_path = self.img_paths[idx]
         img = Image.open(img_path).convert("L")  # grayscale: 1 channel
 
         if self.fn_transform is not None:
             img = self.fn_transform(img)
 
-        # ���� Load label string and split by '|' for multi-label ����
+        # === Load label string and split by '|' for multi-label ===
         label_str = str(self.df.loc[idx, "Finding Labels"])
 
         return img, label_str
