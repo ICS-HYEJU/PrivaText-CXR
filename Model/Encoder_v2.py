@@ -36,7 +36,7 @@ class ResBlockEncoder(ResBlock):
         )
 
     def _forward(self, x, emb):
-        """in_layers �� out_layers, no timestep injection."""
+        """in_layers -> out_layers, no timestep injection."""
         h = self.in_layers(x)
         h = self.out_layers(h)
         return self.skip_connection(x) + h
@@ -46,7 +46,7 @@ class SwinWrapper2D(nn.Module):
     """
     Adapts SwinTransformerBlock (expects NHWC) for NCHW feature maps.
 
-    Permutes NCHW �� NHWC before Swin, then NHWC �� NCHW after.
+    Permutes NCHW -> NHWC before Swin, then NHWC -> NCHW after.
     Mask is always None (no cyclic-shift mask needed here).
     """
 
@@ -78,13 +78,13 @@ class Encoder(nn.Module):
 
     Input : [B, in_channels, H, W]
 
-    ConvIn : in_channels �� ch
+    ConvIn : in_channels -> ch
 
     Level 0 : ResBlock -> num_res_blocks -> Downsample
     Level 1 : ResBlock -> num_res_blocks -> Downsample
     Level 2 : ResBlock -> num_res_blocks -> Downsample
     Level 3 : (ResBlock + SwinBlock) -> num_res_blocks -> Downsample   # attn_res=32
-    Level 4 : (ResBlock + SwinBlock) -> num_res_blocks                # attn_res=16
+    Level 4 : (ResBlock + SwinBlock) -> num_res_blocks                 # attn_res=16
 
     Middle  : ResBlock -> SwinBlock -> ResBlock
 
@@ -361,67 +361,68 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", default="/storage/hjchoi/archive/image_file")
     parser.add_argument("--label_path", default="/storage/hjchoi/archive/Data_Entry_2017.csv")
     parser.add_argument("--task", default="train", choices=["train", "val", "test"])
-    parser.add_argument("--image_size", default=256, type=int)
+    parser.add_argument("--image_size", default=256, type=int,help='the value to resize')
     parser.add_argument("--image_show", default=False, type=bool)
 
     # Encoder
-    parser.add_argument("--in_channels", default=1, type=int)
-    parser.add_argument("--ch", default=128, type=int)
-    parser.add_argument("--ch_mult", default=[1, 2, 4, 4, 4])
-    parser.add_argument("--num_res_blocks", default=2, type=int)
-    parser.add_argument("--attn_resolutions", default=[32, 16])
+    parser.add_argument("--in_channels", default=1, type=int, help='Number of input img channels, NIH=gray-scale')
+    parser.add_argument("--ch", default=128, type=int, help='Base channel')
+    parser.add_argument("--ch_mult", default=[1, 2, 4, 4, 4], help='Channel multipliers per each level')
+    parser.add_argument("--num_res_blocks", default=2, type=int, help='Number of residual blocks per each level')
+    parser.add_argument("--attn_resolutions", default=[32, 16], help='the resolution at which attention is applied')
     parser.add_argument("--dropout", default=0.0, type=float)
-    parser.add_argument("--resamp_with_conv", default=True, type=bool)
-    parser.add_argument("--resolution", default=256, type=int)
-    parser.add_argument("--z_channels", default=256, type=int)
-    parser.add_argument("--double_z", default=True, type=bool)
-    parser.add_argument("--dims", default=2, type=int)
+    parser.add_argument("--resamp_with_conv", default=True, type=bool, help='Use strided conv for downsampling; False uses avg-pool')
+    parser.add_argument("--resolution", default=256, type=int, help='Input spatial resolution (H = W)')
+    parser.add_argument("--z_channels", default=256, type=int, help= 'Latent z-space channel dim')
+    parser.add_argument("--double_z", default=True, type=bool, help='Output 2*z_channels (mean + logvar) for VAE reparameterisation')
+    parser.add_argument("--dims", default=2, type=int, help="Conv dim; N of ConvNd", choices=[1, 2, 3])
+    parser.add_argument('--tmp_case',default=False, type=bool, help='True: not load real data, using rand values' )
 
     args = parser.parse_args()
 
-    # ���� 1. Print architecture ��������������������������������������������������������������������������������������������
     encoder = Encoder(args)
-    encoder.print_architecture()
+    encoder.print_architecture() # Print architecture
     print()
 
-    # ���� 2. Dummy-tensor forward (no dataset needed) ������������������������������������������������
-    B = 2
-    dummy = torch.zeros(B, args.in_channels, args.resolution, args.resolution)
+    if args.tmp_case:
+        # Dummy-tensor forward (no dataset needed)
+        B = 2
+        dummy = torch.zeros(B, args.in_channels, args.resolution, args.resolution)
 
-    print("Forward pass (verbose=True):")
-    with torch.no_grad():
-        h = encoder(dummy, verbose=True)
+        print("Forward pass (verbose=True):")
+        with torch.no_grad():
+            h = encoder(dummy, verbose=True)
 
-    print()
-    print(f"Encoder output shape : {h.shape}")
-    print(f"Expected             : [{B}, {2 * args.z_channels}, 16, 16]")
-    print()
+        print()
+        print(f"Encoder output shape : {h.shape}")
+        print(f"Expected             : [{B}, {2 * args.z_channels}, 16, 16]")
+        print()
 
-    posterior = DiagonalGaussianDistribution(h)
-    z = posterior.sample()
-    kl = posterior.kl()
+        posterior = DiagonalGaussianDistribution(h)
+        z = posterior.sample()
+        kl = posterior.kl()
 
-    print(f"mean shape  : {posterior.mean.shape}")
-    print(f"logvar shape: {posterior.logvar.shape}")
-    print(f"z shape     : {z.shape}   (expected [{B}, {args.z_channels}, 16, 16])")
-    print(f"KL mean     : {kl.mean().item():.4f}")
-    print()
+        print(f"mean shape  : {posterior.mean.shape}")
+        print(f"logvar shape: {posterior.logvar.shape}")
+        print(f"z shape     : {z.shape}   (expected [{B}, {args.z_channels}, 16, 16])")
+        print(f"KL mean     : {kl.mean().item():.4f}")
+        print()
+    else:
+        # Real dataset
+        try:
+            dataset = NIH(args)
+            dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=True)
 
-    # ���� 3. Real dataset (optional) ��������������������������������������������������������������������������������
-    try:
-        dataset = NIH(args)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=True)
-
-        for batch_id, data in enumerate(dataloader):
-            if batch_id == 1:
-                break
-            image, label = data[0], data[1]
-            print(f"Real image shape : {image.shape}")
-            with torch.no_grad():
-                h = encoder(image, verbose=True)
-            print(f"Encoder output   : {h.shape}")
-            posterior = DiagonalGaussianDistribution(h)
-            z = posterior.sample()
-            print(f"Sampled z        : {z.shape}")
-    except Exception as e:
-        print(f"[Dataset skipped] {e}")
+            for batch_id, data in enumerate(dataloader):
+                if batch_id == 1:
+                    break
+                image, label = data[0], data[1]
+                print(f"Real image shape : {image.shape}")
+                with torch.no_grad():
+                    h = encoder(image, verbose=True)
+                print(f"Encoder output   : {h.shape}")
+                posterior = DiagonalGaussianDistribution(h)
+                z = posterior.sample()
+                print(f"Sampled z        : {z.shape}")
+        except Exception as e:
+            print(f"[Dataset skipped] {e}")
