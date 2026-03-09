@@ -69,6 +69,12 @@ class Upsample(nn.Module):
 class Downsample(nn.Module):
     """
     A downsampling layer with an optional convolution.
+    :param channels: channels in the inputs and outputs.
+    :param use_conv: if True, use strided convolution for downsampling.
+                     if False, use average pooling.
+    :param sample_kernel: downsampling stride per dimension (tuple).
+    :param dims: determines if the signal is 1D, 2D, or 3D.
+    :param out_channels: output channels (only used when use_conv=True).
     """
 
     def __init__(self, channels, use_conv, sample_kernel, dims=2, out_channels=None):
@@ -77,21 +83,22 @@ class Downsample(nn.Module):
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
-        if self.dims == 3:
-            self.sample_kernel = (1 / sample_kernel[0], 1 / sample_kernel[1], 1 / sample_kernel[2])
+
+        if dims == 3:
+            self.stride = (sample_kernel[0], sample_kernel[1], sample_kernel[2])
         else:
-            self.sample_kernel = (1 / sample_kernel[0], 1 / sample_kernel[1])
+            self.stride = (sample_kernel[0], sample_kernel[1])
 
         if use_conv:
-            self.op = torch.nn.Upsample(scale_factor=self.sample_kernel, mode='nearest')
+            self.op = conv_nd(dims, self.channels, self.out_channels, 3,
+                              stride=self.stride, padding=1)
         else:
             assert self.channels == self.out_channels
-            self.op = torch.nn.Upsample(scale_factor=self.sample_kernel, mode='nearest')
-            self.conv = conv_nd(dims, self.channels, self.channels, 3, padding=1)
+            self.op = avg_pool_nd(dims, kernel_size=self.stride, stride=self.stride)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
-        return self.conv(self.op(x))
+        return self.op(x)
 
 
 class ResBlock(TimestepBlock):
