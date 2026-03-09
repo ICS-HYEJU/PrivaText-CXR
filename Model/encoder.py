@@ -302,7 +302,7 @@ if __name__ == "__main__":
     parser.add_argument("--dropout",          default=0.0,          type=float)
     parser.add_argument("--resamp_with_conv", default=True,         type=bool)
     parser.add_argument("--resolution",       default=256,          type=int)
-    parser.add_argument("--z_channels",       default=256,          type=int)
+    parser.add_argument("--z_channels",       default=3,            type=int)
     parser.add_argument("--double_z",         default=True,         type=bool)
     parser.add_argument("--dims",             default=2,            type=int)
 
