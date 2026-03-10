@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from encoder import Encoder, DiagonalGaussianDistribution
 from decoder import Decoder
+from util_network import conv_nd
 
 
 # ============================================================================
@@ -35,6 +36,18 @@ class AutoencoderKL(nn.Module):
         super().__init__()
         self.encoder = Encoder(args)
         self.decoder = Decoder(args)
+
+        # 1×1 conv applied to z before decoding.
+        # Keeps z_channels unchanged while learning a channel-wise linear
+        # remapping that decouples the encoder's latent space from the
+        # decoder's expected input space. This also helps compensate for
+        # the noise introduced by the reparameterisation trick.
+        self.post_quant_conv = conv_nd(
+            args.dims,
+            args.z_channels,
+            args.z_channels,
+            kernel_size=1,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     def encode(self, x) -> DiagonalGaussianDistribution:
@@ -65,6 +78,10 @@ class AutoencoderKL(nn.Module):
         Returns:
             reconstructed image  [B, out_channels, H, W]
         """
+        # Remap z in channel space before passing to the Decoder.
+        # The 1×1 conv learns a linear mixing across channels, allowing
+        # the decoder to operate in its own optimal feature space.
+        z = self.post_quant_conv(z)
         return self.decoder(z)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -123,8 +140,9 @@ if __name__ == "__main__":
     print(f"  KL mean         : {kl.mean().item():.4f}")
 
     print()
-    print("─── decode ──────────────────────────────────────────────────")
+    print("─── decode (post_quant_conv → decoder) ──────────────────────")
     recon = model.decode(z)
+    print(f"  post_quant_conv : {z.shape} → {z.shape}  (1×1 conv, channel remap)")
     print(f"  recon shape     : {recon.shape}")
     print(f"  expected        : [{B}, {args.out_channels}, {args.resolution}, {args.resolution}]")
 
