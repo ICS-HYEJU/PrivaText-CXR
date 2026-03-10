@@ -299,6 +299,8 @@ class DiagonalGaussianDistribution(object):
         if self.deterministic:
             return torch.tensor([0.])
         if other is None:
+            # KL divergence between the encoder's posterior q(z|x) and the standard normal prior N(0, I)
+            # KL(N(mean, var)||N(0,1) = 1/2 * (mean**2 + var**2 -1 -log(var**2))
             return 0.5 * torch.sum(
                 torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
                 dim=[1, 2, 3],
@@ -352,6 +354,8 @@ if __name__ == "__main__":
     parser.add_argument("--dims", default=2, type=int, help="Conv dim; N of ConvNd", choices=[1, 2, 3])
     parser.add_argument('--test_case',default=False, type=bool, help='True: not load real data, using rand values' )
 
+    # Decoder
+    parser.add_argument("--out_channels", default=1, type=int, help='Number of output channels')
     args = parser.parse_args()
 
     encoder = Encoder(args)
@@ -382,7 +386,7 @@ if __name__ == "__main__":
         print(f"KL mean     : {kl.mean().item():.4f}")
         print()
     else:
-        # Real dataset
+        # NIH dataset
         try:
             dataset = NIH(args)
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.bs, shuffle=True)
@@ -397,6 +401,10 @@ if __name__ == "__main__":
                 print(f"Encoder output   : {h.shape}")
                 posterior = DiagonalGaussianDistribution(h)
                 z = posterior.sample()
+                kl = posterior.kl()
                 print(f"Sampled z        : {z.shape}")
+                print(f"KL mean        : {kl.mean().item():.4f}")
+                latent_dim  = z.shape[1]*z.shape[2]*z.shape[3]
+                print(f"KL per dim     : {kl.mean().item()/latent_dim:.6f}")
         except Exception as e:
             print(f"[Dataset skipped] {e}")
