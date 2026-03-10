@@ -15,33 +15,6 @@ from util_network import conv_nd, normalization
 # ============================================================================
 # Helper modules
 # ============================================================================
-
-class ResBlockEncoder(ResBlock):
-    """
-    ResBlock without timestep embedding, for use in the VAE Encoder.
-
-    Inherits ResBlock but overrides _forward to skip emb_layers entirely.
-    This avoids the emb_channels=0 ambiguity and removes the unused Linear layer
-    from the computation graph.
-    """
-
-    def __init__(self, channels, out_channels, dropout, dims=2):
-        super().__init__(
-            channels=channels,
-            emb_channels=0,  # not used; emb_layers is created but never called
-            dropout=dropout,
-            out_channels=out_channels,
-            dims=dims,
-            use_checkpoint=False,
-        )
-
-    def _forward(self, x, emb):
-        """in_layers -> out_layers, no timestep injection."""
-        h = self.in_layers(x)
-        h = self.out_layers(h)
-        return self.skip_connection(x) + h
-
-
 class SwinWrapper2D(nn.Module):
     """
     Adapts SwinTransformerBlock (expects NHWC) for NCHW feature maps.
@@ -62,11 +35,10 @@ class SwinWrapper2D(nn.Module):
 
     def forward(self, x):
         # x: [B, C, H, W]
-        x = x.permute(0, 2, 3, 1).contiguous()  # �� [B, H, W, C]
+        x = x.permute(0, 2, 3, 1).contiguous()  # [B, H, W, C]
         x = self.swin(x, mask_matrix=None)
-        x = x.permute(0, 3, 1, 2).contiguous()  # �� [B, C, H, W]
+        x = x.permute(0, 3, 1, 2).contiguous()  # [B, C, H, W]
         return x
-
 
 # ============================================================================
 # Encoder
@@ -136,10 +108,10 @@ class Encoder(nn.Module):
             block_out = self.ch * self.ch_mult[i_level]
 
             for i_block in range(self.num_res_blocks):
-                # ResBlock (no timestep embedding)
                 block.append(
-                    ResBlockEncoder(
+                    ResBlock(
                         channels=block_in,
+                        emb_channels=0,
                         out_channels=block_out,
                         dropout=self.dropout,
                         dims=self.dims,
@@ -176,8 +148,9 @@ class Encoder(nn.Module):
 
         # ---- middle ---------------------------------------------------------
         self.mid = nn.Module()
-        self.mid.block_1 = ResBlockEncoder(
+        self.mid.block_1 = ResBlock(
             channels=block_in,
+            emb_channels=0,
             out_channels=block_in,
             dropout=self.dropout,
             dims=self.dims,
@@ -188,8 +161,9 @@ class Encoder(nn.Module):
             window_size=self.SWIN_WINDOW_SIZE,
             shift_size=(0, 0),
         )
-        self.mid.block_2 = ResBlockEncoder(
+        self.mid.block_2 = ResBlock(
             channels=block_in,
+            emb_channels=0,
             out_channels=block_in,
             dropout=self.dropout,
             dims=self.dims,
@@ -285,7 +259,7 @@ class Encoder(nn.Module):
 
         print("  ====== Middle ===========================================================")
         mid_ch = self.ch * self.ch_mult[-1]
-        print(f"     block_1 : ResBlockEncoder  {mid_ch} �� {mid_ch}")
+        print(f"     block_1 : ResBlockEncoder  {mid_ch} -> {mid_ch}")
         print(f"     attn_1  : SwinWrapper2D    dim={mid_ch}"
               f"  heads={self.SWIN_NUM_HEADS}"
               f"  win={self.SWIN_WINDOW_SIZE}"
@@ -349,7 +323,7 @@ class DiagonalGaussianDistribution(object):
 
 
 # ============================================================================
-# Main ? quick sanity check + architecture print
+# Main
 # ============================================================================
 
 if __name__ == "__main__":
@@ -358,11 +332,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # Data
-    parser.add_argument("--data_path", default="/storage/hjchoi/archive/image_file")
-    parser.add_argument("--label_path", default="/storage/hjchoi/archive/Data_Entry_2017.csv")
+    parser.add_argument("--root_path", default="/storage/hjchoi/archive/DATA")
     parser.add_argument("--task", default="train", choices=["train", "val", "test"])
+    parser.add_argument("--bs", default=2, type=int, help='batch size')
     parser.add_argument("--image_size", default=256, type=int,help='the value to resize')
-    parser.add_argument("--image_show", default=False, type=bool)
+    parser.add_argument("--image_show", default=True, type=bool)
 
     # Encoder
     parser.add_argument("--in_channels", default=1, type=int, help='Number of input img channels, NIH=gray-scale')
@@ -373,10 +347,10 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", default=0.0, type=float)
     parser.add_argument("--resamp_with_conv", default=True, type=bool, help='Use strided conv for downsampling; False uses avg-pool')
     parser.add_argument("--resolution", default=256, type=int, help='Input spatial resolution (H = W)')
-    parser.add_argument("--z_channels", default=256, type=int, help= 'Latent z-space channel dim')
+    parser.add_argument("--z_channels", default=3, type=int, help= 'Latent z-space channel dim')
     parser.add_argument("--double_z", default=True, type=bool, help='Output 2*z_channels (mean + logvar) for VAE reparameterisation')
     parser.add_argument("--dims", default=2, type=int, help="Conv dim; N of ConvNd", choices=[1, 2, 3])
-    parser.add_argument('--tmp_case',default=False, type=bool, help='True: not load real data, using rand values' )
+    parser.add_argument('--test_case',default=False, type=bool, help='True: not load real data, using rand values' )
 
     args = parser.parse_args()
 
@@ -384,7 +358,7 @@ if __name__ == "__main__":
     encoder.print_architecture() # Print architecture
     print()
 
-    if args.tmp_case:
+    if args.test_case:
         # Dummy-tensor forward (no dataset needed)
         B = 2
         dummy = torch.zeros(B, args.in_channels, args.resolution, args.resolution)
@@ -411,7 +385,7 @@ if __name__ == "__main__":
         # Real dataset
         try:
             dataset = NIH(args)
-            dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=True)
+            dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.bs, shuffle=True)
 
             for batch_id, data in enumerate(dataloader):
                 if batch_id == 1:
