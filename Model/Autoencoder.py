@@ -114,7 +114,7 @@ if __name__ == "__main__":
     parser.add_argument("--resamp_with_conv", default=True, type=bool,
                         help='Use strided conv for downsampling; False uses avg-pool')
     parser.add_argument("--resolution", default=256, type=int, help='Input spatial resolution (H = W)')
-    parser.add_argument("--z_channels", default=3, type=int, help='Latent z-space channel dim')
+    parser.add_argument("--z_channels", default=1, type=int, help='Latent z-space channel dim')
     parser.add_argument("--double_z", default=True, type=bool,
                         help='Output 2*z_channels (mean + logvar) for VAE reparameterisation')
     parser.add_argument("--dims", default=2, type=int, help="Conv dim; N of ConvNd", choices=[1, 2, 3])
