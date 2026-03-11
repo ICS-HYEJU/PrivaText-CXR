@@ -91,6 +91,8 @@ class Encoder(nn.Module):
         self.num_resolutions = len(self.ch_mult)
         self.temb_ch = 0  # no timestep embedding for Encoder
 
+        self.verbose = args.verbose
+
         # ---- input projection -----------------------------------------------
         self.conv_in = conv_nd(
             self.dims, self.in_channels, self.ch, kernel_size=3, stride=1, padding=1
@@ -189,40 +191,40 @@ class Encoder(nn.Module):
         emb = None  # no timestep embedding
 
         h = self.conv_in(x)
-        if verbose:
+        if self.verbose:
             print(f"  conv_in  : {x.shape} -> {h.shape}")
 
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](h, emb)
-                if verbose:
+                if self.verbose:
                     print(f"  L{i_level} block[{i_block}]  : ResBlock -> {h.shape}")
 
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
-                    if verbose:
+                    if self.verbose:
                         shift = self.down[i_level].attn[i_block].swin.shift_size
                         print(f"  L{i_level} attn [{i_block}]  : Swin(shift={shift}) -> {h.shape}")
 
             if i_level != self.num_resolutions - 1:
                 h = self.down[i_level].downsample(h)
-                if verbose:
+                if self.verbose:
                     print(f"  L{i_level} downsample      : -> {h.shape}")
 
         h = self.mid.block_1(h, emb)
-        if verbose:
+        if self.verbose:
             print(f"  mid block_1 : ResBlock  -> {h.shape}")
         h = self.mid.attn_1(h)
-        if verbose:
+        if self.verbose:
             print(f"  mid attn_1  : Swin      -> {h.shape}")
         h = self.mid.block_2(h, emb)
-        if verbose:
+        if self.verbose:
             print(f"  mid block_2 : ResBlock  -> {h.shape}")
 
         h = self.norm_out(h)
         h = nn.SiLU()(h)
         h = self.conv_out(h)
-        if verbose:
+        if self.verbose:
             print(f"  conv_out    :            -> {h.shape}")
 
         return h
@@ -369,7 +371,7 @@ if __name__ == "__main__":
 
         print("Forward pass (verbose=True):")
         with torch.no_grad():
-            h = encoder(dummy, verbose=True)
+            h = encoder(dummy, verbose=args.verbose)
 
         print()
         print(f"Encoder output shape : {h.shape}")
@@ -397,7 +399,7 @@ if __name__ == "__main__":
                 image, label = data[0], data[1]
                 print(f"Real image shape : {image.shape}")
                 with torch.no_grad():
-                    h = encoder(image, verbose=True)
+                    h = encoder(image, verbose=args.verbose)
                 print(f"Encoder output   : {h.shape}")
                 posterior = DiagonalGaussianDistribution(h)
                 z = posterior.sample()
