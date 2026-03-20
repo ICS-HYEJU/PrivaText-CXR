@@ -269,12 +269,14 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # ── Resume ────────────────────────────────────────────────────────────────
+    # If training was interrupted (e.g. server crash, time limit), resume from
+    # a saved checkpoint instead of restarting from scratch.
     start_epoch = 1
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        start_epoch = ckpt["epoch"] + 1
+        model.load_state_dict(ckpt["model"])          # restore learned weights
+        optimizer.load_state_dict(ckpt["optimizer"])  # restore optimizer state (momentum, m/v, lr schedule)
+        start_epoch = ckpt["epoch"] + 1               # continue from the next epoch
         print(f"[Resume] Loaded epoch {ckpt['epoch']}")
 
     # ── Config summary ────────────────────────────────────────────────────────
