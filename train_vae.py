@@ -1,16 +1,15 @@
 """
-VAE Training Script
-===================
-Trains AutoencoderKL using:
-    L_total = λ_rec * L_rec  +  λ_ssim * L_ssim  +  λ_kl * L_kl  +  λ_mmd * L_mmd
+train_vae.py  –  VAE Training Entry Point
+==========================================
 
-Usage
------
-    python train_vae.py \
-        --data_path  /path/to/images \
-        --label_path /path/to/Data_Entry_2017.csv \
-        --n_epochs   100 \
-        --batch_size 8
+Normal training:
+    python train_vae.py --root_path /storage/hjchoi/archive/DATA
+
+Debug without real data (random tensors):
+    python train_vae.py --test_case True --debug True --n_epochs 2
+
+Resume from checkpoint:
+    python train_vae.py --resume ./checkpoints/vae/vae_ep0010.pt
 """
 
 import argparse
@@ -19,7 +18,7 @@ import sys
 
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -29,98 +28,221 @@ from Data.dataset import NIH
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Argument parsing
+# Args
 # ──────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VAE Training")
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    parser.add_argument("--data_path",   default="/storage/hjchoi/archive/image_file")
-    parser.add_argument("--label_path",  default="/storage/hjchoi/archive/Data_Entry_2017.csv")
-    parser.add_argument("--image_size",  default=256,   type=int)
-    parser.add_argument("--image_show",  default=False, type=bool)
-    parser.add_argument("--num_workers", default=4,     type=int)
+    parser.add_argument("--root_path",  default="/storage/hjchoi/archive/DATA",
+                        help="Root directory. Expects <root>/images/ and "
+                             "<root>/Data_Entry_2017.csv")
+    parser.add_argument("--task",       default="train", choices=["train", "val", "test"])
+    parser.add_argument("--bs",         default=2,   type=int,  help="batch size")
+    parser.add_argument("--image_size", default=256, type=int,  help="resize target H=W")
+    parser.add_argument("--image_show", default=True, type=bool)
 
-    # ── VAE model ─────────────────────────────────────────────────────────────
-    parser.add_argument("--in_channels",      default=1,   type=int)
-    parser.add_argument("--out_channels",     default=1,   type=int)
-    parser.add_argument("--ch",               default=128, type=int)
-    parser.add_argument("--ch_mult",          default=[1, 2, 4, 4, 4])
-    parser.add_argument("--num_res_blocks",   default=2,   type=int)
-    parser.add_argument("--attn_resolutions", default=[32, 16])
+    # ── Encoder ───────────────────────────────────────────────────────────────
+    parser.add_argument("--in_channels",      default=1,   type=int,
+                        help="Number of input image channels  (NIH grayscale → 1)")
+    parser.add_argument("--ch",               default=128, type=int,
+                        help="Base channel width")
+    parser.add_argument("--ch_mult",          default=[1, 2, 4, 4, 4],
+                        help="Channel multipliers per level")
+    parser.add_argument("--num_res_blocks",   default=2,   type=int,
+                        help="ResBlocks per level")
+    parser.add_argument("--attn_resolutions", default=[32, 16],
+                        help="Spatial resolutions where attention is applied")
     parser.add_argument("--dropout",          default=0.0, type=float)
-    parser.add_argument("--resamp_with_conv", default=True, type=bool)
-    parser.add_argument("--resolution",       default=256, type=int)
-    parser.add_argument("--z_channels",       default=3,   type=int)
-    parser.add_argument("--double_z",         default=True, type=bool)
-    parser.add_argument("--dims",             default=2,   type=int)
+    parser.add_argument("--resamp_with_conv", default=True, type=bool,
+                        help="Strided conv for down/up-sampling; False → avg-pool")
+    parser.add_argument("--resolution",       default=256, type=int,
+                        help="Input spatial resolution (H = W)")
+    parser.add_argument("--z_channels",       default=1,   type=int,
+                        help="Latent z-space channel dim")
+    parser.add_argument("--double_z",         default=True, type=bool,
+                        help="Encoder outputs 2·z_channels (mean + logvar) for VAE")
+    parser.add_argument("--dims",             default=2,   type=int, choices=[1, 2, 3],
+                        help="Conv dimension (N of ConvNd)")
+    parser.add_argument("--test_case",        default=False, type=bool,
+                        help="True: skip real data, use random tensors for pipeline test")
+
+    # ── Decoder ───────────────────────────────────────────────────────────────
+    parser.add_argument("--out_channels", default=1, type=int,
+                        help="Number of output channels")
+
+    # ── Logging / debug ───────────────────────────────────────────────────────
+    parser.add_argument("--verbose",   default=False, type=bool,
+                        help="Print block shapes at each encoder/decoder level")
+    parser.add_argument("--debug",     default=False, type=bool,
+                        help="Print detailed loss table + save recon images "
+                             "for the first step of every epoch")
+    parser.add_argument("--log_every", default=50,   type=int,
+                        help="Print step-level log every N steps")
+    parser.add_argument("--num_workers", default=4,  type=int)
 
     # ── Loss weights ──────────────────────────────────────────────────────────
-    parser.add_argument("--lambda_rec",  default=1.0,  type=float,
-                        help="Weight for L1 reconstruction loss")
-    parser.add_argument("--lambda_ssim", default=1.0,  type=float,
-                        help="Weight for SSIM loss")
-    parser.add_argument("--lambda_kl",   default=1e-4, type=float,
-                        help="Weight for KL divergence loss")
-    parser.add_argument("--lambda_mmd",  default=1e-3, type=float,
-                        help="Weight for MMD loss")
+    parser.add_argument("--lambda_rec",  default=1.0,  type=float)
+    parser.add_argument("--lambda_ssim", default=1.0,  type=float)
+    parser.add_argument("--lambda_kl",   default=1e-4, type=float)
+    parser.add_argument("--lambda_mmd",  default=1e-3, type=float)
     parser.add_argument("--mmd_sigma",   default=1.0,  type=float,
                         help="Bandwidth σ_k for Gaussian MMD kernel")
 
     # ── Optimiser ─────────────────────────────────────────────────────────────
     parser.add_argument("--lr",           default=1e-4, type=float)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
-    parser.add_argument("--batch_size",   default=8,    type=int)
     parser.add_argument("--n_epochs",     default=100,  type=int)
 
-    # ── Checkpoints ───────────────────────────────────────────────────────────
+    # ── Checkpoint ────────────────────────────────────────────────────────────
     parser.add_argument("--save_dir",   default="./checkpoints/vae")
     parser.add_argument("--save_every", default=10,   type=int,
                         help="Save checkpoint every N epochs")
     parser.add_argument("--resume",     default=None, type=str,
-                        help="Path to checkpoint to resume from")
-
-    # ── Logging ───────────────────────────────────────────────────────────────
-    parser.add_argument("--log_every",  default=50, type=int,
-                        help="Print step log every N steps")
+                        help="Path to a .pt checkpoint to resume from")
 
     return parser.parse_args()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Training loop (one epoch)
+# Fake dataset (test_case=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch, log_every):
-    model.train()
+class _FakeDataset(Dataset):
+    """Returns random tensors so the full pipeline can be verified without data."""
+    def __init__(self, args, length: int = 200):
+        self.shape  = (args.in_channels, args.image_size, args.image_size)
+        self.length = length
 
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        # Mimic normalised image in [-1, 1]
+        x = torch.randn(*self.shape)
+        return x, "fake"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Builders
+# ──────────────────────────────────────────────────────────────────────────────
+
+def build_loader(args) -> DataLoader:
+    if args.test_case:
+        dataset = _FakeDataset(args)
+        print("[DataLoader] test_case=True → using random (fake) data")
+        nw = 0
+    else:
+        # Derive paths from root_path
+        args.data_path  = os.path.join(args.root_path, "images")
+        args.label_path = os.path.join(args.root_path, "Data_Entry_2017.csv")
+        dataset = NIH(args)
+        print(f"[DataLoader] NIH dataset  samples={len(dataset)}"
+              f"  path={args.root_path}")
+        nw = args.num_workers
+
+    return DataLoader(
+        dataset,
+        batch_size=args.bs,
+        shuffle=True,
+        num_workers=nw,
+        pin_memory=True,
+    )
+
+
+def build_model(args, device) -> AutoencoderKL:
+    model    = AutoencoderKL(args).to(device)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[Model] AutoencoderKL  trainable params={n_params:,}")
+    return model
+
+
+def build_criterion(args) -> VAELoss:
+    return VAELoss(
+        lambda_rec  = args.lambda_rec,
+        lambda_ssim = args.lambda_ssim,
+        lambda_kl   = args.lambda_kl,
+        lambda_mmd  = args.lambda_mmd,
+        mmd_sigma   = args.mmd_sigma,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Debug image saver
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _save_recon_images(x, x_hat, save_dir, epoch, step, n: int = 4):
+    """Save a side-by-side grid of originals vs reconstructions."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import torchvision.utils as vutils
+
+        os.makedirs(save_dir, exist_ok=True)
+        n = min(n, x.size(0))
+
+        # Denormalise from [-1, 1] to [0, 1]
+        to_grid = lambda t: vutils.make_grid(
+            (t[:n].detach().cpu().clamp(-1, 1) + 1) / 2,
+            nrow=n, padding=2,
+        )
+        grid_in  = to_grid(x).permute(1, 2, 0).squeeze()
+        grid_out = to_grid(x_hat).permute(1, 2, 0).squeeze()
+
+        fig, axes = plt.subplots(2, 1, figsize=(n * 3, 6))
+        axes[0].imshow(grid_in,  cmap="gray"); axes[0].set_title("Original");       axes[0].axis("off")
+        axes[1].imshow(grid_out, cmap="gray"); axes[1].set_title("Reconstruction"); axes[1].axis("off")
+
+        path = os.path.join(save_dir, f"recon_ep{epoch:04d}_step{step:05d}.png")
+        plt.tight_layout()
+        plt.savefig(path, dpi=100)
+        plt.close(fig)
+        print(f"  [Debug] Saved recon image → {path}")
+
+    except Exception as e:
+        print(f"  [Debug] Could not save images: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Training loop
+# ──────────────────────────────────────────────────────────────────────────────
+
+def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
+    model.train()
     running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_kl", "loss_mmd")}
+    debug_img_dir = os.path.join(args.save_dir, "debug_imgs")
 
     for step, (x, _) in enumerate(loader):
         x = x.to(device)
 
         # ── Forward ───────────────────────────────────────────────────────────
-        posterior = model.encode(x)           # DiagonalGaussianDistribution
-        z         = posterior.sample()        # reparameterisation trick
-        x_hat     = model.decode(z)           # reconstructed image
+        posterior = model.encode(x)      # → DiagonalGaussianDistribution
+        z         = posterior.sample()   # reparameterisation trick  [B, z_ch, h, w]
+        x_hat     = model.decode(z)      # reconstructed image       [B, C, H, W]
 
         # ── Loss ──────────────────────────────────────────────────────────────
-        loss, loss_dict = criterion(x, x_hat, posterior, z)
+        if args.debug and step == 0:
+            # First step of every epoch: detailed table + save images
+            loss, loss_dict = criterion.debug_forward(x, x_hat, posterior, z)
+            _save_recon_images(x, x_hat, debug_img_dir, epoch, step)
+        else:
+            loss, loss_dict = criterion(x, x_hat, posterior, z)
 
         # ── Backward ──────────────────────────────────────────────────────────
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # ── Accumulate for epoch average ──────────────────────────────────────
+        # ── Accumulate ────────────────────────────────────────────────────────
         for k in running:
             running[k] += loss_dict[k]
 
-        # ── Step-level log ────────────────────────────────────────────────────
-        if (step + 1) % log_every == 0:
+        # ── Step log ──────────────────────────────────────────────────────────
+        if (step + 1) % args.log_every == 0:
             print(
-                f"  [Epoch {epoch:4d} | Step {step+1:5d}/{len(loader)}]"
+                f"  [Ep {epoch:4d} | Step {step+1:5d}/{len(loader)}]"
                 f"  total={loss_dict['loss_total']:.4f}"
                 f"  rec={loss_dict['loss_rec']:.4f}"
                 f"  ssim={loss_dict['loss_ssim']:.4f}"
@@ -137,40 +259,14 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, log_ever
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main():
-    args = parse_args()
-
+    args   = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.save_dir, exist_ok=True)
 
-    # ── Dataset ───────────────────────────────────────────────────────────────
-    args.task = "train"
-    dataset = NIH(args)
-    loader  = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-
-    # ── Model ─────────────────────────────────────────────────────────────────
-    model = AutoencoderKL(args).to(device)
-
-    # ── Loss ──────────────────────────────────────────────────────────────────
-    criterion = VAELoss(
-        lambda_rec  = args.lambda_rec,
-        lambda_ssim = args.lambda_ssim,
-        lambda_kl   = args.lambda_kl,
-        lambda_mmd  = args.lambda_mmd,
-        mmd_sigma   = args.mmd_sigma,
-    )
-
-    # ── Optimiser ─────────────────────────────────────────────────────────────
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    loader    = build_loader(args)
+    model     = build_model(args, device)
+    criterion = build_criterion(args)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
@@ -179,28 +275,23 @@ def main():
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt["epoch"] + 1
-        print(f"[Resume] Loaded checkpoint from epoch {ckpt['epoch']}")
+        print(f"[Resume] Loaded epoch {ckpt['epoch']}")
 
-    print(
-        f"\n[Config]"
-        f"  device={device}"
-        f"  dataset={len(dataset)}"
-        f"  batch={args.batch_size}"
-        f"  epochs={args.n_epochs}"
-        f"  lr={args.lr}"
-        f"\n  λ_rec={args.lambda_rec}"
-        f"  λ_ssim={args.lambda_ssim}"
-        f"  λ_kl={args.lambda_kl}"
-        f"  λ_mmd={args.lambda_mmd}\n"
-    )
+    # ── Config summary ────────────────────────────────────────────────────────
+    W = 65
+    print(f"\n{'='*W}")
+    print(f"  device     : {device}")
+    print(f"  data       : {'FakeDataset' if args.test_case else 'NIH'}")
+    print(f"  batch size : {args.bs}   epochs : {args.n_epochs}   lr : {args.lr}")
+    print(f"  z_channels : {args.z_channels}   resolution : {args.resolution}")
+    print(f"  λ_rec={args.lambda_rec}  λ_ssim={args.lambda_ssim}"
+          f"  λ_kl={args.lambda_kl}  λ_mmd={args.lambda_mmd}")
+    print(f"  debug mode : {args.debug}   save_every : {args.save_every} ep")
+    print(f"{'='*W}\n")
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.n_epochs + 1):
-
-        avg = train_one_epoch(
-            model, loader, criterion, optimizer, device,
-            epoch=epoch, log_every=args.log_every,
-        )
+        avg = train_one_epoch(model, loader, criterion, optimizer, device, args, epoch)
 
         print(
             f"[Epoch {epoch:4d}/{args.n_epochs}]"
@@ -211,25 +302,21 @@ def main():
             f"  mmd={avg['loss_mmd']:.6f}"
         )
 
-        # ── Checkpoint ────────────────────────────────────────────────────────
+        # ── Periodic checkpoint ───────────────────────────────────────────────
         if epoch % args.save_every == 0:
-            ckpt_path = os.path.join(args.save_dir, f"vae_epoch{epoch:04d}.pt")
+            ckpt_path = os.path.join(args.save_dir, f"vae_ep{epoch:04d}.pt")
             torch.save({
                 "epoch"    : epoch,
                 "model"    : model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "args"     : vars(args),
             }, ckpt_path)
-            print(f"  -> Saved checkpoint: {ckpt_path}")
+            print(f"  -> Checkpoint saved: {ckpt_path}")
 
     # ── Final save ────────────────────────────────────────────────────────────
-    final_path = os.path.join(args.save_dir, "vae_final.pt")
-    torch.save({
-        "epoch": args.n_epochs,
-        "model": model.state_dict(),
-        "args" : vars(args),
-    }, final_path)
-    print(f"\nTraining complete. Final model: {final_path}")
+    final = os.path.join(args.save_dir, "vae_final.pt")
+    torch.save({"epoch": args.n_epochs, "model": model.state_dict(), "args": vars(args)}, final)
+    print(f"\nTraining complete. Final model: {final}")
 
 
 if __name__ == "__main__":
