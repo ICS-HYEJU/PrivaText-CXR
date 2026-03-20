@@ -244,14 +244,7 @@ class Downsample(nn.Module):
 
         if use_conv:
             stride = self.sample_kernel
-            self.op = conv_nd(
-                dims,
-                self.channels,
-                self.out_channels,
-                kernel_size=3,
-                stride=stride,
-                padding=padding
-            )
+            self.op = conv_nd(dims,self.channels, self.out_channels,kernel_size=3, stride=stride, padding=padding)
         else:
             assert self.channels == self.out_channels, \
                 "out_channels must equal channels when use_conv=False"

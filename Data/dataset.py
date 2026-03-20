@@ -45,6 +45,7 @@ class NIH(Dataset):
         self.label_path = os.path.join(args.root_path, split_folder, "descriptions", csv_name)
         self.data_path  = os.path.join(args.root_path, split_folder, "images")
 
+        print(f"[INFO] dataset    : NIH")
         print(f"[INFO] task       : {self.task}")
         print(f"[INFO] label_path : {self.label_path}")
         print(f"[INFO] data_path  : {self.data_path}")

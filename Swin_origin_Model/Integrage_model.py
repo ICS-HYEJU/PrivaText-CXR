@@ -887,7 +887,7 @@ if __name__ == "__main__":
 
                 h, hs, emb = encoder(x, timesteps)
 
-                print(f"\n[DEBUG] ? Encoder Forward Success!")
+                print(f"\n[DEBUG] Encoder Forward Success!")
                 print(f"[DEBUG] Bottleneck h.shape: {h.shape}, h.dtype: {h.dtype}")
                 print(f"[DEBUG] Number of skip connections: {len(hs)}")
                 print(f"[DEBUG] Skip connection shapes:")
@@ -905,7 +905,7 @@ if __name__ == "__main__":
 
                 output = model(x, timesteps)
 
-                print(f"\n[DEBUG] ? Integrated Swin_origin_Model Forward Success!")
+                print(f"\n[DEBUG] Integrated Swin_origin_Model Forward Success!")
                 print(f"[DEBUG] output.shape: {output.shape}, output.dtype: {output.dtype}")
                 print(f"[DEBUG] output range: [{output.min():.4f}, {output.max():.4f}]")
 
@@ -915,12 +915,12 @@ if __name__ == "__main__":
 
                 print("\n[Step 1] Encoder Forward...")
                 h, hs, emb = model.encoder(x, timesteps)
-                print(f"  ? Encoder output h.shape: {h.shape}")
-                print(f"  ? Skip connections: {len(hs)} layers")
+                print(f"   Encoder output h.shape: {h.shape}")
+                print(f"   Skip connections: {len(hs)} layers")
 
                 print("\n[Step 2] Middle Block Forward...")
                 h_middle = model.middle_block(h, emb)
-                print(f"  ? Middle block output h.shape: {h_middle.shape}")
+                print(f"  Middle block output h.shape: {h_middle.shape}")
 
                 print("\n[Step 3] Decoder Forward...")
                 output = model.decoder(h_middle, hs, emb, x.dtype)
