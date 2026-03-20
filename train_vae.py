@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from Model.autoencoder import AutoencoderKL
-from Loss.vae_loss import VAELoss
+from Loss.vae_loss import InfoVAELoss
 from Data.dataset import NIH
 
 
@@ -82,13 +82,19 @@ def parse_args():
                         help="Print step-level log every N steps")
     parser.add_argument("--num_workers", default=4,  type=int)
 
-    # ── Loss weights ──────────────────────────────────────────────────────────
-    parser.add_argument("--lambda_rec",  default=1.0,  type=float)
-    parser.add_argument("--lambda_ssim", default=1.0,  type=float)
-    parser.add_argument("--lambda_kl",   default=1e-4, type=float)
-    parser.add_argument("--lambda_mmd",  default=1e-3, type=float)
+    # ── Loss weights (InfoVAE) ────────────────────────────────────────────────
+    parser.add_argument("--lambda_rec",  default=1.0,  type=float,
+                        help="L1 reconstruction weight (λ_rec)")
+    parser.add_argument("--lambda_ssim", default=1.0,  type=float,
+                        help="SSIM perceptual loss weight (λ_ssim)")
+    parser.add_argument("--alpha",       default=0.0,  type=float,
+                        help="InfoVAE α: shifts weight from KL → MMD "
+                             "(0=standard VAE, 1=pure MMD-VAE)")
+    parser.add_argument("--lambda_info", default=1.0,  type=float,
+                        help="InfoVAE λ: overall divergence strength "
+                             "(effective KL=(1-α), MMD=(α+λ-1))")
     parser.add_argument("--mmd_sigma",   default=1.0,  type=float,
-                        help="Bandwidth σ_k for Gaussian MMD kernel")
+                        help="Bandwidth σ for Gaussian MMD kernel")
 
     # ── Optimiser ─────────────────────────────────────────────────────────────
     parser.add_argument("--lr",           default=1e-4, type=float)
@@ -158,12 +164,12 @@ def build_model(args, device) -> AutoencoderKL:
     return model
 
 
-def build_criterion(args) -> VAELoss:
-    return VAELoss(
+def build_criterion(args) -> InfoVAELoss:
+    return InfoVAELoss(
         lambda_rec  = args.lambda_rec,
         lambda_ssim = args.lambda_ssim,
-        lambda_kl   = args.lambda_kl,
-        lambda_mmd  = args.lambda_mmd,
+        alpha       = args.alpha,
+        lambda_info = args.lambda_info,
         mmd_sigma   = args.mmd_sigma,
     )
 
@@ -287,7 +293,8 @@ def main():
     print(f"  batch size : {args.bs}   epochs : {args.n_epochs}   lr : {args.lr}")
     print(f"  z_channels : {args.z_channels}   resolution : {args.resolution}")
     print(f"  λ_rec={args.lambda_rec}  λ_ssim={args.lambda_ssim}"
-          f"  λ_kl={args.lambda_kl}  λ_mmd={args.lambda_mmd}")
+          f"  α={args.alpha}  λ_info={args.lambda_info}"
+          f"  → KL_eff={(1-args.alpha):.4f}  MMD_eff={(args.alpha+args.lambda_info-1):.4f}")
     print(f"  debug mode : {args.debug}   save_every : {args.save_every} ep")
     print(f"{'='*W}\n")
 
