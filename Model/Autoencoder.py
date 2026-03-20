@@ -12,10 +12,10 @@ from Data.dataset import NIH
 from util_network import *
 
 # ============================================================================
-# AutoencoderKL
+# VAE
 # ============================================================================
 
-class AutoencoderKL(nn.Module):
+class VAE(nn.Module):
     """
     VAE combining Encoder and Decoder.
 
@@ -129,7 +129,7 @@ if __name__ == "__main__":
 
     if args.test_case:
         B = 2
-        model = AutoencoderKL(args)
+        model = VAE(args)
         dummy = torch.zeros(B, args.in_channels, args.resolution, args.resolution)
 
         print(
@@ -163,7 +163,7 @@ if __name__ == "__main__":
                 image, label = data[0], data[1]
                 print(f"image shape : {image.shape}")
                 # ==============================================
-                model= AutoencoderKL(args)
+                model= VAE(args)
                 posterior = model.encode(image)
                 z = posterior.sample()
                 kl = posterior.kl()
