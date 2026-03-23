@@ -1,13 +1,10 @@
 """
 VAELoss
 =======
-L_total = ��_rec �� ||x - x?||��
-        + ��_ssim �� (1 - SSIM(x, x?))          # via torchmetrics functional
-        + ��_kl   �� D_KL(q(z|x) || N(0,I))
-        + ��_mmd  �� MMD(q(z), p(z))             # Gaussian kernel (InfoVAE)
-
-Requires:
-    pip install torchmetrics
+L_total = λ_rec * ||x - x'||��
+        + λ_ssim * (1 - SSIM(x, x'))          # via torchmetrics functional
+        + λ_kl   * D_KL(q(z|x) || N(0,I))
+        + λ_mmd  * MMD(q(z), p(z))             # Gaussian kernel (InfoVAE)
 """
 
 import torch
@@ -16,9 +13,9 @@ import torch.nn.functional as F
 
 # torchmetrics functional API ? stateless, no accumulation side-effects
 try:
-    from torchmetrics.functional.image import structural_similarity_index_measure as _ssim_fn
+    from torchmetrics.functional.image import structural_similarity_index_measure as ssim_fn
 except ImportError:  # older torchmetrics
-    from torchmetrics.functional import structural_similarity_index_measure as _ssim_fn
+    from torchmetrics.functional import structural_similarity_index_measure as ssim_fn
 
 
 class VAELoss(nn.Module):
@@ -33,61 +30,59 @@ class VAELoss(nn.Module):
     data_range   : value range of images (2.0 for [-1, 1] normalised input)
     """
 
-    def __init__(
-            self,
-            lambda_rec: float = 1.0,
-            lambda_ssim: float = 1.0,
-            lambda_kl: float = 1e-4,
-            lambda_mmd: float = 1e-3,
-            mmd_sigma: float = 1.0,
-            data_range: float = 2.0,
-    ):
+    def __init__(self, args):
         super().__init__()
-        self.lambda_rec = lambda_rec
-        self.lambda_ssim = lambda_ssim
-        self.lambda_kl = lambda_kl
-        self.lambda_mmd = lambda_mmd
-        self.mmd_sigma = mmd_sigma
-        self.data_range = data_range
+        self.args = args
+        self.lambda_rec=args.lambda_rec,
+        self.lambda_ssim=args.lambda_ssim,
+        self.lambda_kl=args.lambda_kl,
+        self.lambda_mmd=args.lambda_mmd,
+        self.mmd_sigma=args.mmd_sigma,
+        self.data_range = args.data_range
 
-    # ���� 1. Reconstruction (L1) ������������������������������������������������������������������������������������������������
+    # 1. Reconstruction (L1)
     def reconstruction_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
-        """L_rec = ||x - x?||��"""
-        return F.l1_loss(x_hat, x, reduction="mean")
+        """L_rec = ||x - x'||"""
+        return F.l1_loss(x_hat, x, reduction='mean')
 
-    # ���� 2. SSIM Loss ��������������������������������������������������������������������������������������������������������������������
+    # 2. SSIM Loss
     def ssim_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
         """
-        L_ssim = 1 - SSIM(x, x?)
+        L_ssim = 1 - SSIM(x, x')
 
-        Uses torchmetrics functional API (stateless ? safe to call per batch).
+        Uses torchmetrics functional.
         data_range must match image normalisation; default 2.0 for [-1, 1].
         """
-        ssim_val = _ssim_fn(x_hat, x, data_range=self.data_range)
+        ssim_val = ssim_fn(x_hat, x, data_range=self.data_range)
         return 1.0 - ssim_val
 
-    # ���� 3. KL Divergence ������������������������������������������������������������������������������������������������������������
+    # 3. KL Divergence
     def kl_loss(self, posterior) -> torch.Tensor:
         """
-        L_kl = 0.5 �� ��_i ( ��_i�� + ��_i�� - log(��_i��) - 1 )
         DiagonalGaussianDistribution.kl() returns shape [B]; we average.
         """
         return posterior.kl().mean()
 
-    # ���� 4. MMD Loss (InfoVAE) ��������������������������������������������������������������������������������������������������
+    # 4. MMD Loss (InfoVAE)
     def mmd_loss(self, z_q: torch.Tensor, z_p: torch.Tensor = None) -> torch.Tensor:
         """
-        MMD��(q(z), p(z)) = E[k(z,z')] + E[k(z?,z?')] - 2��E[k(z,z?)]
-        k(z, z') = exp( -||z - z'||�� / (2����) )
+        MMD: Maximum Mean Discrepancy, (x-y)**2 = x**2 + y**2 - 2xy
+        MMD(q(z), p(z)) = E[k(z,z')] + E[k(z',z')] - 2*E[k(z,z')]
+        k(z, z') = exp( -||z - z'||^2 / (2* sigma^2) )
 
         z_p defaults to N(0, I) samples of the same shape as z_q.
         """
+        # 1) making p(z) ~ N(0,I), shape == z_q == [B, 1, 16, 16]
         if z_p is None:
             z_p = torch.randn_like(z_q)
-
-        z_q = z_q.reshape(z_q.size(0), -1)  # [B, D]
+        # 2) latent -> vector
+        z_q = z_q.reshape(z_q.size(0), -1)  # [B, D] =[B, C*W*H] = [B, 256]
         z_p = z_p.reshape(z_p.size(0), -1)  # [B, D]
 
+        # 3) Compute kernel matrices for MMD
+        # 3-1) k_qq: similarity between samples within q(z), latent distribution
+        # 3-2) k_pp: similarity between samples within p(z), prior distribution(N(0,I))
+        # 3-3) k_qp: cross-similarity between q(z) samples and p(z) samples
         k_qq = self._gaussian_kernel(z_q, z_q)
         k_pp = self._gaussian_kernel(z_p, z_p)
         k_qp = self._gaussian_kernel(z_q, z_p)
@@ -95,13 +90,13 @@ class VAELoss(nn.Module):
         return k_qq.mean() + k_pp.mean() - 2.0 * k_qp.mean()
 
     def _gaussian_kernel(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """k(x, y) = exp(-||x-y||�� / 2����),  x:[N,D] y:[M,D] �� [N,M]"""
+        """k(x, y) = exp(-||x-y||/ 2*sigma^2),  x:[N,D] y:[M,D] -> [N,M]"""
         x_sq = (x ** 2).sum(1, keepdim=True)  # [N, 1]
         y_sq = (y ** 2).sum(1, keepdim=True).t()  # [1, M]
         dist2 = x_sq + y_sq - 2.0 * (x @ y.t())  # [N, M]
         return torch.exp(-dist2 / (2.0 * self.mmd_sigma ** 2))
 
-    # ���� Shared computation ��������������������������������������������������������������������������������������������������������
+    # Shared computation
     def _compute(self, x, x_hat, posterior, z_q):
         l_rec = self.reconstruction_loss(x, x_hat)
         l_ssim = self.ssim_loss(x, x_hat)
@@ -113,7 +108,7 @@ class VAELoss(nn.Module):
                  self.lambda_mmd * l_mmd)
         return total, l_rec, l_ssim, l_kl, l_mmd
 
-    # ���� forward ������������������������������������������������������������������������������������������������������������������������������
+    # forward
     def forward(self, x, x_hat, posterior, z_q):
         """
         Returns
@@ -130,7 +125,7 @@ class VAELoss(nn.Module):
             "loss_mmd": l_mmd.item(),
         }
 
-    # ���� debug_forward ������������������������������������������������������������������������������������������������������������������
+    # debug_forward
     def debug_forward(self, x, x_hat, posterior, z_q):
         """
         Same as forward but prints a detailed breakdown of every loss term
