@@ -36,15 +36,22 @@ def parse_args():
 
     # Device
     parser.add_argument("--device_id", type=int, default=1)
+    # Date
+    from datetime import datetime
+    parser.add_argument("--run_date",default=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 
+    # ------------------------------------------------------------------------------------------
     # Data
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--root_path", default="/storage/hjchoi/archive/DATA")
     parser.add_argument("--task", default="train", choices=["train", "val", "test"])
     parser.add_argument("--bs", default=2, type=int, help="batch size")
     parser.add_argument("--image_size", default=256, type=int, help="resize image H,W")
     parser.add_argument("--image_show", default=True, type=bool)
 
+    # ------------------------------------------------------------------------------------------
     # Encoder
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--in_channels", default=1, type=int, help='Number of input img channels, NIH=gray-scale')
     parser.add_argument("--ch", default=128, type=int, help='Base channel')
     parser.add_argument("--ch_mult", default=[1, 2, 4, 4, 4], help='Channel multipliers per each level')
@@ -60,29 +67,40 @@ def parse_args():
     parser.add_argument("--dims", default=2, type=int, help="Conv dim; N of ConvNd", choices=[1, 2, 3])
     parser.add_argument('--test_case', default=False, type=bool, help='True: not load real data, using rand values')
 
+    # ------------------------------------------------------------------------------------------
     # Decoder
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--out_channels", default=1, type=int, help='Number of output channels')
 
-    # Loss
+    # ------------------------------------------------------------------------------------------
+    # Loss(VAELoss)
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--lambda_rec", default=1.0, type=float)
     parser.add_argument("--lambda_ssim", default=1.0, type=float)
     parser.add_argument("--lambda_kl", default=1e-4, type=float)
     parser.add_argument("--lambda_mmd", default=1e-3, type=float)
     parser.add_argument("--mmd_sigma", default=1.0, type=float, help="Bandwidth σ_k for Gaussian MMD kernel")
+    parser.add_argument("--data_range",default=2.0, help='value range of images (2.0 for [-1, 1] normalised input)')
 
+    # ------------------------------------------------------------------------------------------
     # Debug
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--verbose", default=False, type=bool, help="Print block shapes at each encoder/decoder level")
     parser.add_argument("--debug", default=True, type=bool, help="Print detailed loss table + save recon images "
                              "for the first step of every epoch")
-    parser.add_argument("--log_every", default=50, type=int, help="Print step-level log every N steps")
+    parser.add_argument("--log_every", default=1000, type=int, help="Print step-level log every N steps")
     parser.add_argument("--num_workers", default=0, type=int)
 
+    # ------------------------------------------------------------------------------------------
     # Optimizer
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--lr", default=1e-4, type=float)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
     parser.add_argument("--n_epochs", default=100, type=int)
 
+    # ------------------------------------------------------------------------------------------
     # Checkpoint
+    # ------------------------------------------------------------------------------------------
     parser.add_argument("--save_dir", default="./checkpoints/vae")
     parser.add_argument("--save_every", default=10, type=int,
                         help="Save checkpoint every N epochs")
@@ -147,13 +165,7 @@ def build_model(args, device) -> VAE:
 
 
 def build_criterion(args) -> VAELoss:
-    return VAELoss(
-        lambda_rec=args.lambda_rec,
-        lambda_ssim=args.lambda_ssim,
-        lambda_kl=args.lambda_kl,
-        lambda_mmd=args.lambda_mmd,
-        mmd_sigma=args.mmd_sigma,
-    )
+    return VAELoss(args)
 
 
 # ==============================================================================================================
@@ -204,13 +216,13 @@ def _save_recon_images(x, x_hat, save_dir, epoch, step, n: int = 4):
 def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
     model.train()
     running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_kl", "loss_mmd")}
-    debug_img_dir = os.path.join(args.save_dir, "debug_imgs")
+    debug_img_dir = os.path.join(args.save_dir, f"debug_imgs ({args.run_date})")
 
     for step, (x, _) in enumerate(loader):
         x = x.to(device)
 
         # Forward
-        posterior = model.encode(x)  # �� DiagonalGaussianDistribution
+        posterior = model.encode(x)  #DiagonalGaussianDistribution
         z = posterior.sample()  # reparameterisation trick  [B, z_ch, h, w]
         x_hat = model.decode(z)  # reconstructed image       [B, C, H, W]
 
