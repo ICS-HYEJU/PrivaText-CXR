@@ -102,6 +102,8 @@ def parse_args():
     parser.add_argument("--lr",           default=1e-4, type=float)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
     parser.add_argument("--n_epochs",     default=100,  type=int)
+    parser.add_argument("--grad_clip",    default=1.0,  type=float,
+                        help="Max gradient norm for clipping (0 = disabled)")
 
     # ── Checkpoint ────────────────────────────────────────────────────────────
     parser.add_argument("--save_dir",   default="./checkpoints/vae")
@@ -243,6 +245,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
         # ── Backward ──────────────────────────────────────────────────────────
         optimizer.zero_grad()
         loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
         # ── Accumulate ────────────────────────────────────────────────────────
