@@ -280,7 +280,7 @@ def main():
 
     loader    = build_loader(args)
     model     = build_model(args, device)
-    criterion = build_criterion(args)
+    criterion = build_criterion(args).to(device)   # LPIPS has VGG buffers → must be on device
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # ── Resume ────────────────────────────────────────────────────────────────
