@@ -44,7 +44,7 @@ class VAELoss(nn.Module):
         # Load LPIPS only when needed — avoids unnecessary checkpoint download
         if self.lambda_perc > 0.0:
             from Loss.lpips import LPIPS
-            self.lpips = LPIPS().eval()
+            self.lpips = LPIPS().eval().to(device)
         else:
             self.lpips = None
 
