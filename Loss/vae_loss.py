@@ -38,7 +38,7 @@ class VAELoss(nn.Module):
         self.lambda_kl   = args.lambda_kl
         self.lambda_mmd  = args.lambda_mmd
         self.lambda_perc = args.lambda_perc
-        self.mmd_sigma   = args.mmd_sigma
+        self.mmd_sigmas  = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]   # multi-kernel bandwidths
         self.data_range  = args.data_range
 
         # Load LPIPS only when needed — avoids unnecessary checkpoint download
@@ -90,28 +90,47 @@ class VAELoss(nn.Module):
     # ── 5. MMD Loss (InfoVAE) ─────────────────────────────────────────────────
     def mmd_loss(self, z_q: torch.Tensor, z_p: torch.Tensor = None) -> torch.Tensor:
         """
-        MMD(q(z), p(z)) = E[k(z,z')] + E[k(z̃,z̃')] - 2·E[k(z,z̃)]
-        k(z, z') = exp( -||z - z'||² / (2σ²) )
-        z_p defaults to N(0, I) samples of the same shape as z_q.
+        Multi-kernel MMD(q(z), p(z)) with spatial pooling and latent normalization.
+
+        Improvements over naive flatten + single-sigma:
+          1) Spatial pooling: [B,C,H,W] → [B,C] via mean — reduces dimensionality
+             so pairwise distances stay in a sensible range.
+          2) Latent standardization before kernel eval — prevents kernel saturation
+             caused by large-norm latents (norm >> sigma).
+          3) Multi-kernel: sum over several bandwidths — robust to scale mismatch
+             and avoids the all-zero cross-kernel problem.
         """
         if z_p is None:
             z_p = torch.randn_like(z_q)
 
-        z_q = z_q.reshape(z_q.size(0), -1)   # [B, D] = [B, C*H*W]
-        z_p = z_p.reshape(z_p.size(0), -1)   # [B, D]
+        # 1) Spatial pooling: [B, C, H, W] → [B, C]  (handles already-flat tensors too)
+        if z_q.dim() == 4:
+            z_q = z_q.mean(dim=(2, 3))
+            z_p = z_p.mean(dim=(2, 3))
+        else:
+            z_q = z_q.reshape(z_q.size(0), -1)
+            z_p = z_p.reshape(z_p.size(0), -1)
 
-        k_qq = self._gaussian_kernel(z_q, z_q)   # q(z) self-similarity
-        k_pp = self._gaussian_kernel(z_p, z_p)   # p(z) self-similarity
-        k_qp = self._gaussian_kernel(z_q, z_p)   # cross-similarity
+        # 2) Standardize z_q so that latents are roughly unit-scale
+        z_q = (z_q - z_q.mean(dim=0, keepdim=True)) / (z_q.std(dim=0, keepdim=True) + 1e-6)
 
-        return k_qq.mean() + k_pp.mean() - 2.0 * k_qp.mean()
+        # 3) Multi-kernel MMD
+        mmd = torch.tensor(0.0, device=z_q.device)
+        for sigma in self.mmd_sigmas:
+            k_qq = self._gaussian_kernel(z_q, z_q, sigma)
+            k_pp = self._gaussian_kernel(z_p, z_p, sigma)
+            k_qp = self._gaussian_kernel(z_q, z_p, sigma)
+            mmd = mmd + k_qq.mean() + k_pp.mean() - 2.0 * k_qp.mean()
 
-    def _gaussian_kernel(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return mmd / len(self.mmd_sigmas)
+
+    def _gaussian_kernel(self, x: torch.Tensor, y: torch.Tensor, sigma: float) -> torch.Tensor:
         """k(x, y) = exp(-||x-y||² / 2σ²),  x:[N,D] y:[M,D] → [N,M]"""
         x_sq  = (x ** 2).sum(1, keepdim=True)          # [N, 1]
         y_sq  = (y ** 2).sum(1, keepdim=True).t()      # [1, M]
         dist2 = x_sq + y_sq - 2.0 * (x @ y.t())       # [N, M]
-        return torch.exp(-dist2 / (2.0 * self.mmd_sigma ** 2))
+        dist2 = dist2.clamp(min=0.0)                    # numerical safety
+        return torch.exp(-dist2 / (2.0 * sigma ** 2))
 
     # ── 6. Shared computation ─────────────────────────────────────────────────
     def _compute(self, x, x_hat, posterior, z_q):
