@@ -44,7 +44,7 @@ class VAELoss(nn.Module):
         # Otherwise fall back to single kernel [mmd_sigma].
         _base = args.mmd_sigma
         if args.multi_mmd_sigmas:
-            self.mmd_sigmas = [r * _base for r in args.multi_mmd_sigmas]
+            self.mmd_sigmas = [float(r) * _base for r in args.multi_mmd_sigmas]
         else:
             self.mmd_sigmas = [_base]
         self.data_range  = args.data_range
