@@ -248,6 +248,9 @@ class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False):
         self.parameters = parameters
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        # nan_to_num first: torch.clamp does NOT remove NaN (NaN passes through unchanged).
+        # Replace NaN → 0.0, +inf → 20.0, -inf → -30.0 before clamping.
+        self.logvar = torch.nan_to_num(self.logvar, nan=0.0, posinf=20.0, neginf=-30.0)
         self.logvar     = torch.clamp(self.logvar, -30.0, 20.0)
         self.deterministic = deterministic
         self.std = torch.exp(0.5 * self.logvar)
