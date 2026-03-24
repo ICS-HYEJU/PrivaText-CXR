@@ -87,6 +87,8 @@ def parse_args():
                         help="L1 reconstruction weight (λ_rec)")
     parser.add_argument("--lambda_ssim", default=1.0,  type=float,
                         help="SSIM perceptual loss weight (λ_ssim)")
+    parser.add_argument("--lambda_perc", default=0.0,  type=float,
+                        help="VGG perceptual loss weight (λ_perc); 0.0 = disabled")
     parser.add_argument("--alpha",       default=0.0,  type=float,
                         help="InfoVAE α: shifts weight from KL → MMD "
                              "(0=standard VAE, 1=pure MMD-VAE)")
@@ -168,6 +170,7 @@ def build_criterion(args) -> InfoVAELoss:
     return InfoVAELoss(
         lambda_rec  = args.lambda_rec,
         lambda_ssim = args.lambda_ssim,
+        lambda_perc = args.lambda_perc,
         alpha       = args.alpha,
         lambda_info = args.lambda_info,
         mmd_sigma   = args.mmd_sigma,
@@ -217,7 +220,7 @@ def _save_recon_images(x, x_hat, save_dir, epoch, step, n: int = 4):
 
 def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
     model.train()
-    running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_kl", "loss_mmd")}
+    running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_perc", "loss_kl", "loss_mmd")}
     # Use the run-level timestamp so all epochs write into the same folder.
     debug_img_dir = os.path.join(args.save_dir, f"debug_imgs_{args.run_timestamp}")
 
@@ -253,6 +256,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
                 f"  total={loss_dict['loss_total']:.4f}"
                 f"  rec={loss_dict['loss_rec']:.4f}"
                 f"  ssim={loss_dict['loss_ssim']:.4f}"
+                f"  perc={loss_dict['loss_perc']:.4f}"
                 f"  kl={loss_dict['loss_kl']:.6f}"
                 f"  mmd={loss_dict['loss_mmd']:.6f}"
             )
@@ -297,7 +301,7 @@ def main():
     print(f"  data       : {'FakeDataset' if args.test_case else 'NIH'}")
     print(f"  batch size : {args.bs}   epochs : {args.n_epochs}   lr : {args.lr}")
     print(f"  z_channels : {args.z_channels}   resolution : {args.resolution}")
-    print(f"  λ_rec={args.lambda_rec}  λ_ssim={args.lambda_ssim}"
+    print(f"  λ_rec={args.lambda_rec}  λ_ssim={args.lambda_ssim}  λ_perc={args.lambda_perc}"
           f"  α={args.alpha}  λ_info={args.lambda_info}"
           f"  → KL_eff={(1-args.alpha):.4f}  MMD_eff={(args.alpha+args.lambda_info-1):.4f}")
     print(f"  debug mode : {args.debug}   save_every : {args.save_every} ep")
@@ -312,6 +316,7 @@ def main():
             f"  total={avg['loss_total']:.4f}"
             f"  rec={avg['loss_rec']:.4f}"
             f"  ssim={avg['loss_ssim']:.4f}"
+            f"  perc={avg['loss_perc']:.4f}"
             f"  kl={avg['loss_kl']:.6f}"
             f"  mmd={avg['loss_mmd']:.6f}"
         )
