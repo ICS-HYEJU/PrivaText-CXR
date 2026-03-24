@@ -38,7 +38,11 @@ class VAELoss(nn.Module):
         self.lambda_kl   = args.lambda_kl
         self.lambda_mmd  = args.lambda_mmd
         self.lambda_perc = args.lambda_perc
-        self.mmd_sigmas  = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]   # multi-kernel bandwidths
+        # Multi-kernel bandwidths: mmd_sigma acts as the base scale.
+        # Relative ratios [0.1, 0.5, 1.0, 2.0, 5.0, 10.0] are multiplied by mmd_sigma
+        # so the kernel spread adapts to the configured latent scale.
+        _base = args.mmd_sigma
+        self.mmd_sigmas  = [r * _base for r in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]]
         self.data_range  = args.data_range
 
         # Load LPIPS only when needed — avoids unnecessary checkpoint download
