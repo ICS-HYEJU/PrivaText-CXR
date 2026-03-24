@@ -30,15 +30,20 @@ class VAELoss(nn.Module):
     data_range   : value range of images (2.0 for [-1, 1] normalised input)
     """
 
-    def __init__(self, args):
+    def __init__(self, args, device):
         super().__init__()
         self.args = args
-        self.lambda_rec=args.lambda_rec,
-        self.lambda_ssim=args.lambda_ssim,
-        self.lambda_kl=args.lambda_kl,
-        self.lambda_mmd=args.lambda_mmd,
-        self.mmd_sigma=args.mmd_sigma,
+        self.device = device
+        self.lambda_rec=args.lambda_rec
+        self.lambda_ssim=args.lambda_ssim
+        self.lambda_kl=args.lambda_kl
+        self.lambda_mmd=args.lambda_mmd
+        self.mmd_sigma=args.mmd_sigma
         self.data_range = args.data_range
+        self.lambda_LPIPS = args.lambda_LPIPS
+        if self.lambda_LPIPS >0:
+            from Loss.lpips import LPIPS
+            self.perceptual_loss = LPIPS().eval().to(self.device)
 
     # 1. Reconstruction (L1)
     def reconstruction_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
@@ -102,11 +107,14 @@ class VAELoss(nn.Module):
         l_ssim = self.ssim_loss(x, x_hat)
         l_kl = self.kl_loss(posterior)
         l_mmd = self.mmd_loss(z_q)
+        p_loss = self.perceptual_loss(x.contiguous(), x_hat.contiguous())
         total = (self.lambda_rec * l_rec +
                  self.lambda_ssim * l_ssim +
                  self.lambda_kl * l_kl +
-                 self.lambda_mmd * l_mmd)
-        return total, l_rec, l_ssim, l_kl, l_mmd
+                 self.lambda_mmd * l_mmd +
+                 self.lambda_LPIPS * p_loss
+                 )
+        return total, l_rec, l_ssim, l_kl, l_mmd, p_loss
 
     # forward
     def forward(self, x, x_hat, posterior, z_q):
@@ -116,13 +124,14 @@ class VAELoss(nn.Module):
         total     : scalar loss tensor (differentiable)
         loss_dict : dict of float values for logging
         """
-        total, l_rec, l_ssim, l_kl, l_mmd = self._compute(x, x_hat, posterior, z_q)
+        total, l_rec, l_ssim, l_kl, l_mmd, p_loss = self._compute(x, x_hat, posterior, z_q)
         return total, {
             "loss_total": total.item(),
             "loss_rec": l_rec.item(),
             "loss_ssim": l_ssim.item(),
             "loss_kl": l_kl.item(),
             "loss_mmd": l_mmd.item(),
+            "loss_lpips": p_loss.item(),
         }
 
     # debug_forward
@@ -132,7 +141,7 @@ class VAELoss(nn.Module):
         including tensor shapes, value ranges, and weighted contributions.
         Useful for verifying that each component is in a reasonable range.
         """
-        total, l_rec, l_ssim, l_kl, l_mmd = self._compute(x, x_hat, posterior, z_q)
+        total, l_rec, l_ssim, l_kl, l_mmd,p_loss = self._compute(x, x_hat, posterior, z_q)
 
         W = 65
         print("\n" + "=" * W)
@@ -144,12 +153,12 @@ class VAELoss(nn.Module):
               f"  range=[{x_hat.min():.3f}, {x_hat.max():.3f}]")
         print(f"  {'z_q (latent)':<18}: shape={tuple(z_q.shape)}"
               f"  mean={z_q.mean():.4f}  std={z_q.std():.4f}")
-        print(f"  {'posterior ��':<18}: shape={tuple(posterior.mean.shape)}"
-              f"  mean={posterior.mean.mean():.4f}")
-        print(f"  {'posterior ��':<18}: shape={tuple(posterior.std.shape)}"
-              f"  mean={posterior.std.mean():.4f}")
+        print(f"  {'posterior mean':<18}: shape={tuple(posterior.mean.shape)}"
+              f"  mean.mean={posterior.mean.mean():.4f}")
+        print(f"  {'posterior std':<18}: shape={tuple(posterior.std.shape)}"
+              f"  std.mean={posterior.std.mean():.4f}")
         print("-" * W)
-        print(f"  {'Term':<10}  {'��':>8}  {'raw value':>12}  {'weighted':>12}")
+        print(f"  {'Term':<10}  {'args':>8}  {'raw value':>12}  {'weighted':>12}")
         print(f"  {'-' * 10}  {'-' * 8}  {'-' * 12}  {'-' * 12}")
         print(f"  {'L_rec':<10}  {self.lambda_rec:>8.4f}  {l_rec.item():>12.6f}"
               f"  {(self.lambda_rec * l_rec).item():>12.6f}")
