@@ -78,10 +78,10 @@ def parse_args():
     parser.add_argument("--lambda_rec", default=1.0, type=float)
     parser.add_argument("--lambda_ssim", default=1.0, type=float)
     parser.add_argument("--lambda_kl", default=1e-4, type=float)
-    parser.add_argument("--lambda_mmd", default=1e-3, type=float)
+    parser.add_argument("--lambda_mmd", default=1e-1, type=float)
     parser.add_argument("--mmd_sigma", default=1.0, type=float, help="Bandwidth σ_k for Gaussian MMD kernel")
     parser.add_argument("--data_range",default=2.0, help='value range of images (2.0 for [-1, 1] normalised input)')
-
+    parser.add_argument("--lambda_LPIPS",default = 1.0)
     # ------------------------------------------------------------------------------------------
     # Debug
     # ------------------------------------------------------------------------------------------
@@ -164,8 +164,8 @@ def build_model(args, device) -> VAE:
     return model
 
 
-def build_criterion(args) -> VAELoss:
-    return VAELoss(args)
+def build_criterion(args,device) -> VAELoss:
+    return VAELoss(args,device)
 
 
 # ==============================================================================================================
@@ -273,7 +273,7 @@ def main():
     # Modeling
     loader = build_loader(args)
     model = build_model(args, device)
-    criterion = build_criterion(args)
+    criterion = build_criterion(args,device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # Resume
