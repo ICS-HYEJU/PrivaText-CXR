@@ -223,8 +223,8 @@ def _save_recon_images(x, x_hat, save_dir, epoch, step, n: int = 4):
 def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
     model.train()
     running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_perc", "loss_kl", "loss_mmd")}
-    # Use the run-level timestamp so all epochs write into the same folder.
-    debug_img_dir = os.path.join(args.save_dir, f"debug_imgs_{args.run_timestamp}")
+    # save_dir is already run-specific (includes timestamp), so a fixed subdir is enough.
+    debug_img_dir = os.path.join(args.save_dir, "debug_imgs")
 
     for step, (x, _) in enumerate(loader):
         x = x.to(device)
@@ -276,9 +276,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
 def main():
     from datetime import datetime
     args   = parse_args()
-    # Compute a single timestamp for the entire run so all debug images
-    # from one training session share the same directory.
+    # Each run gets its own timestamped subdirectory so experiments never
+    # overwrite each other's checkpoints or debug images.
     args.run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    args.save_dir      = os.path.join(args.save_dir, args.run_timestamp)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.save_dir, exist_ok=True)
 
