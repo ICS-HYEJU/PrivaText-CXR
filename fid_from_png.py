@@ -7,6 +7,7 @@ fid_from_png.py  –  FID from saved debug grid PNG files
   - 하단 subplot: Reconstruction
 
 원본 이미지 파일명을 몰라도 PNG에서 직접 FID를 계산합니다.
+torchmetrics / torch-fidelity 의존성 없이 torchvision + scipy만으로 동작합니다.
 
 Usage:
     python fid_from_png.py \
@@ -25,16 +26,19 @@ Usage:
         --debug_split
 
 Dependencies:
-    pip install torchmetrics[image]
+    pip install scipy          (numpy / torch / torchvision은 이미 설치돼 있어야 함)
 """
 
 import argparse
 import glob
 import os
+import warnings
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
+from torchvision import models
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -171,27 +175,106 @@ def extract_pairs_from_png(png_path: str, n_images: int = 4):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tensor conversion
+# Inception v3 feature extractor
+# ──────────────────────────────────────────────────────────────────────────────
+
+def build_inception(device: torch.device) -> torch.nn.Module:
+    """
+    Load Inception v3 pretrained, strip the final FC layer → 2048-dim pool features.
+
+    torchvision >= 0.13: uses Inception_V3_Weights.DEFAULT
+    torchvision <  0.13: falls back to pretrained=True
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            model = models.inception_v3(
+                weights=models.Inception_V3_Weights.DEFAULT,
+                transform_input=False,
+            )
+        except AttributeError:
+            model = models.inception_v3(pretrained=True, transform_input=False)
+
+    model.fc          = torch.nn.Identity()   # 2048-dim pool → output
+    model.aux_logits  = False                 # disable aux during eval
+    model.eval()
+    return model.to(device)
+
+
+@torch.no_grad()
+def extract_features(imgs: list, inception: torch.nn.Module,
+                     device: torch.device, batch_size: int = 32) -> np.ndarray:
+    """
+    Run Inception v3 on a list of (H, W, 3) uint8 arrays and return 2048-dim features.
+
+    Args:
+        imgs:       list of (H, W, 3) uint8 numpy arrays (any size; will be resized to 299)
+        inception:  feature extractor from build_inception()
+        device:     torch device
+        batch_size: images processed per forward pass
+
+    Returns:
+        (N, 2048) float32 numpy array
+    """
+    feats = []
+    for start in range(0, len(imgs), batch_size):
+        batch_np = imgs[start:start + batch_size]
+        tensors  = []
+        for arr in batch_np:
+            pil = Image.fromarray(arr.astype(np.uint8), mode='RGB').resize((299, 299), Image.BILINEAR)
+            t   = torch.from_numpy(np.array(pil)).permute(2, 0, 1).float() / 255.0  # [0, 1]
+            tensors.append(t)
+        batch = torch.stack(tensors).to(device)                     # (B, 3, 299, 299)
+        out   = inception(batch)                                     # (B, 2048)
+        feats.append(out.cpu().numpy())
+    return np.concatenate(feats, axis=0)                             # (N, 2048)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fréchet distance
+# ──────────────────────────────────────────────────────────────────────────────
+
+def frechet_distance(feats_real: np.ndarray, feats_fake: np.ndarray) -> float:
+    """
+    Compute FID between two sets of Inception features.
+
+        FID = ||μ_r - μ_f||² + Tr(Σ_r + Σ_f - 2·sqrt(Σ_r·Σ_f))
+
+    Args:
+        feats_real: (N, 2048) features for real images
+        feats_fake: (N, 2048) features for reconstructed images
+
+    Returns:
+        FID score (float)
+    """
+    from scipy.linalg import sqrtm
+
+    mu_r, mu_f = feats_real.mean(0), feats_fake.mean(0)
+    sig_r = np.cov(feats_real, rowvar=False)
+    sig_f = np.cov(feats_fake, rowvar=False)
+
+    diff    = mu_r - mu_f
+    covmean = sqrtm(sig_r @ sig_f)
+
+    # Numerical stability: sqrtm can return tiny imaginary parts
+    if np.iscomplexobj(covmean):
+        if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
+            print("  [WARN] sqrtm produced significant imaginary component; taking real part.")
+        covmean = covmean.real
+
+    fid = float(diff @ diff + np.trace(sig_r + sig_f - 2.0 * covmean))
+    return fid
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tensor conversion (kept for debug_split visualisation)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def array_to_uint8_rgb_tensor(img_array: np.ndarray, resize: int = 299) -> torch.Tensor:
-    """
-    Convert (H, W, C) uint8 numpy array → (1, 3, resize, resize) uint8 tensor.
-
-    The sub-images extracted from the PNG are already in [0, 255] uint8.
-    We convert to RGB and resize for the Inception feature extractor.
-
-    Args:
-        img_array: (H, W, 3) uint8 array
-        resize:    target size (299 for Inception v3)
-
-    Returns:
-        (1, 3, resize, resize) torch.uint8 tensor
-    """
     pil = Image.fromarray(img_array.astype(np.uint8), mode='RGB')
     if resize != pil.width or resize != pil.height:
         pil = pil.resize((resize, resize), Image.BILINEAR)
-    t = torch.from_numpy(np.array(pil)).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+    t = torch.from_numpy(np.array(pil)).permute(2, 0, 1).unsqueeze(0)
     return t.to(torch.uint8)
 
 
@@ -237,15 +320,6 @@ def save_debug_split(png_path: str, n_images: int, out_path: str = "debug_split.
 def main():
     args = parse_args()
 
-    # ── torchmetrics FID ──────────────────────────────────────────────────────
-    try:
-        from torchmetrics.image.fid import FrechetInceptionDistance
-    except ImportError:
-        raise ImportError(
-            "torchmetrics[image] is required.\n"
-            "  pip install torchmetrics[image]"
-        )
-
     # ── Collect PNG files ─────────────────────────────────────────────────────
     if args.recursive:
         pattern = os.path.join(args.img_dir, "**", "recon_ep*.png")
@@ -267,51 +341,55 @@ def main():
     print(f"               Expected image pairs: {expected_samples}")
     if expected_samples < 2048:
         print(f"  [WARN] {expected_samples} samples is below the recommended minimum of 2048.")
-        print(f"         FID values may have high variance. Use more epochs or larger --n_images.")
+        print(f"         FID values may have high variance.")
 
-    # ── Optional: save split visualisation for the first PNG ──────────────────
+    # ── Optional: save split visualisation ────────────────────────────────────
     if args.debug_split:
         save_debug_split(png_files[0], args.n_images, out_path="debug_split.png")
 
-    # ── FID computation ───────────────────────────────────────────────────────
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    fid_metric = FrechetInceptionDistance(feature=2048, normalize=False).to(device)
-    print(f"  device: {device}")
-
-    n_extracted = 0
-    n_failed    = 0
+    # ── Extract all sub-images from PNGs ──────────────────────────────────────
+    real_imgs = []
+    fake_imgs = []
+    n_failed  = 0
 
     for i, png_path in enumerate(png_files):
         try:
             orig_strips, recon_strips = extract_pairs_from_png(png_path, args.n_images)
-
-            for orig, recon in zip(orig_strips, recon_strips):
-                real_t = array_to_uint8_rgb_tensor(orig,  args.resize).to(device)
-                fake_t = array_to_uint8_rgb_tensor(recon, args.resize).to(device)
-
-                fid_metric.update(real_t, real=True)
-                fid_metric.update(fake_t, real=False)
-                n_extracted += 1
-
+            real_imgs.extend(orig_strips)
+            fake_imgs.extend(recon_strips)
         except Exception as e:
             print(f"  [WARN] Skipped {os.path.basename(png_path)}: {e}")
             n_failed += 1
 
         if (i + 1) % 10 == 0 or (i + 1) == len(png_files):
-            print(f"  [{i+1}/{len(png_files)}] {n_extracted} pairs extracted", end="\r")
+            print(f"  [{i+1}/{len(png_files)}] {len(real_imgs)} pairs collected", end="\r")
 
     print()
 
-    # ── Report ────────────────────────────────────────────────────────────────
-    if n_extracted == 0:
+    if len(real_imgs) == 0:
         print("[ERROR] No images could be extracted. Check --img_dir and --n_images.")
         return None
 
-    fid_score = fid_metric.compute().item()
+    # ── Build Inception v3 feature extractor ──────────────────────────────────
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"  device: {device}")
+    print(f"  Loading Inception v3 …")
+    inception = build_inception(device)
+
+    # ── Extract Inception features ────────────────────────────────────────────
+    print(f"  Extracting features from {len(real_imgs)} real images …")
+    feats_real = extract_features(real_imgs, inception, device)
+
+    print(f"  Extracting features from {len(fake_imgs)} reconstructed images …")
+    feats_fake = extract_features(fake_imgs, inception, device)
+
+    # ── Compute FID ───────────────────────────────────────────────────────────
+    print(f"  Computing Fréchet distance …")
+    fid_score  = frechet_distance(feats_real, feats_fake)
 
     print(f"\n{'='*52}")
     print(f"  FID Score   : {fid_score:.4f}")
-    print(f"  Image pairs : {n_extracted}  ({n_failed} files failed)")
+    print(f"  Image pairs : {len(real_imgs)}  ({n_failed} files failed)")
     print(f"  Source dir  : {args.img_dir}")
     print(f"{'='*52}\n")
 
