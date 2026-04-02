@@ -292,7 +292,7 @@ class DDPM(nn.Module):
             print(f"[DDPM] EMA enabled  (decay={ema_decay})")
 
         # Noise schedule buffers
-        self._register_schedule(
+        self.register_schedule(
             given_betas=given_betas, beta_schedule=beta_schedule,
             timesteps=timesteps, linear_start=linear_start,
             linear_end=linear_end, cosine_s=cosine_s,
@@ -307,11 +307,18 @@ class DDPM(nn.Module):
         if ckpt_path is not None:
             self.load_from_ckpt(ckpt_path, ignore_keys)
 
+    # ── Device property ────────────────────────────────────────────────────────
+
+    @property
+    def device(self) -> torch.device:
+        """Current device inferred from the registered noise schedule buffers."""
+        return self.betas.device
+
     # ── Noise schedule ─────────────────────────────────────────────────────────
 
-    def _register_schedule(self, given_betas=None, beta_schedule="linear",
-                           timesteps=1000, linear_start=1e-4,
-                           linear_end=2e-2, cosine_s=8e-3):
+    def register_schedule(self, given_betas=None, beta_schedule="linear",
+                          timesteps=1000, linear_start=1e-4,
+                          linear_end=2e-2, cosine_s=8e-3):
         betas = given_betas if given_betas is not None else make_beta_schedule(
             beta_schedule, timesteps,
             linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s,
