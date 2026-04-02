@@ -296,6 +296,11 @@ def main():
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])          # restore learned weights
         optimizer.load_state_dict(ckpt["optimizer"])  # restore optimizer state (momentum, m/v, lr schedule)
+        # PyTorch 1.12+: AdamW stores step as a CUDA tensor when saved on GPU,
+        # but requires it on CPU when capturable=False (the default).
+        for state in optimizer.state.values():
+            if "step" in state and isinstance(state["step"], torch.Tensor):
+                state["step"] = state["step"].cpu()
         start_epoch = ckpt["epoch"] + 1               # continue from the next epoch
         print(f"[Resume] Loaded epoch {ckpt['epoch']}")
 
