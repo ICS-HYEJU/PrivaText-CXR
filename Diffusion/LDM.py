@@ -471,68 +471,86 @@ class LatentDiffusion(DDPM):
 # =============================================================================
 
 if __name__ == '__main__':
+    import argparse
 
-    # ── Minimal stub models ───────────────────────────────────────────────────
-
-    class TinyVAE(nn.Module):
-        """
-        Stub AutoencoderKL.
-        encode : [B, C, H, W] → DiagonalGaussianDistribution-like (plain Tensor)
-        decode : [B, z_ch, h, w] → [B, C, H, W]
-
-        Uses a plain Tensor instead of DiagonalGaussianDistribution so the stub
-        has zero extra dependencies. LatentDiffusion.get_first_stage_encoding
-        handles both DiagonalGaussianDistribution and plain Tensor.
-        """
-        def encode(self, x):
-            B, C, H, W = x.shape
-            return torch.randn(B, 4, H // 4, W // 4, device=x.device)
-
-        def decode(self, z):
-            B, C, H, W = z.shape
-            return torch.randn(B, 1, H * 4, W * 4, device=z.device)
-
-    class TinyUNet(nn.Module):
-        """Stub UNet: ignores t and context, just mixes channels."""
-        def __init__(self, channels=4, model_ch=32):
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Conv2d(channels, model_ch, 3, padding=1),
-                nn.SiLU(),
-                nn.Conv2d(model_ch, channels, 3, padding=1),
-            )
-        def forward(self, x, timesteps=None, context=None, **kw):
-            return self.net(x)
-
-    # ── Instantiate ───────────────────────────────────────────────────────────
+    # ── Import real models ────────────────────────────────────────────────────
+    from autoencoder import AutoencoderKL          # Model/autoencoder.py
+    from UNetModel   import UNetModel              # Diffusion/UNetModel.py
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Device: {device}')
 
-    # image [B,1,64,64] → VAE → z [B,4,16,16]
-    # UNet in latent space: 4 channels, 16×16
+    # ── VAE config ────────────────────────────────────────────────────────────
+    # x=[B,3,32,32], ch_mult=[1,2,4] → 2 downsamples → latent [B,4,8,8]
+    vae_args = argparse.Namespace(
+        in_channels      = 3,
+        out_channels     = 3,
+        ch               = 64,
+        ch_mult          = [1, 2, 4],
+        num_res_blocks   = 1,
+        attn_resolutions = [16],
+        dropout          = 0.0,
+        resamp_with_conv = True,
+        resolution       = 32,
+        z_channels       = 4,
+        double_z         = True,
+        dims             = 2,
+    )
+    vae = AutoencoderKL(vae_args).to(device)
+
+    # ── UNet config ───────────────────────────────────────────────────────────
+    # Operates in latent space: [B, 4, 8, 8], conditioned on [B, 1, 512]
+    unet_args = argparse.Namespace(
+        image_size             = 8,
+        in_channels            = 4,
+        out_channels           = 4,
+        model_channels         = 64,
+        num_res_blocks         = 1,
+        channel_mult           = [1, 2, 4],
+        attention_resolutions  = [1, 2],
+        dropout                = 0.0,
+        dims                   = 2,
+        conv_resample          = True,
+        num_heads              = -1,
+        num_head_channels      = 8,
+        num_heads_upsample     = -1,
+        use_spatial_transformer= True,
+        transformer_depth      = 1,
+        context_dim            = 512,
+        use_new_attention_order= False,
+        legacy                 = True,
+        use_scale_shift_norm   = False,
+        resblock_updown        = False,
+        num_classes            = None,
+        n_embed                = None,
+        use_checkpoint         = False,
+        use_fp16               = False,
+        write_json             = False,
+    )
+    unet = UNetModel(unet_args).to(device)
+
+    # ── LDM ───────────────────────────────────────────────────────────────────
     model = LatentDiffusion(
-        unet              = TinyUNet(channels=4, model_ch=32),
-        first_stage_model = TinyVAE(),
+        unet              = unet,
+        first_stage_model = vae,
         cond_stage_key    = 'context',
         first_stage_key   = 'image',
         conditioning_key  = 'crossattn',
         timesteps         = 100,
         beta_schedule     = 'linear',
-        image_size        = 16,       # latent spatial size
-        channels          = 4,        # latent channels
+        image_size        = 8,        # latent spatial size (32/4)
+        channels          = 4,        # z_channels
         use_ema           = True,
         lr                = 1e-4,
     ).to(device)
 
     # ── Fake batch ────────────────────────────────────────────────────────────
-    # 'image'  : raw CXR  [B, 1, 64, 64]
-    # 'context': BioBERT  [B, seq=16, dim=64]
-
-    def make_batch(B=2, img_h=64, img_w=64, seq=16, ctx_dim=64):
+    # image  : [B, 3, 32, 32]  (RGB, torch.rand)
+    # context: [B, 1, 512]     (BioBERT embedding)
+    def make_batch(B=2):
         return {
-            'image':   torch.randn(B, 1, img_h, img_w, device=device),
-            'context': torch.randn(B, seq, ctx_dim, device=device),
+            'image':   torch.rand(B, 3, 32, 32, device=device),
+            'context': torch.rand(B, 1, 512,    device=device),
         }
 
     # ── scale_factor init ─────────────────────────────────────────────────────
@@ -561,9 +579,9 @@ if __name__ == '__main__':
     print('  ema:', {k: f'{v.item():.4f}' for k, v in ld_ema.items()})
 
     # ── Sampling ──────────────────────────────────────────────────────────────
-    print('\n--- Sampling (5 steps, 2 samples) ---')
-    c = torch.randn(2, 16, 64, device=device)
+    print('\n--- Sampling (5 steps) ---')
+    c = torch.rand(2, 1, 512, device=device)
     x_gen = model.sample(c, batch_size=2, verbose=False, timesteps=5)
-    print(f'  generated: {x_gen.shape}')   # [2, 1, 64, 64]
+    print(f'  generated: {x_gen.shape}')   # [2, 3, 32, 32]
 
     print('\nDebug run completed successfully!')
