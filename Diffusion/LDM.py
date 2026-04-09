@@ -545,17 +545,45 @@ if __name__ == '__main__':
     ).to(device)
 
     # ── Fake batch ────────────────────────────────────────────────────────────
-    # image  : [B, 3, 32, 32]  (RGB, torch.rand)
-    # context: [B, 1, 512]     (BioBERT embedding)
+    # image  : [B, 3, 32, 32]
+    # context: [B, 1, 512]
     def make_batch(B=2):
         return {
-            'image':   torch.rand(B, 3, 32, 32, device=device),
-            'context': torch.rand(B, 1, 512,    device=device),
+            'image':   torch.randn(B, 3, 32, 32, device=device),
+            'context': torch.randn(B, 1, 512,    device=device),
         }
 
     # ── scale_factor init ─────────────────────────────────────────────────────
     first_batch = make_batch()
     model.init_scale_factor(first_batch, is_first_batch=True)
+
+    # =========================================================================
+    # Full pipeline – 3-step forward pass
+    # Step 1: x → VAE encoder → DiagonalGaussian → z (sample)
+    # Step 2: z + context → DiffusionWrapper → UNet → denoised z
+    # Step 3: denoised z → VAE decoder → x'
+    # =========================================================================
+    print('\n--- Full pipeline forward pass ---')
+    model.eval()
+    with torch.no_grad():
+        batch = make_batch()
+        x   = batch['image'].to(device)                        # [B, 3, 32, 32]
+        ctx = batch['context'].to(device)                      # [B, 1, 512]
+
+        # Step 1: x → VAE → z
+        posterior = model.encode_first_stage(x)                # DiagonalGaussianDistribution
+        z         = model.get_first_stage_encoding(posterior)  # [B, 4, 8, 8]
+        print(f'  Step 1 | x: {x.shape}  →  z: {z.shape}')
+
+        # Step 2: z + context → DiffusionWrapper → UNet
+        t          = torch.randint(0, model.num_timesteps, (z.shape[0],), device=device)
+        z_noisy    = model.q_sample(z, t)                      # forward diffusion
+        z_denoised = model.apply_model(z_noisy, t, ctx)        # DiffusionWrapper → UNet
+        print(f'  Step 2 | z_noisy: {z_noisy.shape} + ctx: {ctx.shape}  →  z_denoised: {z_denoised.shape}')
+
+        # Step 3: denoised z → VAE decoder → x'
+        x_recon = model.decode_first_stage(z_denoised)         # [B, 3, 32, 32]
+        print(f'  Step 3 | z_denoised: {z_denoised.shape}  →  x_recon: {x_recon.shape}')
 
     # ── Training loop ─────────────────────────────────────────────────────────
     optimizer = model.build_optimizer(lr=1e-4)
@@ -578,9 +606,9 @@ if __name__ == '__main__':
     print('  val:', {k: f'{v.item():.4f}' for k, v in ld.items()})
     print('  ema:', {k: f'{v.item():.4f}' for k, v in ld_ema.items()})
 
-    # ── Sampling ──────────────────────────────────────────────────────────────
+    # ── Sampling (full reverse diffusion) ─────────────────────────────────────
     print('\n--- Sampling (5 steps) ---')
-    c = torch.rand(2, 1, 512, device=device)
+    c = torch.randn(2, 1, 512, device=device)
     x_gen = model.sample(c, batch_size=2, verbose=False, timesteps=5)
     print(f'  generated: {x_gen.shape}')   # [2, 3, 32, 32]
 
