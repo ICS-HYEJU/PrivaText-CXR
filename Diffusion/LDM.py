@@ -474,11 +474,34 @@ if __name__ == '__main__':
     import argparse
 
     # ── Import real models ────────────────────────────────────────────────────
-    from autoencoder import AutoencoderKL          # Model/autoencoder.py
-    from UNetModel   import UNetModel              # Diffusion/UNetModel.py
+    from autoencoder      import AutoencoderKL          # Model/autoencoder.py
+    from UNetModel        import UNetModel              # Diffusion/UNetModel.py
+    from context_encoder  import BioBERTContextEncoder  # Diffusion/context_encoder.py
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Device: {device}')
+
+    # =========================================================================
+    # BioBERT Context Encoder  (runs BEFORE LDM)
+    # =========================================================================
+    ctx_encoder = BioBERTContextEncoder(
+        model_name = 'dmis-lab/biobert-v1.1',
+        output_dim = 512,     # must match UNet context_dim
+        freeze     = True,
+    ).to(device)
+
+    # ── Case 1: class label ───────────────────────────────────────────────────
+    labels = ['pneumonia', 'normal']                        # [B=2]
+    c_label = ctx_encoder(labels, mode='label')             # [2, 1, 512]
+    print(f'\n[label]       {labels}  →  {c_label.shape}')
+
+    # ── Case 2: clinical description ──────────────────────────────────────────
+    descriptions = [
+        'Bilateral pleural effusion with mild cardiomegaly.',
+        'No acute cardiopulmonary process. Lungs are clear.',
+    ]                                                       # [B=2]
+    c_desc = ctx_encoder(descriptions, mode='description')  # [2, 1, 512]
+    print(f'[description] {descriptions[0][:40]}...  →  {c_desc.shape}')
 
     # ── VAE config ────────────────────────────────────────────────────────────
     # x=[B,1,256,256] (grayscale CXR)
@@ -547,16 +570,25 @@ if __name__ == '__main__':
     ).to(device)
 
     # ── Fake batch ────────────────────────────────────────────────────────────
-    # image  : [B, 1, 256, 256]  grayscale CXR
-    # context: [B, 1, 512]       BioBERT embedding
-    def make_batch(B=2):
+    # image  : [B, 1, 256, 256]  grayscale CXR  (torch.randn for debug)
+    # context: [B, 1, 512]       BioBERT embedding (real encoder)
+    _label_pool = ['pneumonia', 'normal', 'pleural effusion', 'cardiomegaly']
+    _desc_pool  = [
+        'Bilateral pleural effusion with mild cardiomegaly.',
+        'No acute cardiopulmonary process. Lungs are clear.',
+        'Interstitial opacities in right lower lobe.',
+        'Mild pulmonary edema with bilateral hilar prominence.',
+    ]
+
+    def make_batch(B=2, mode='label'):
+        texts = (_label_pool if mode == 'label' else _desc_pool)[:B]
         return {
             'image':   torch.randn(B, 1, 256, 256, device=device),
-            'context': torch.randn(B, 1, 512,      device=device),
+            'context': ctx_encoder(texts, mode=mode).detach(),   # [B, 1, 512]
         }
 
     # ── scale_factor init ─────────────────────────────────────────────────────
-    first_batch = make_batch()
+    first_batch = make_batch(B=2, mode='label')
     model.init_scale_factor(first_batch, is_first_batch=True)
 
     # =========================================================================
@@ -568,8 +600,8 @@ if __name__ == '__main__':
     print('\n--- Full pipeline forward pass ---')
     model.eval()
     with torch.no_grad():
-        batch = make_batch()
-        x   = batch['image'].to(device)                        # [B, 3, 32, 32]
+        batch = make_batch(B=2, mode='label')
+        x   = batch['image'].to(device)                        # [B, 1, 256, 256]
         ctx = batch['context'].to(device)                      # [B, 1, 512]
 
         # Step 1: x → VAE → z
@@ -587,12 +619,24 @@ if __name__ == '__main__':
         x_recon = model.decode_first_stage(z_denoised)         # [B, 1, 256, 256]
         print(f'  Step 3 | z_denoised: {z_denoised.shape}  →  x_recon: {x_recon.shape}')
 
-    # ── Training loop ─────────────────────────────────────────────────────────
+    # ── Training loop  (label mode) ───────────────────────────────────────────
     optimizer = model.build_optimizer(lr=1e-4)
-    print('\n--- Training (3 steps) ---')
+    print('\n--- Training with label context (3 steps) ---')
     model.train()
     for step in range(3):
-        batch = make_batch()
+        batch = make_batch(B=2, mode='label')
+        loss, loss_dict = model.training_step(batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        model.update_ema()
+        info = '  '.join(f'{k}={v.item():.4f}' for k, v in loss_dict.items())
+        print(f'  step {step+1}/3 | {info}')
+
+    # ── Training loop  (description mode) ────────────────────────────────────
+    print('\n--- Training with description context (3 steps) ---')
+    for step in range(3):
+        batch = make_batch(B=2, mode='description')
         loss, loss_dict = model.training_step(batch)
         optimizer.zero_grad()
         loss.backward()
@@ -604,14 +648,14 @@ if __name__ == '__main__':
     # ── Validation ────────────────────────────────────────────────────────────
     print('\n--- Validation ---')
     model.eval()
-    ld, ld_ema = model.validation_step(make_batch())
+    ld, ld_ema = model.validation_step(make_batch(B=2, mode='label'))
     print('  val:', {k: f'{v.item():.4f}' for k, v in ld.items()})
     print('  ema:', {k: f'{v.item():.4f}' for k, v in ld_ema.items()})
 
-    # ── Sampling (full reverse diffusion) ─────────────────────────────────────
-    print('\n--- Sampling (5 steps) ---')
-    c = torch.randn(2, 1, 512, device=device)
-    x_gen = model.sample(c, batch_size=2, verbose=False, timesteps=5)
+    # ── Sampling (label context) ───────────────────────────────────────────────
+    print('\n--- Sampling (5 steps, label) ---')
+    c_sample = ctx_encoder(['pneumonia', 'normal'], mode='label').detach()  # [2, 1, 512]
+    x_gen = model.sample(c_sample, batch_size=2, verbose=False, timesteps=5)
     print(f'  generated: {x_gen.shape}')   # [2, 1, 256, 256]
 
     print('\nDebug run completed successfully!')
