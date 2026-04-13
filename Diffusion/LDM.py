@@ -472,14 +472,55 @@ class LatentDiffusion(DDPM):
 
 if __name__ == '__main__':
     import argparse
+    from torch.utils.data import DataLoader
+
+    # ── Add Data/ directory to path for NIH dataset ───────────────────────────
+    _data_dir = os.path.normpath(os.path.join(_this_dir, '..', 'Data'))
+    if _data_dir not in sys.path:
+        sys.path.insert(0, _data_dir)
 
     # ── Import real models ────────────────────────────────────────────────────
     from autoencoder      import AutoencoderKL          # Model/autoencoder.py
     from UNetModel        import UNetModel              # Diffusion/UNetModel.py
     from context_encoder  import BioBERTContextEncoder  # Diffusion/context_encoder.py
+    from dataset          import NIH                    # Data/dataset.py
+
+    # ── Argument parsing ───────────────────────────────────────────────────────
+    parser = argparse.ArgumentParser(description='LDM debug run with NIH CXR dataset')
+    parser.add_argument('--data_path',  default='/storage/hjchoi/archive/image_file',
+                        help='Root directory containing CXR image files')
+    parser.add_argument('--label_path', default='/storage/hjchoi/archive/Data_Entry_2017.csv',
+                        help='Path to NIH Data_Entry_2017.csv')
+    parser.add_argument('--task',       default='train',
+                        choices=['train', 'val', 'test'])
+    parser.add_argument('--image_size', default=256, type=int)
+    parser.add_argument('--batch_size', default=2,   type=int)
+    args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Device: {device}')
+
+    # =========================================================================
+    # NIH ChestX-ray14 Dataset + DataLoader
+    # =========================================================================
+    nih_args = argparse.Namespace(
+        data_path  = args.data_path,
+        label_path = args.label_path,
+        task       = args.task,
+        image_size = args.image_size,
+        image_show = False,
+    )
+    nih_dataset = NIH(nih_args)
+    nih_loader  = DataLoader(
+        nih_dataset,
+        batch_size  = args.batch_size,
+        shuffle     = True,
+        num_workers = 0,
+        drop_last   = True,
+    )
+    _nih_iter = iter(nih_loader)
+    print(f'[NIH] dataset size: {len(nih_dataset)}  '
+          f'| batch_size: {args.batch_size}  | task: {args.task}')
 
     # =========================================================================
     # BioBERT Context Encoder  (runs BEFORE LDM)
@@ -490,18 +531,17 @@ if __name__ == '__main__':
         freeze     = True,
     ).to(device)
 
-    # ── Case 1: class label ───────────────────────────────────────────────────
-    labels = ['pneumonia', 'normal']                        # [B=2]
-    c_label = ctx_encoder(labels, mode='label')             # [2, 1, 512]
-    print(f'\n[label]       {labels}  →  {c_label.shape}')
+    # ── Encoder smoke-test ─────────────────────────────────────────────────────
+    _test_labels = ['Pneumonia', 'No Finding']
+    c_label = ctx_encoder(_test_labels, mode='label')          # [2, 1, 512]
+    print(f'\n[label]       {_test_labels}  →  {c_label.shape}')
 
-    # ── Case 2: clinical description ──────────────────────────────────────────
-    descriptions = [
+    _test_descs = [
         'Bilateral pleural effusion with mild cardiomegaly.',
         'No acute cardiopulmonary process. Lungs are clear.',
-    ]                                                       # [B=2]
-    c_desc = ctx_encoder(descriptions, mode='description')  # [2, 1, 512]
-    print(f'[description] {descriptions[0][:40]}...  →  {c_desc.shape}')
+    ]
+    c_desc = ctx_encoder(_test_descs, mode='description')      # [2, 1, 512]
+    print(f'[description] {_test_descs[0][:40]}...  →  {c_desc.shape}')
 
     # ── VAE config ────────────────────────────────────────────────────────────
     # x=[B,1,256,256] (grayscale CXR)
@@ -569,26 +609,42 @@ if __name__ == '__main__':
         lr                = 1e-4,
     ).to(device)
 
-    # ── Fake batch ────────────────────────────────────────────────────────────
-    # image  : [B, 1, 256, 256]  grayscale CXR  (torch.randn for debug)
-    # context: [B, 1, 512]       BioBERT embedding (real encoder)
-    _label_pool = ['pneumonia', 'normal', 'pleural effusion', 'cardiomegaly']
-    _desc_pool  = [
-        'Bilateral pleural effusion with mild cardiomegaly.',
-        'No acute cardiopulmonary process. Lungs are clear.',
-        'Interstitial opacities in right lower lobe.',
-        'Mild pulmonary edema with bilateral hilar prominence.',
-    ]
+    # ── Batch factory from NIH DataLoader ────────────────────────────────────
+    # img       : Tensor [B, 1, 256, 256]  – real grayscale CXR
+    # label_str : str    e.g. "Pneumonia|Effusion"  – multi-label from NIH CSV
+    # context   : Tensor [B, 1, 512]       – BioBERT embedding of label_str
 
-    def make_batch(B=2, mode='label'):
-        texts = (_label_pool if mode == 'label' else _desc_pool)[:B]
+    def make_batch(mode: str = 'label') -> dict:
+        """
+        Pull one batch from the NIH DataLoader.
+
+        Args:
+            mode : 'label' | 'description'
+                   Controls how BioBERT encodes label_str
+                   ('label'  → CLS token,
+                    'description' → mean-pool over tokens)
+        Returns:
+            {'image': Tensor[B,1,256,256], 'context': Tensor[B,1,512]}
+        """
+        global _nih_iter
+        try:
+            imgs, label_strs = next(_nih_iter)
+        except StopIteration:           # reset at epoch end
+            _nih_iter = iter(nih_loader)
+            imgs, label_strs = next(_nih_iter)
+
+        imgs       = imgs.to(device)        # [B, 1, 256, 256]
+        label_list = list(label_strs)       # list[str], e.g. ["Pneumonia|Effusion", ...]
+
+        ctx = ctx_encoder(label_list, mode=mode).detach()   # [B, 1, 512]
+
         return {
-            'image':   torch.randn(B, 1, 256, 256, device=device),
-            'context': ctx_encoder(texts, mode=mode).detach(),   # [B, 1, 512]
+            'image':   imgs,
+            'context': ctx,
         }
 
     # ── scale_factor init ─────────────────────────────────────────────────────
-    first_batch = make_batch(B=2, mode='label')
+    first_batch = make_batch(mode='label')
     model.init_scale_factor(first_batch, is_first_batch=True)
 
     # =========================================================================
@@ -600,7 +656,7 @@ if __name__ == '__main__':
     print('\n--- Full pipeline forward pass ---')
     model.eval()
     with torch.no_grad():
-        batch = make_batch(B=2, mode='label')
+        batch = make_batch(mode='label')
         x   = batch['image'].to(device)                        # [B, 1, 256, 256]
         ctx = batch['context'].to(device)                      # [B, 1, 512]
 
@@ -624,7 +680,7 @@ if __name__ == '__main__':
     print('\n--- Training with label context (3 steps) ---')
     model.train()
     for step in range(3):
-        batch = make_batch(B=2, mode='label')
+        batch = make_batch(mode='label')
         loss, loss_dict = model.training_step(batch)
         optimizer.zero_grad()
         loss.backward()
@@ -636,7 +692,7 @@ if __name__ == '__main__':
     # ── Training loop  (description mode) ────────────────────────────────────
     print('\n--- Training with description context (3 steps) ---')
     for step in range(3):
-        batch = make_batch(B=2, mode='description')
+        batch = make_batch(mode='description')
         loss, loss_dict = model.training_step(batch)
         optimizer.zero_grad()
         loss.backward()
@@ -648,7 +704,7 @@ if __name__ == '__main__':
     # ── Validation ────────────────────────────────────────────────────────────
     print('\n--- Validation ---')
     model.eval()
-    ld, ld_ema = model.validation_step(make_batch(B=2, mode='label'))
+    ld, ld_ema = model.validation_step(make_batch(mode='label'))
     print('  val:', {k: f'{v.item():.4f}' for k, v in ld.items()})
     print('  ema:', {k: f'{v.item():.4f}' for k, v in ld_ema.items()})
 
