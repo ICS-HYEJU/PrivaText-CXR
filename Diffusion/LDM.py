@@ -518,7 +518,12 @@ if __name__ == '__main__':
         num_workers = 0,
         drop_last   = True,
     )
-    _nih_iter = iter(nih_loader)
+    def _infinite_batches(loader):
+        """Yield batches indefinitely, restarting at epoch end."""
+        while True:
+            yield from loader
+
+    _nih_gen = _infinite_batches(nih_loader)
     print(f'[NIH] dataset size: {len(nih_dataset)}  '
           f'| batch_size: {args.batch_size}  | task: {args.task}')
 
@@ -616,7 +621,7 @@ if __name__ == '__main__':
 
     def make_batch(mode: str = 'label') -> dict:
         """
-        Pull one batch from the NIH DataLoader.
+        Pull one batch from the NIH DataLoader (via infinite generator).
 
         Args:
             mode : 'label' | 'description'
@@ -626,22 +631,12 @@ if __name__ == '__main__':
         Returns:
             {'image': Tensor[B,1,256,256], 'context': Tensor[B,1,512]}
         """
-        global _nih_iter
-        try:
-            imgs, label_strs = next(_nih_iter)
-        except StopIteration:           # reset at epoch end
-            _nih_iter = iter(nih_loader)
-            imgs, label_strs = next(_nih_iter)
+        imgs, label_strs = next(_nih_gen)       # _nih_gen captured via closure
 
-        imgs       = imgs.to(device)        # [B, 1, 256, 256]
-        label_list = list(label_strs)       # list[str], e.g. ["Pneumonia|Effusion", ...]
+        imgs = imgs.to(device)                  # [B, 1, 256, 256]
+        ctx  = ctx_encoder(list(label_strs), mode=mode).detach()  # [B, 1, 512]
 
-        ctx = ctx_encoder(label_list, mode=mode).detach()   # [B, 1, 512]
-
-        return {
-            'image':   imgs,
-            'context': ctx,
-        }
+        return {'image': imgs, 'context': ctx}
 
     # ── scale_factor init ─────────────────────────────────────────────────────
     first_batch = make_batch(mode='label')
