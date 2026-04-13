@@ -493,19 +493,19 @@ if __name__ == '__main__':
         dropout          = 0.0,
         resamp_with_conv = True,
         resolution       = 256,
-        z_channels       = 4,
+        z_channels       = 1,          # z: [B, 1, 16, 16]
         double_z         = True,
         dims             = 2,
     )
     vae = AutoencoderKL(vae_args).to(device)
 
     # ── UNet config ───────────────────────────────────────────────────────────
-    # Latent space: [B, 4, 16, 16], context: [B, 1, 512]
-    # in/out_channels must equal VAE z_channels (4)
+    # Latent space: [B, 1, 16, 16], context: [B, 1, 512]
+    # in/out_channels must equal VAE z_channels (1)
     unet_args = argparse.Namespace(
         image_size             = 16,    # latent spatial (256 / 16)
-        in_channels            = 4,     # = VAE z_channels
-        out_channels           = 4,     # = VAE z_channels
+        in_channels            = 1,     # = VAE z_channels
+        out_channels           = 1,     # = VAE z_channels
         model_channels         = 128,
         num_res_blocks         = 2,
         channel_mult           = [1, 2, 4],
@@ -541,7 +541,7 @@ if __name__ == '__main__':
         timesteps         = 100,
         beta_schedule     = 'linear',
         image_size        = 16,       # latent spatial size (256 / 16)
-        channels          = 4,        # = VAE z_channels
+        channels          = 1,        # = VAE z_channels
         use_ema           = True,
         lr                = 1e-4,
     ).to(device)
@@ -574,7 +574,7 @@ if __name__ == '__main__':
 
         # Step 1: x → VAE → z
         posterior = model.encode_first_stage(x)                # DiagonalGaussianDistribution
-        z         = model.get_first_stage_encoding(posterior)  # [B, 4, 16, 16]
+        z         = model.get_first_stage_encoding(posterior)  # [B, 1, 16, 16]
         print(f'  Step 1 | x: {x.shape}  →  z: {z.shape}')
 
         # Step 2: z + context → DiffusionWrapper → UNet
