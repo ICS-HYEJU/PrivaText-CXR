@@ -481,17 +481,18 @@ if __name__ == '__main__':
     print(f'Device: {device}')
 
     # ── VAE config ────────────────────────────────────────────────────────────
-    # x=[B,3,32,32], ch_mult=[1,2,4] → 2 downsamples → latent [B,4,8,8]
+    # x=[B,1,256,256] (grayscale CXR)
+    # ch_mult=[1,2,4,4,4] → 4 downsamples (÷16) → latent [B,4,16,16]
     vae_args = argparse.Namespace(
-        in_channels      = 3,
-        out_channels     = 3,
-        ch               = 64,
-        ch_mult          = [1, 2, 4],
-        num_res_blocks   = 1,
-        attn_resolutions = [16],
+        in_channels      = 1,
+        out_channels     = 1,
+        ch               = 128,
+        ch_mult          = [1, 2, 4, 4, 4],
+        num_res_blocks   = 2,
+        attn_resolutions = [32, 16],
         dropout          = 0.0,
         resamp_with_conv = True,
-        resolution       = 32,
+        resolution       = 256,
         z_channels       = 4,
         double_z         = True,
         dims             = 2,
@@ -499,15 +500,16 @@ if __name__ == '__main__':
     vae = AutoencoderKL(vae_args).to(device)
 
     # ── UNet config ───────────────────────────────────────────────────────────
-    # Operates in latent space: [B, 4, 8, 8], conditioned on [B, 1, 512]
+    # Latent space: [B, 4, 16, 16], context: [B, 1, 512]
+    # in/out_channels must equal VAE z_channels (4)
     unet_args = argparse.Namespace(
-        image_size             = 8,
-        in_channels            = 4,
-        out_channels           = 4,
-        model_channels         = 64,
-        num_res_blocks         = 1,
+        image_size             = 16,    # latent spatial (256 / 16)
+        in_channels            = 4,     # = VAE z_channels
+        out_channels           = 4,     # = VAE z_channels
+        model_channels         = 128,
+        num_res_blocks         = 2,
         channel_mult           = [1, 2, 4],
-        attention_resolutions  = [1, 2],
+        attention_resolutions  = [1, 2, 4],
         dropout                = 0.0,
         dims                   = 2,
         conv_resample          = True,
@@ -538,19 +540,19 @@ if __name__ == '__main__':
         conditioning_key  = 'crossattn',
         timesteps         = 100,
         beta_schedule     = 'linear',
-        image_size        = 8,        # latent spatial size (32/4)
-        channels          = 4,        # z_channels
+        image_size        = 16,       # latent spatial size (256 / 16)
+        channels          = 4,        # = VAE z_channels
         use_ema           = True,
         lr                = 1e-4,
     ).to(device)
 
     # ── Fake batch ────────────────────────────────────────────────────────────
-    # image  : [B, 3, 32, 32]
-    # context: [B, 1, 512]
+    # image  : [B, 1, 256, 256]  grayscale CXR
+    # context: [B, 1, 512]       BioBERT embedding
     def make_batch(B=2):
         return {
-            'image':   torch.randn(B, 3, 32, 32, device=device),
-            'context': torch.randn(B, 1, 512,    device=device),
+            'image':   torch.randn(B, 1, 256, 256, device=device),
+            'context': torch.randn(B, 1, 512,      device=device),
         }
 
     # ── scale_factor init ─────────────────────────────────────────────────────
@@ -572,7 +574,7 @@ if __name__ == '__main__':
 
         # Step 1: x → VAE → z
         posterior = model.encode_first_stage(x)                # DiagonalGaussianDistribution
-        z         = model.get_first_stage_encoding(posterior)  # [B, 4, 8, 8]
+        z         = model.get_first_stage_encoding(posterior)  # [B, 4, 16, 16]
         print(f'  Step 1 | x: {x.shape}  →  z: {z.shape}')
 
         # Step 2: z + context → DiffusionWrapper → UNet
@@ -582,7 +584,7 @@ if __name__ == '__main__':
         print(f'  Step 2 | z_noisy: {z_noisy.shape} + ctx: {ctx.shape}  →  z_denoised: {z_denoised.shape}')
 
         # Step 3: denoised z → VAE decoder → x'
-        x_recon = model.decode_first_stage(z_denoised)         # [B, 3, 32, 32]
+        x_recon = model.decode_first_stage(z_denoised)         # [B, 1, 256, 256]
         print(f'  Step 3 | z_denoised: {z_denoised.shape}  →  x_recon: {x_recon.shape}')
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -610,6 +612,6 @@ if __name__ == '__main__':
     print('\n--- Sampling (5 steps) ---')
     c = torch.randn(2, 1, 512, device=device)
     x_gen = model.sample(c, batch_size=2, verbose=False, timesteps=5)
-    print(f'  generated: {x_gen.shape}')   # [2, 3, 32, 32]
+    print(f'  generated: {x_gen.shape}')   # [2, 1, 256, 256]
 
     print('\nDebug run completed successfully!')
