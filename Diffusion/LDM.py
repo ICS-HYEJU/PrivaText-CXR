@@ -480,10 +480,10 @@ if __name__ == '__main__':
         sys.path.insert(0, _data_dir)
 
     # ── Import real models ────────────────────────────────────────────────────
-    from autoencoder      import AutoencoderKL          # Model/autoencoder.py
-    from UNetModel        import UNetModel              # Diffusion/UNetModel.py
-    from context_encoder  import BioBERTContextEncoder  # Diffusion/context_encoder.py
-    from dataset          import NIH                    # Data/dataset.py
+    from autoencoder  import AutoencoderKL          # Model/autoencoder.py
+    from UNetModel    import UNetModel              # Diffusion/UNetModel.py
+    from dataset      import NIH                    # Data/dataset.py
+    from class_label  import ClassLabelEmbedder     # Data/class_label.py
 
     # ── Argument parsing ───────────────────────────────────────────────────────
     parser = argparse.ArgumentParser(description='LDM debug run with NIH CXR dataset')
@@ -528,25 +528,18 @@ if __name__ == '__main__':
           f'| batch_size: {args.batch_size}  | task: {args.task}')
 
     # =========================================================================
-    # BioBERT Context Encoder  (runs BEFORE LDM)
+    # Class Label Embedder  (runs BEFORE LDM)
     # =========================================================================
-    ctx_encoder = BioBERTContextEncoder(
-        model_name = 'dmis-lab/biobert-v1.1',
-        output_dim = 512,     # must match UNet context_dim
-        freeze     = True,
+    cls_embedder = ClassLabelEmbedder(
+        embed_dim  = 256,
+        output_dim = 512,   # must match UNet context_dim
     ).to(device)
 
-    # ── Encoder smoke-test ─────────────────────────────────────────────────────
-    _test_labels = ['Pneumonia', 'No Finding']
-    c_label = ctx_encoder(_test_labels, mode='label')          # [2, 1, 512]
-    print(f'\n[label]       {_test_labels}  →  {c_label.shape}')
-
-    _test_descs = [
-        'Bilateral pleural effusion with mild cardiomegaly.',
-        'No acute cardiopulmonary process. Lungs are clear.',
-    ]
-    c_desc = ctx_encoder(_test_descs, mode='description')      # [2, 1, 512]
-    print(f'[description] {_test_descs[0][:40]}...  →  {c_desc.shape}')
+    # ── Embedder smoke-test ────────────────────────────────────────────────────
+    _test_labels = ['Pneumonia|Effusion', 'Atelectasis', 'No Finding']
+    c_test = cls_embedder(_test_labels)          # [3, seq_len, 512]
+    print(f'\n[ClassLabelEmbedder] {_test_labels}')
+    print(f'  → {c_test.shape}   (seq_len={c_test.shape[1]})')
 
     # ── VAE config ────────────────────────────────────────────────────────────
     # x=[B,1,256,256] (grayscale CXR)
@@ -615,31 +608,32 @@ if __name__ == '__main__':
     ).to(device)
 
     # ── Batch factory from NIH DataLoader ────────────────────────────────────
-    # img       : Tensor [B, 1, 256, 256]  – real grayscale CXR
-    # label_str : str    e.g. "Pneumonia|Effusion"  – multi-label from NIH CSV
-    # context   : Tensor [B, 1, 512]       – BioBERT embedding of label_str
+    # img       : Tensor [B, 1, 256, 256]   – real grayscale CXR
+    # label_str : str  e.g. "Pneumonia|Effusion"  – multi-label from NIH CSV
+    # context   : Tensor [B, seq_len, 512]  – ClassLabelEmbedder sequence
 
-    def make_batch(mode: str = 'label') -> dict:
+    def make_batch() -> dict:
         """
         Pull one batch from the NIH DataLoader (via infinite generator).
 
-        Args:
-            mode : 'label' | 'description'
-                   Controls how BioBERT encodes label_str
-                   ('label'  → CLS token,
-                    'description' → mean-pool over tokens)
+        Pipeline:
+            NIH.__getitem__  →  (img [1,256,256],  label_str)
+            label_str        →  encode_label_str()
+                             →  [BOS, label_1, SEP, label_2, ..., EOS, PAD...]
+                             →  ClassLabelEmbedder
+                             →  context [B, seq_len, 512]
         Returns:
-            {'image': Tensor[B,1,256,256], 'context': Tensor[B,1,512]}
+            {'image': Tensor[B,1,256,256], 'context': Tensor[B,seq_len,512]}
         """
-        imgs, label_strs = next(_nih_gen)       # _nih_gen captured via closure
+        imgs, label_strs = next(_nih_gen)              # closure over _nih_gen
 
-        imgs = imgs.to(device)                  # [B, 1, 256, 256]
-        ctx  = ctx_encoder(list(label_strs), mode=mode).detach()  # [B, 1, 512]
+        imgs = imgs.to(device)                         # [B, 1, 256, 256]
+        ctx  = cls_embedder(list(label_strs)).detach() # [B, seq_len, 512]
 
         return {'image': imgs, 'context': ctx}
 
     # ── scale_factor init ─────────────────────────────────────────────────────
-    first_batch = make_batch(mode='label')
+    first_batch = make_batch()
     model.init_scale_factor(first_batch, is_first_batch=True)
 
     # =========================================================================
@@ -651,9 +645,9 @@ if __name__ == '__main__':
     print('\n--- Full pipeline forward pass ---')
     model.eval()
     with torch.no_grad():
-        batch = make_batch(mode='label')
+        batch = make_batch()
         x   = batch['image'].to(device)                        # [B, 1, 256, 256]
-        ctx = batch['context'].to(device)                      # [B, 1, 512]
+        ctx = batch['context'].to(device)                      # [B, seq_len, 512]
 
         # Step 1: x → VAE → z
         posterior = model.encode_first_stage(x)                # DiagonalGaussianDistribution
@@ -670,24 +664,12 @@ if __name__ == '__main__':
         x_recon = model.decode_first_stage(z_denoised)         # [B, 1, 256, 256]
         print(f'  Step 3 | z_denoised: {z_denoised.shape}  →  x_recon: {x_recon.shape}')
 
-    # ── Training loop  (label mode) ───────────────────────────────────────────
+    # ── Training loop ─────────────────────────────────────────────────────────
     optimizer = model.build_optimizer(lr=1e-4)
-    print('\n--- Training with label context (3 steps) ---')
+    print('\n--- Training (3 steps) ---')
     model.train()
     for step in range(3):
-        batch = make_batch(mode='label')
-        loss, loss_dict = model.training_step(batch)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        model.update_ema()
-        info = '  '.join(f'{k}={v.item():.4f}' for k, v in loss_dict.items())
-        print(f'  step {step+1}/3 | {info}')
-
-    # ── Training loop  (description mode) ────────────────────────────────────
-    print('\n--- Training with description context (3 steps) ---')
-    for step in range(3):
-        batch = make_batch(mode='description')
+        batch = make_batch()
         loss, loss_dict = model.training_step(batch)
         optimizer.zero_grad()
         loss.backward()
@@ -699,13 +681,13 @@ if __name__ == '__main__':
     # ── Validation ────────────────────────────────────────────────────────────
     print('\n--- Validation ---')
     model.eval()
-    ld, ld_ema = model.validation_step(make_batch(mode='label'))
+    ld, ld_ema = model.validation_step(make_batch())
     print('  val:', {k: f'{v.item():.4f}' for k, v in ld.items()})
     print('  ema:', {k: f'{v.item():.4f}' for k, v in ld_ema.items()})
 
-    # ── Sampling (label context) ───────────────────────────────────────────────
-    print('\n--- Sampling (5 steps, label) ---')
-    c_sample = ctx_encoder(['pneumonia', 'normal'], mode='label').detach()  # [2, 1, 512]
+    # ── Sampling ──────────────────────────────────────────────────────────────
+    print('\n--- Sampling (5 steps) ---')
+    c_sample = cls_embedder(['Pneumonia|Effusion', 'Atelectasis'])  # [2, seq_len, 512]
     x_gen = model.sample(c_sample, batch_size=2, verbose=False, timesteps=5)
     print(f'  generated: {x_gen.shape}')   # [2, 1, 256, 256]
 
