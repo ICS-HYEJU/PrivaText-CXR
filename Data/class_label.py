@@ -1,32 +1,39 @@
 """
-Data/class_label.py  –  Vocab and learnable class-label embedder
-=================================================================
+Data/class_label.py  –  Vocab and sequence-based class-label embedder
+======================================================================
 
-8 thorax disease classes (NIH ChestX-ray14 subset):
-    Atelectasis, Cardiomegaly, Effusion, Infiltration,
-    Mass, Nodule, Pneumonia, Pneumothorax
+Vocab (18 tokens = 4 special + 14 disease labels)
+--------------------------------------------------
+    PAD=0  BOS=1  EOS=2  SEP=3
+    Atelectasis=4  Cardiomegaly=5  Effusion=6  Infiltration=7
+    Mass=8  Nodule=9  Pneumonia=10  Pneumothorax=11
+    Consolidation=12  Edema=13  Emphysema=14  Fibrosis=15
+    Pleural Thickening=16  Hernia=17
 
-Vocab
------
-    CLASSES    : list[str]  – ordered class names
-    VOCAB      : dict[str → int]  – class name → index (0-7)
-    IDX2CLASS  : dict[int → str]  – index → class name
-    NUM_CLASSES: int  – 8
+Sequence format (per sample)
+-----------------------------
+    BOS  label_1  SEP  label_2  SEP  ...  label_n  EOS  [PAD ...]
+
+    "Pneumonia|Effusion"  → [BOS, Pneumonia, SEP, Effusion, EOS]
+                          → [1, 10, 3, 6, 2]
+    "Atelectasis"         → [BOS, Atelectasis, EOS]
+                          → [1, 4, 2]
+    "No Finding"          → [BOS, EOS]          (unknown labels skipped)
+                          → [1, 2]
+
+    Sequences in a batch are right-padded with PAD to match max seq_len.
 
 ClassLabelEmbedder
 ------------------
-    Input  : list[str]  – label strings, possibly multi-label e.g. "Pneumonia|Effusion"
-    Process: split by "|" → look up each valid label → mean-pool embeddings → project
-    Output : Tensor [B, 1, output_dim]  (same shape as BioBERTContextEncoder output)
-
-    Unknown labels (e.g. "No Finding") are silently skipped.
-    If no valid label is found for a sample, a learned <unk> token is used.
+    Input  : list[str]   – NIH label strings (possibly multi-label)
+    Output : Tensor [B, seq_len, output_dim]
+             output_dim must match LDM UNet context_dim (default: 512)
 
 Usage:
     embedder = ClassLabelEmbedder(embed_dim=256, output_dim=512).to(device)
 
     label_strs = ["Pneumonia|Effusion", "Atelectasis", "No Finding"]
-    ctx = embedder(label_strs)   # [3, 1, 512]
+    ctx = embedder(label_strs)   # [3, seq_len, 512]
 """
 
 import torch
@@ -37,20 +44,85 @@ import torch.nn as nn
 # Vocabulary
 # =============================================================================
 
-CLASSES: list = [
-    'Atelectasis',
-    'Cardiomegaly',
-    'Effusion',
-    'Infiltration',
-    'Mass',
-    'Nodule',
-    'Pneumonia',
-    'Pneumothorax',
-]
+VOCAB: dict = {
+    'PAD': 0, 'BOS': 1, 'EOS': 2, 'SEP': 3,
+    'Atelectasis': 4, 'Cardiomegaly': 5, 'Effusion': 6,
+    'Infiltration': 7, 'Mass': 8, 'Nodule': 9, 'Pneumonia': 10, 'Pneumothorax': 11,
+    'Consolidation': 12, 'Edema': 13, 'Emphysema': 14, 'Fibrosis': 15,
+    'Pleural Thickening': 16, 'Hernia': 17,
+}
 
-VOCAB:      dict = {cls: idx for idx, cls in enumerate(CLASSES)}
-IDX2CLASS:  dict = {idx: cls for cls, idx in VOCAB.items()}
-NUM_CLASSES: int = len(CLASSES)   # 8
+IDX2TOKEN:  dict = {v: k for k, v in VOCAB.items()}
+VOCAB_SIZE: int  = len(VOCAB)     # 18
+
+DISEASE_LABELS: list = [k for k in VOCAB if k not in ('PAD', 'BOS', 'EOS', 'SEP')]
+# ['Atelectasis', ..., 'Hernia']  – 14 disease labels
+
+
+# =============================================================================
+# Sequence helpers
+# =============================================================================
+
+def encode_label_str(label_str: str) -> list:
+    """
+    Convert a NIH multi-label string to a token-index sequence.
+
+    Format: BOS  label_1  SEP  label_2  SEP  ...  label_n  EOS
+
+    Unknown tokens (e.g. "No Finding") are silently skipped.
+    If no valid label is found, returns [BOS, EOS].
+
+    Args:
+        label_str : str  e.g. "Pneumonia|Effusion"
+    Returns:
+        list[int]  e.g. [1, 10, 3, 6, 2]
+    """
+    parts = [p.strip() for p in label_str.split('|')]
+    valid = [p for p in parts if p in VOCAB]
+
+    tokens = [VOCAB['BOS']]
+    for i, label in enumerate(valid):
+        tokens.append(VOCAB[label])
+        if i < len(valid) - 1:
+            tokens.append(VOCAB['SEP'])
+    tokens.append(VOCAB['EOS'])
+    return tokens
+
+
+def decode_token_ids(token_ids: list) -> str:
+    """
+    Reverse encode_label_str: token indices → human-readable string.
+
+    Args:
+        token_ids : list[int]
+    Returns:
+        str  e.g. "[BOS] Pneumonia [SEP] Effusion [EOS]"
+    """
+    return ' '.join(IDX2TOKEN.get(i, f'<{i}>') for i in token_ids)
+
+
+def pad_sequences(sequences: list, pad_idx: int = VOCAB['PAD']) -> tuple:
+    """
+    Right-pad a list of token-index sequences to the same length.
+
+    Args:
+        sequences : list[list[int]]
+        pad_idx   : int  padding token index (default: VOCAB['PAD'] = 0)
+    Returns:
+        padded : LongTensor  [B, max_seq_len]
+        mask   : BoolTensor  [B, max_seq_len]
+                 True = real token, False = PAD
+    """
+    max_len = max(len(s) for s in sequences)
+    padded, mask = [], []
+    for s in sequences:
+        pad_len = max_len - len(s)
+        padded.append(s + [pad_idx] * pad_len)
+        mask.append([True] * len(s) + [False] * pad_len)
+    return (
+        torch.tensor(padded, dtype=torch.long),
+        torch.tensor(mask,   dtype=torch.bool),
+    )
 
 
 # =============================================================================
@@ -59,71 +131,64 @@ NUM_CLASSES: int = len(CLASSES)   # 8
 
 class ClassLabelEmbedder(nn.Module):
     """
-    Learnable embedding table for the 8 thorax disease class labels.
+    Sequence-based learnable embedder for NIH thorax disease class labels.
 
-    Multi-label handling (e.g. "Pneumonia|Effusion"):
-        - Split by '|'
-        - Embed each recognised label
-        - Mean-pool → linear projection → [B, 1, output_dim]
+    Encodes each label string as a padded token sequence, embeds it, then
+    projects to output_dim. Output is a full sequence (not mean-pooled),
+    enabling cross-attention over individual tokens in the UNet.
 
-    Unknown labels (e.g. "No Finding", "Consolidation") are skipped.
-    If a sample has no recognisable label, a dedicated <unk> token is used.
+    Pipeline:
+        label_str → encode_label_str() → [BOS, l1, SEP, l2, ..., EOS, PAD...]
+                  → nn.Embedding       → [B, seq_len, embed_dim]
+                  → nn.Linear          → [B, seq_len, output_dim]
+
+    PAD positions are zeroed out after projection so they do not inject
+    signal into the cross-attention keys/values.
 
     Args:
-        embed_dim  : Dimension of the internal embedding table (default: 256)
-        output_dim : Final output dimension; must match LDM context_dim (default: 512)
+        embed_dim  : Dimension of the token embedding table (default: 256)
+        output_dim : Output sequence dim; must match UNet context_dim (default: 512)
     """
-
-    UNK = '<unk>'
 
     def __init__(self, embed_dim: int = 256, output_dim: int = 512):
         super().__init__()
         self.embed_dim  = embed_dim
         self.output_dim = output_dim
 
-        # NUM_CLASSES slots + 1 <unk> slot
-        self.embedding = nn.Embedding(NUM_CLASSES + 1, embed_dim)
-        self.unk_idx   = NUM_CLASSES          # index 8
+        # padding_idx=0: PAD embedding is always zero vector
+        self.embedding = nn.Embedding(VOCAB_SIZE, embed_dim,
+                                      padding_idx=VOCAB['PAD'])
+        self.proj      = nn.Linear(embed_dim, output_dim)
 
-        self.proj = nn.Linear(embed_dim, output_dim)
-
-        n_emb  = self.embedding.weight.numel()
-        n_proj = sum(p.numel() for p in self.proj.parameters())
-        print(f'[ClassLabelEmbedder] vocab={NUM_CLASSES} (+1 unk)  '
+        n_params = sum(p.numel() for p in self.parameters())
+        print(f'[ClassLabelEmbedder] vocab_size={VOCAB_SIZE}  '
               f'embed_dim={embed_dim}  output_dim={output_dim}  '
-              f'params: {n_emb + n_proj:,}')
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
+              f'params: {n_params:,}')
 
     @property
     def device(self):
         return self.embedding.weight.device
-
-    def _label_str_to_tensor(self, label_str: str) -> torch.Tensor:
-        """
-        "Pneumonia|Effusion" → mean embedding [embed_dim].
-        Unknown tokens skipped; falls back to <unk> if nothing recognised.
-        """
-        parts   = [p.strip() for p in label_str.split('|')]
-        indices = [VOCAB[p] for p in parts if p in VOCAB]
-        if not indices:
-            indices = [self.unk_idx]
-        idx_t = torch.tensor(indices, dtype=torch.long, device=self.device)
-        return self.embedding(idx_t).mean(dim=0)    # [embed_dim]
-
-    # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(self, label_strs: list) -> torch.Tensor:
         """
         Args:
             label_strs : list[str]  e.g. ["Pneumonia|Effusion", "Atelectasis"]
         Returns:
-            Tensor [B, 1, output_dim]
+            Tensor [B, seq_len, output_dim]
+            seq_len = max sequence length in the batch (shorter seqs PAD-padded)
+            PAD positions are zero-filled in the output.
         """
-        embs = torch.stack(
-            [self._label_str_to_tensor(s) for s in label_strs]
-        )                                        # [B, embed_dim]
-        out = self.proj(embs).unsqueeze(1)       # [B, 1, output_dim]
+        sequences       = [encode_label_str(s) for s in label_strs]
+        padded, pad_mask = pad_sequences(sequences, pad_idx=VOCAB['PAD'])
+        padded           = padded.to(self.device)     # [B, seq_len]
+
+        emb = self.embedding(padded)                  # [B, seq_len, embed_dim]
+        out = self.proj(emb)                          # [B, seq_len, output_dim]
+
+        # Zero out PAD positions (proj bias would otherwise give non-zero output)
+        real_mask = pad_mask.to(self.device).unsqueeze(-1)  # [B, seq_len, 1]
+        out = out * real_mask                               # [B, seq_len, output_dim]
+
         return out
 
 
@@ -137,28 +202,50 @@ if __name__ == '__main__':
 
     # ── Vocab inspection ──────────────────────────────────────────────────────
     print('=== Vocab ===')
-    for name, idx in VOCAB.items():
-        print(f'  [{idx}] {name}')
-    print(f'  [{NUM_CLASSES}] <unk>  (unknown / No Finding / etc.)\n')
+    for token, idx in VOCAB.items():
+        print(f'  [{idx:2d}] {token}')
+
+    # ── Sequence encoding ─────────────────────────────────────────────────────
+    print('\n=== encode_label_str ===')
+    test_strs = [
+        'Pneumonia|Effusion',            # two known labels
+        'Atelectasis',                   # single known label
+        'Mass|Nodule|Cardiomegaly',      # three known labels
+        'No Finding',                    # all unknown → [BOS, EOS]
+        'Consolidation|Pleural Thickening',
+    ]
+    for s in test_strs:
+        ids = encode_label_str(s)
+        print(f'  {s!r:40s} → {ids}')
+        print(f'  {"":40s}   {decode_token_ids(ids)}')
+
+    # ── Padding ───────────────────────────────────────────────────────────────
+    print('\n=== pad_sequences ===')
+    seqs = [encode_label_str(s) for s in test_strs]
+    padded, mask = pad_sequences(seqs)
+    print(f'  padded shape : {padded.shape}')   # [5, max_seq_len]
+    print(f'  mask   shape : {mask.shape}')
+    print(f'  padded:\n{padded}')
 
     # ── Embedder ──────────────────────────────────────────────────────────────
+    print('\n=== ClassLabelEmbedder ===')
     embedder = ClassLabelEmbedder(embed_dim=256, output_dim=512).to(device)
 
-    test_cases = [
-        'Atelectasis',               # single label, in vocab
-        'Pneumonia|Effusion',        # multi-label, both in vocab
-        'Mass|Nodule|Cardiomegaly',  # 3 labels
-        'No Finding',                # unknown → <unk>
-        'Consolidation|Effusion',    # one unknown, one known
-    ]
+    ctx = embedder(test_strs)   # [5, seq_len, 512]
+    print(f'\n  input  : {len(test_strs)} samples')
+    print(f'  output : {ctx.shape}')
 
-    print('\n=== Embedding test ===')
-    ctx = embedder(test_cases)       # [5, 1, 512]
-    print(f'Input  : {len(test_cases)} samples')
-    print(f'Output : {ctx.shape}')   # [5, 1, 512]
-    assert ctx.shape == (len(test_cases), 1, 512), 'Shape mismatch!'
+    for s, vec in zip(test_strs, ctx):
+        print(f'  {s!r:40s} → seq_len={vec.shape[0]}  '
+              f'non-zero rows={int((vec.abs().sum(-1) > 0).sum())}')
 
-    for label, vec in zip(test_cases, ctx):
-        print(f'  {label!r:40s} → {vec.shape}  norm={vec.norm().item():.4f}')
-
+    # PAD positions must be all-zero
+    seqs_raw  = [encode_label_str(s) for s in test_strs]
+    padded, _ = pad_sequences(seqs_raw)
+    for b in range(len(test_strs)):
+        seq_len = len(seqs_raw[b])
+        pad_out = ctx[b, seq_len:, :]    # PAD region
+        assert pad_out.abs().max().item() == 0.0, \
+            f'Sample {b}: PAD positions are not zero!'
+    print('\n  PAD positions are zero: OK')
     print('\nClassLabelEmbedder test passed!')
