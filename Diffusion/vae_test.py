@@ -189,23 +189,97 @@ def build_vae(image_size: int) -> AutoencoderKL:
     return AutoencoderKL(vae_args)
 
 
+def _extract_state_dict(raw: dict) -> dict:
+    """
+    Extract the actual parameter dict from various checkpoint formats.
+
+    Handles:
+        raw                               → plain state_dict
+        {'state_dict': ..., 'epoch': ...} → common training checkpoint
+        {'model': ..., 'optimizer': ...}  → another common format
+        {'model_state_dict': ...}         → yet another format
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    # Try well-known wrapper keys in priority order
+    for key in ('state_dict', 'model', 'model_state_dict', 'net', 'weights'):
+        if key in raw:
+            print(f'  [ckpt] using raw["{key}"] as state_dict')
+            return raw[key]
+
+    # Assume the dict itself is the state_dict
+    return raw
+
+
+def _auto_strip_prefix(state_dict: dict, model_state_dict: dict) -> dict:
+    """
+    Auto-detect and strip a common key prefix in checkpoint state_dict.
+
+    Example: checkpoint saved inside LDM has keys like
+        'first_stage_model.encoder.down.0.block.0.norm1.weight'
+    but AutoencoderKL expects
+        'encoder.down.0.block.0.norm1.weight'
+    → prefix 'first_stage_model.' is detected and stripped.
+    """
+    ckpt_keys  = list(state_dict.keys())
+    model_keys = list(model_state_dict.keys())
+
+    for ck in ckpt_keys:
+        for mk in model_keys[:5]:           # probe with first 5 model keys
+            if ck.endswith(mk):
+                prefix = ck[: len(ck) - len(mk)]
+                if not prefix:
+                    break
+                # Verify: at least 80 % of model keys are found after stripping
+                stripped = {k[len(prefix):]: v
+                            for k, v in state_dict.items()
+                            if k.startswith(prefix)}
+                if len(stripped) >= len(model_keys) * 0.8:
+                    print(f'  [ckpt] auto-stripped prefix "{prefix}"')
+                    return stripped
+
+    return state_dict
+
+
 def load_vae(ckpt_path: str, device: str, image_size: int) -> AutoencoderKL:
     """
-    Load AutoencoderKL from checkpoint.
+    Load AutoencoderKL from checkpoint with automatic key-format detection.
 
-    Supports:
-        - plain state_dict : torch.save(model.state_dict(), path)
-        - wrapped dict     : torch.save({'state_dict': ..., 'epoch': ...}, path)
+    Handles three common mismatches automatically:
+      1. Wrapped dicts  : {'state_dict': ..., 'epoch': ...}
+      2. Key prefix     : 'first_stage_model.*', 'module.*', etc.
+      3. Strict mismatch: reports remaining missing / unexpected counts
     """
     vae = build_vae(image_size).to(device)
-    ckpt = torch.load(ckpt_path, map_location=device)
-    state_dict = ckpt.get('state_dict', ckpt)
+
+    raw        = torch.load(ckpt_path, map_location=device)
+    state_dict = _extract_state_dict(raw)
+
+    # Diagnose before loading
+    ckpt_sample  = list(state_dict.keys())[:3]
+    model_sample = list(vae.state_dict().keys())[:3]
+    print(f'[VAE] checkpoint  : {ckpt_path}')
+    print(f'  ckpt  keys (first 3): {ckpt_sample}')
+    print(f'  model keys (first 3): {model_sample}')
+
+    # Try to fix prefix mismatch automatically
+    state_dict = _auto_strip_prefix(state_dict, vae.state_dict())
+
     missing, unexpected = vae.load_state_dict(state_dict, strict=False)
-    print(f'[VAE] loaded  {ckpt_path}')
-    if missing:
+
+    if missing or unexpected:
         print(f'  missing keys   : {len(missing)}')
-    if unexpected:
         print(f'  unexpected keys: {len(unexpected)}')
+        if missing:
+            print(f'    (first 3 missing) {missing[:3]}')
+        if unexpected:
+            print(f'    (first 3 unexpected) {unexpected[:3]}')
+        if len(missing) > len(vae.state_dict()) * 0.1:
+            print('  [WARNING] >10% keys missing – checkpoint may be incompatible')
+    else:
+        print('  all keys matched perfectly')
+
     vae.eval()
     return vae
 
