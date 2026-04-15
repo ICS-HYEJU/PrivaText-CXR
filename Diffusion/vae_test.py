@@ -174,9 +174,12 @@ def parse_args():
     parser.add_argument('--batch_size',  default=16,   type=int)
     parser.add_argument('--num_workers', default=4,    type=int)
     parser.add_argument('--output_dir',  default='./vae_test_outputs',
-                        help='Root directory for saved images (used with --save_images)')
+                        help='Base directory; a sub-directory named after the '
+                             'checkpoint stem is created automatically '
+                             '(e.g. output_dir/vae_epoch50/real|recon/)')
     parser.add_argument('--save_images', action='store_true',
-                        help='Save real and reconstructed images to output_dir')
+                        help='Save real and reconstructed images under '
+                             'output_dir/<ckpt_stem>/')
     return parser.parse_args()
 
 
@@ -223,16 +226,22 @@ def main():
         reset_real_features= False,  # keep real features across batches
     ).to(device)
 
+    # ── Output directory: output_dir / <ckpt_stem> / ─────────────────────────
+    ckpt_stem = os.path.splitext(os.path.basename(args.ckpt_path))[0]
+    save_dir  = os.path.join(args.output_dir, ckpt_stem) if args.save_images else None
+    if save_dir:
+        print(f'[save] {os.path.abspath(save_dir)}/')
+
     # ── Run evaluation ────────────────────────────────────────────────────────
-    save_dir = args.output_dir if args.save_images else None
-    avg_mse  = evaluate(vae, test_loader, device, fid_metric, save_dir)
+    avg_mse = evaluate(vae, test_loader, device, fid_metric, save_dir)
 
     # ── Results ───────────────────────────────────────────────────────────────
     fid_score = fid_metric.compute().item()
 
     print()
     print('=' * 45)
-    print(f'  Test samples  : {len(test_dataset)}')
+    print(f'  Checkpoint      : {ckpt_stem}')
+    print(f'  Test samples    : {len(test_dataset)}')
     print(f'  Avg MSE (recon) : {avg_mse:.6f}')
     print(f'  FID score       : {fid_score:.4f}')
     print('=' * 45)
