@@ -9,11 +9,13 @@ Pipeline
        x  →  encode()  →  posterior.mode()  →  decode()  →  x_recon
    (mode() = deterministic: uses posterior mean, no sampling noise)
 3. Compute FID between real and reconstructed images
-   (uses torchmetrics.image.FrechetInceptionDistance with InceptionV3)
+   - InceptionV3 (torchvision built-in) → pool3 features [N, 2048]
+   - Compute μ, Σ for real and recon sets
+   - FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2·sqrt(Σ_r·Σ_g))
 4. Report Avg MSE + FID
 
-Dependencies:
-    pip install torchmetrics[image]   (for FrechetInceptionDistance)
+Dependencies (no torchmetrics / torch-fidelity needed):
+    torch, torchvision, numpy, scipy   ← all standard packages
 
 Usage:
     python vae_test.py \\
@@ -21,16 +23,19 @@ Usage:
         --data_path  /storage/hjchoi/archive/image_file \\
         --label_path /storage/hjchoi/archive/Data_Entry_2017.csv \\
         --batch_size 16 \\
-        --save_images                  # optional: save real/recon PNGs
+        --save_images          # optional: save real/recon PNGs
 """
 
 import os
 import sys
 import argparse
 
+import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchvision import models
 from tqdm import tqdm
 
 # ── Path setup ────────────────────────────────────────────────────────────────
@@ -46,19 +51,123 @@ from dataset     import NIH             # Data/dataset.py
 
 
 # =============================================================================
-# Helpers
+# FID  (no external library)
 # =============================================================================
 
-def to_uint8_rgb(x: torch.Tensor) -> torch.Tensor:
+class InceptionV3Features(nn.Module):
     """
-    [B, 1, H, W] float in [-1, 1]  →  [B, 3, H, W] uint8 [0, 255]
+    Extract 2048-dim pool3 features from a pretrained InceptionV3.
 
-    FrechetInceptionDistance (InceptionV3) requires 3-channel uint8 input.
-    Grayscale CXR is converted by repeating the single channel three times.
+    Input  : [B, 3, H, W]  float32 in [0, 1]  (any spatial size ≥ 75)
+    Output : [B, 2048]
+    """
+
+    def __init__(self):
+        super().__init__()
+        inc = models.inception_v3(weights=models.Inception_V3_Weights.DEFAULT)
+        inc.eval()
+
+        # Build feature extractor up to AdaptiveAvgPool (pool3)
+        # Matches the standard FID feature space
+        self.layers = nn.Sequential(
+            inc.Conv2d_1a_3x3,
+            inc.Conv2d_2a_3x3,
+            inc.Conv2d_2b_3x3,
+            nn.MaxPool2d(3, stride=2),
+            inc.Conv2d_3b_1x1,
+            inc.Conv2d_4a_3x3,
+            nn.MaxPool2d(3, stride=2),
+            inc.Mixed_5b,
+            inc.Mixed_5c,
+            inc.Mixed_5d,
+            inc.Mixed_6a,
+            inc.Mixed_6b,
+            inc.Mixed_6c,
+            inc.Mixed_6d,
+            inc.Mixed_6e,
+            inc.Mixed_7a,
+            inc.Mixed_7b,
+            inc.Mixed_7c,
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x : [B, 3, H, W]  float32 in [0, 1]
+        Returns:
+            [B, 2048]
+        """
+        # InceptionV3 expects 299×299
+        if x.shape[-2] != 299 or x.shape[-1] != 299:
+            x = F.interpolate(x, size=(299, 299),
+                              mode='bilinear', align_corners=False)
+        feats = self.layers(x)                  # [B, 2048, 1, 1]
+        return feats.view(feats.shape[0], -1)   # [B, 2048]
+
+
+def _compute_stats(features: np.ndarray):
+    """Mean vector and covariance matrix of feature array [N, D]."""
+    mu    = np.mean(features, axis=0)           # [D]
+    sigma = np.cov(features, rowvar=False)      # [D, D]
+    return mu, sigma
+
+
+def compute_fid(feats_real: np.ndarray, feats_fake: np.ndarray,
+                eps: float = 1e-6) -> float:
+    """
+    Fréchet Inception Distance between two feature sets.
+
+    FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2·sqrt(Σ_r·Σ_g))
+
+    Args:
+        feats_real : [N, D]  InceptionV3 features of real images
+        feats_fake : [N, D]  InceptionV3 features of generated/reconstructed images
+        eps        : small offset added to diagonal for numerical stability
+    Returns:
+        fid_score : float
+    """
+    from scipy import linalg
+
+    mu1, sigma1 = _compute_stats(feats_real)
+    mu2, sigma2 = _compute_stats(feats_fake)
+
+    diff = mu1 - mu2
+
+    # Matrix square root of sigma1 @ sigma2
+    covmean, _ = linalg.sqrtm(sigma1 @ sigma2, disp=False)
+
+    # Numerical guard: if sqrtm fails (non-finite), add eps to diagonal
+    if not np.isfinite(covmean).all():
+        offset   = np.eye(sigma1.shape[0]) * eps
+        covmean  = linalg.sqrtm((sigma1 + offset) @ (sigma2 + offset))
+
+    # sqrtm may return tiny imaginary parts due to floating-point errors
+    if np.iscomplexobj(covmean):
+        if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-2):
+            raise ValueError(
+                f'Imaginary component in matrix sqrt: {np.max(np.abs(covmean.imag))}'
+            )
+        covmean = covmean.real
+
+    fid = float(diff @ diff +
+                np.trace(sigma1 + sigma2 - 2.0 * covmean))
+    return fid
+
+
+# =============================================================================
+# VAE helpers
+# =============================================================================
+
+def to_float_rgb(x: torch.Tensor) -> torch.Tensor:
+    """
+    [B, 1, H, W] float in [-1, 1]  →  [B, 3, H, W] float in [0, 1]
+    InceptionV3 expects 3-channel float input in [0, 1].
     """
     x = (x.clamp(-1., 1.) + 1.) / 2.   # [-1, 1] → [0, 1]
-    x = (x * 255.).to(torch.uint8)      # [0, 1]  → [0, 255]
-    return x.repeat(1, 3, 1, 1)         # [B, 1, H, W] → [B, 3, H, W]
+    return x.repeat(1, 3, 1, 1)         # 1ch → 3ch
 
 
 def build_vae(image_size: int) -> AutoencoderKL:
@@ -67,7 +176,7 @@ def build_vae(image_size: int) -> AutoencoderKL:
         in_channels      = 1,
         out_channels     = 1,
         ch               = 128,
-        ch_mult          = [1, 2, 4, 4, 4],  # 4 downsamples (÷16)
+        ch_mult          = [1, 2, 4, 4, 4],
         num_res_blocks   = 2,
         attn_resolutions = [32, 16],
         dropout          = 0.0,
@@ -82,11 +191,11 @@ def build_vae(image_size: int) -> AutoencoderKL:
 
 def load_vae(ckpt_path: str, device: str, image_size: int) -> AutoencoderKL:
     """
-    Load AutoencoderKL from a checkpoint.
+    Load AutoencoderKL from checkpoint.
 
-    Supports two checkpoint formats:
-        - plain state_dict  : torch.save(model.state_dict(), path)
-        - wrapped dict      : torch.save({'state_dict': ..., 'epoch': ...}, path)
+    Supports:
+        - plain state_dict : torch.save(model.state_dict(), path)
+        - wrapped dict     : torch.save({'state_dict': ..., 'epoch': ...}, path)
     """
     vae = build_vae(image_size).to(device)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -102,47 +211,47 @@ def load_vae(ckpt_path: str, device: str, image_size: int) -> AutoencoderKL:
 
 
 # =============================================================================
-# Evaluation
+# Evaluation loop
 # =============================================================================
 
 @torch.no_grad()
-def evaluate(vae, test_loader, device, fid_metric, save_dir=None):
+def evaluate(vae, inception, test_loader, device, save_dir=None):
     """
-    Run VAE reconstruction on the test set.
-
-    Args:
-        vae         : AutoencoderKL in eval mode
-        test_loader : DataLoader (NIH, task='test')
-        device      : 'cuda' | 'cpu'
-        fid_metric  : FrechetInceptionDistance instance (already on device)
-        save_dir    : if not None, save real/recon PNGs to save_dir/real & /recon
+    Run VAE reconstruction and collect InceptionV3 features for FID.
 
     Returns:
-        avg_mse : float
+        avg_mse    : float
+        feats_real : np.ndarray [N, 2048]
+        feats_recon: np.ndarray [N, 2048]
     """
     if save_dir:
         os.makedirs(os.path.join(save_dir, 'real'),  exist_ok=True)
         os.makedirs(os.path.join(save_dir, 'recon'), exist_ok=True)
 
-    mse_total = 0.
-    n_batches = 0
-    img_idx   = 0
+    mse_total    = 0.
+    n_batches    = 0
+    img_idx      = 0
+    all_real     = []
+    all_recon    = []
 
     for imgs, _ in tqdm(test_loader, desc='[VAE test]'):
         imgs = imgs.to(device)                  # [B, 1, 256, 256]  in [-1, 1]
 
-        # ── Test-mode inference: deterministic (no sampling noise) ────────────
+        # ── Test-mode inference (deterministic) ──────────────────────────────
         posterior = vae.encode(imgs)            # DiagonalGaussianDistribution
-        z         = posterior.mode()            # [B, 1, 16, 16]  ← mean, not sample
+        z         = posterior.mode()            # [B, 1, 16, 16]
         recon     = vae.decode(z)               # [B, 1, 256, 256]
 
-        # ── Reconstruction quality ────────────────────────────────────────────
+        # ── MSE ───────────────────────────────────────────────────────────────
         mse_total += F.mse_loss(recon, imgs).item()
         n_batches += 1
 
-        # ── FID update  (needs uint8 RGB) ─────────────────────────────────────
-        fid_metric.update(to_uint8_rgb(imgs),  real=True)
-        fid_metric.update(to_uint8_rgb(recon), real=False)
+        # ── InceptionV3 features  (float RGB [0,1]) ───────────────────────────
+        real_rgb  = to_float_rgb(imgs)          # [B, 3, 256, 256]
+        recon_rgb = to_float_rgb(recon)         # [B, 3, 256, 256]
+
+        all_real .append(inception(real_rgb) .cpu().numpy())
+        all_recon.append(inception(recon_rgb).cpu().numpy())
 
         # ── Optional: save images ─────────────────────────────────────────────
         if save_dir:
@@ -155,7 +264,11 @@ def evaluate(vae, test_loader, device, fid_metric, save_dir=None):
                            os.path.join(save_dir, 'recon', fname))
                 img_idx += 1
 
-    return mse_total / n_batches
+    feats_real  = np.concatenate(all_real,  axis=0)  # [N, 2048]
+    feats_recon = np.concatenate(all_recon, axis=0)  # [N, 2048]
+    avg_mse     = mse_total / n_batches
+
+    return avg_mse, feats_real, feats_recon
 
 
 # =============================================================================
@@ -174,8 +287,8 @@ def parse_args():
     parser.add_argument('--batch_size',  default=16,   type=int)
     parser.add_argument('--num_workers', default=4,    type=int)
     parser.add_argument('--output_dir',  default='./vae_test_outputs',
-                        help='Base directory; a sub-directory named after the '
-                             'checkpoint stem is created automatically '
+                        help='Base directory; sub-directory named after checkpoint '
+                             'stem is created automatically '
                              '(e.g. output_dir/vae_epoch50/real|recon/)')
     parser.add_argument('--save_images', action='store_true',
                         help='Save real and reconstructed images under '
@@ -192,7 +305,7 @@ def main():
     nih_args = argparse.Namespace(
         data_path  = args.data_path,
         label_path = args.label_path,
-        task       = 'test',            # ← test split, no augmentation
+        task       = 'test',
         image_size = args.image_size,
         image_show = False,
     )
@@ -200,31 +313,22 @@ def main():
     test_loader  = DataLoader(
         test_dataset,
         batch_size  = args.batch_size,
-        shuffle     = False,            # keep deterministic order for test
+        shuffle     = False,
         num_workers = args.num_workers,
-        drop_last   = False,            # evaluate every sample
+        drop_last   = False,
         pin_memory  = (device == 'cuda'),
     )
     print(f'[NIH]  test samples : {len(test_dataset)}'
           f'  |  batch_size : {args.batch_size}')
 
-    # ── Load VAE (eval mode, frozen) ──────────────────────────────────────────
+    # ── Load VAE ──────────────────────────────────────────────────────────────
     vae = load_vae(args.ckpt_path, device, args.image_size)
     for p in vae.parameters():
         p.requires_grad = False
 
-    # ── FID metric ────────────────────────────────────────────────────────────
-    try:
-        from torchmetrics.image.fid import FrechetInceptionDistance
-    except ImportError:
-        raise ImportError(
-            'torchmetrics is required for FID.\n'
-            '  pip install torchmetrics[image]'
-        )
-    fid_metric = FrechetInceptionDistance(
-        feature            = 2048,   # InceptionV3 pool3 features
-        reset_real_features= False,  # keep real features across batches
-    ).to(device)
+    # ── InceptionV3 feature extractor ─────────────────────────────────────────
+    print('[InceptionV3] loading pretrained weights ...')
+    inception = InceptionV3Features().to(device)
 
     # ── Output directory: output_dir / <ckpt_stem> / ─────────────────────────
     ckpt_stem = os.path.splitext(os.path.basename(args.ckpt_path))[0]
@@ -233,11 +337,15 @@ def main():
         print(f'[save] {os.path.abspath(save_dir)}/')
 
     # ── Run evaluation ────────────────────────────────────────────────────────
-    avg_mse = evaluate(vae, test_loader, device, fid_metric, save_dir)
+    avg_mse, feats_real, feats_recon = evaluate(
+        vae, inception, test_loader, device, save_dir
+    )
+
+    # ── FID ───────────────────────────────────────────────────────────────────
+    print('[FID] computing ...')
+    fid_score = compute_fid(feats_real, feats_recon)
 
     # ── Results ───────────────────────────────────────────────────────────────
-    fid_score = fid_metric.compute().item()
-
     print()
     print('=' * 45)
     print(f'  Checkpoint      : {ckpt_stem}')
