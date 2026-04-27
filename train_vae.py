@@ -105,6 +105,18 @@ def parse_args():
     parser.add_argument("--grad_clip",    default=1.0,  type=float,
                         help="Max gradient norm for clipping (0 = disabled)")
 
+    # ── Scheduler (CyclicLR) ──────────────────────────────────────────────────
+    parser.add_argument("--use_scheduler", default=True,  type=bool,
+                        help="Enable CyclicLR scheduler")
+    parser.add_argument("--sched_lr_min",  default=1e-6,  type=float,
+                        help="CyclicLR base_lr  (lower bound)")
+    parser.add_argument("--sched_lr_max",  default=1e-4,  type=float,
+                        help="CyclicLR max_lr   (upper bound)")
+    parser.add_argument("--sched_step_up", default=15,    type=int,
+                        help="Epochs to ramp lr from base_lr → max_lr")
+    parser.add_argument("--sched_step_dn", default=10,    type=int,
+                        help="Epochs to ramp lr from max_lr → base_lr")
+
     # ── Checkpoint ────────────────────────────────────────────────────────────
     parser.add_argument("--save_dir",   default="./checkpoints/vae")
     parser.add_argument("--save_every", default=10,   type=int,
@@ -255,6 +267,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
 
         # ── Step log ──────────────────────────────────────────────────────────
         if (step + 1) % args.log_every == 0:
+            cur_lr = optimizer.param_groups[0]['lr']
             print(
                 f"  [Ep {epoch:4d} | Step {step+1:5d}/{len(loader)}]"
                 f"  total={loss_dict['loss_total']:.4f}"
@@ -263,6 +276,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
                 f"  perc={loss_dict['loss_perc']:.4f}"
                 f"  kl={loss_dict['loss_kl']:.6f}"
                 f"  mmd={loss_dict['loss_mmd']:.6f}"
+                f"  lr={cur_lr:.2e}"
             )
 
     n = len(loader)
@@ -288,6 +302,17 @@ def main():
     criterion = build_criterion(args).to(device)   # LPIPS has VGG buffers → must be on device
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+    scheduler = None
+    if args.use_scheduler:
+        scheduler = torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr       = args.sched_lr_min,
+            max_lr        = args.sched_lr_max,
+            step_size_up  = args.sched_step_up,
+            step_size_down= args.sched_step_dn,
+            cycle_momentum= False,   # AdamW has no momentum param
+        )
+
     # ── Resume ────────────────────────────────────────────────────────────────
     # If training was interrupted (e.g. server crash, time limit), resume from
     # a saved checkpoint instead of restarting from scratch.
@@ -302,6 +327,8 @@ def main():
             if "step" in state and isinstance(state["step"], torch.Tensor):
                 state["step"] = state["step"].cpu()
         start_epoch = ckpt["epoch"] + 1               # continue from the next epoch
+        if scheduler and "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
         print(f"[Resume] Loaded epoch {ckpt['epoch']}")
 
     # ── Config summary ────────────────────────────────────────────────────────
@@ -315,12 +342,20 @@ def main():
           f"  α={args.alpha}  λ_info={args.lambda_info}"
           f"  → KL_eff={(1-args.alpha):.4f}  MMD_eff={(args.alpha+args.lambda_info-1):.4f}")
     print(f"  debug mode : {args.debug}   save_every : {args.save_every} ep")
+    if args.use_scheduler:
+        print(f"  scheduler  : CyclicLR  lr=[{args.sched_lr_min:.0e}, {args.sched_lr_max:.0e}]"
+              f"  step_up={args.sched_step_up}  step_dn={args.sched_step_dn}"
+              f"  cycle={args.sched_step_up + args.sched_step_dn} ep")
     print(f"{'='*W}\n")
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.n_epochs + 1):
         avg = train_one_epoch(model, loader, criterion, optimizer, device, args, epoch)
 
+        if scheduler:
+            scheduler.step()
+
+        cur_lr = optimizer.param_groups[0]['lr']
         print(
             f"[Epoch {epoch:4d}/{args.n_epochs}]"
             f"  total={avg['loss_total']:.4f}"
@@ -329,6 +364,7 @@ def main():
             f"  perc={avg['loss_perc']:.4f}"
             f"  kl={avg['loss_kl']:.6f}"
             f"  mmd={avg['loss_mmd']:.6f}"
+            f"  lr={cur_lr:.2e}"
         )
 
         # ── Periodic checkpoint ───────────────────────────────────────────────
@@ -338,6 +374,7 @@ def main():
                 "epoch"    : epoch,
                 "model"    : model.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict() if scheduler else None,
                 "args"     : vars(args),
             }, ckpt_path)
             print(f"  -> Checkpoint saved: {ckpt_path}")
