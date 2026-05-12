@@ -12,12 +12,14 @@ Directory structure:
     │           ├── s50414267/
     │           │   └── <dicom_id>.dcm
     │           └── s50414267.txt
-    ├── mimic-cxr-2.0.0-split.csv      (Mode A)
-    └── mimic-cxr-2.0.0-metadata.csv   (Mode A)
+    ├── mimic-cxr-2.0.0-split.csv      (Mode A – official split)
+    ├── mimic-cxr-2.0.0-metadata.csv   (Mode A – optional ViewPosition filter)
+    └── cxr-record-list.csv.gz         (Mode B – patient-level 80/10/10 split)
 
-Two modes:
-    Mode A  split CSV found  → official train / validate / test split
-    Mode B  split CSV absent → folder scan, patient-level 80/10/10 split
+Three modes (tried in order):
+    Mode A  mimic-cxr-2.0.0-split.csv found    → official train / validate / test split
+    Mode B  cxr-record-list.csv.gz found        → record CSV, patient-level 80/10/10 split
+    Mode C  neither found                       → folder scan, patient-level 80/10/10 split
 
 Usage:
     transform = transforms.Compose([
@@ -73,8 +75,9 @@ class MIMICCXRDataset(Dataset):
         image_size : fallback image size used for blank tensors on load error
     """
 
-    SPLIT_CSV = "mimic-cxr-2.0.0-split.csv"
-    META_CSV  = "mimic-cxr-2.0.0-metadata.csv"
+    SPLIT_CSV  = "mimic-cxr-2.0.0-split.csv"
+    META_CSV   = "mimic-cxr-2.0.0-metadata.csv"
+    RECORD_CSV = "cxr-record-list.csv.gz"
 
     def __init__(
         self,
@@ -98,16 +101,21 @@ class MIMICCXRDataset(Dataset):
                   "DataLoader will fail to collate PIL Images. "
                   "Pass a torchvision transform.")
 
-        split_csv = os.path.join(root_dir, self.SPLIT_CSV)
-        meta_csv  = os.path.join(root_dir, self.META_CSV)
+        split_csv  = os.path.join(root_dir, self.SPLIT_CSV)
+        meta_csv   = os.path.join(root_dir, self.META_CSV)
+        record_csv = os.path.join(root_dir, self.RECORD_CSV)
 
         if os.path.exists(split_csv):
             self._mode   = "A"
-            print("[MIMICCXRDataset] split CSV found → Mode A")
+            print("[MIMICCXRDataset] Mode A: official split CSV found")
             self.samples = self._build_from_csv(split_csv, meta_csv, split)
-        else:
+        elif os.path.exists(record_csv):
             self._mode   = "B"
-            print("[MIMICCXRDataset] split CSV not found → Mode B (folder scan)")
+            print("[MIMICCXRDataset] Mode B: cxr-record-list.csv.gz found → patient-level split")
+            self.samples = self._build_from_record_csv(record_csv, split)
+        else:
+            self._mode   = "C"
+            print("[MIMICCXRDataset] Mode C: no CSV found → folder scan + patient-level split")
             self.samples = self._build_from_folder(split)
 
         print(f"[MIMICCXRDataset] split='{split}'  total={len(self.samples)}")
@@ -180,7 +188,63 @@ class MIMICCXRDataset(Dataset):
         return samples
 
     # -------------------------------------------------------------------------
-    # Mode B – folder scan + patient-level split
+    # Mode B – cxr-record-list.csv.gz + patient-level split
+    # -------------------------------------------------------------------------
+
+    def _build_from_record_csv(self, record_csv: str, split: Optional[str]) -> list:
+        """
+        Build sample list from cxr-record-list.csv.gz.
+
+        Expected columns: subject_id, study_id, dicom_id, path
+            path  e.g. "files/p10/p10000032/s50414267/<dicom_id>.dcm"
+
+        Patient-level 80/10/10 random split (seed=42).
+        """
+        df = pd.read_csv(record_csv)
+
+        if not {"subject_id", "study_id", "dicom_id", "path"}.issubset(df.columns):
+            raise ValueError(
+                f"cxr-record-list.csv.gz must contain columns "
+                f"[subject_id, study_id, dicom_id, path]. "
+                f"Found: {list(df.columns)}"
+            )
+
+        if split is not None:
+            patient_ids = sorted(df["subject_id"].unique().tolist())
+            random.seed(42)
+            random.shuffle(patient_ids)
+            n        = len(patient_ids)
+            n_train  = int(n * 0.8)
+            n_val    = int(n * 0.1)
+            split_map = {
+                "train"   : set(patient_ids[:n_train]),
+                "validate": set(patient_ids[n_train : n_train + n_val]),
+                "test"    : set(patient_ids[n_train + n_val :]),
+            }
+            keep = split_map.get(split, set())
+            df   = df[df["subject_id"].isin(keep)].reset_index(drop=True)
+
+        samples = []
+        for _, row in df.iterrows():
+            subject_id = int(row["subject_id"])
+            study_id   = int(row["study_id"])
+            rel_path   = str(row["path"])           # relative to root_dir
+
+            dcm_path    = os.path.join(self.root_dir, rel_path)
+            patient_dir = self._get_patient_dir(subject_id)
+            report_path = os.path.join(patient_dir, f"s{study_id}.txt")
+
+            samples.append({
+                "dcm_path"   : dcm_path,
+                "report_path": report_path,
+                "study_id"   : f"s{study_id}",
+                "patient_id" : f"p{subject_id}",
+            })
+
+        return samples
+
+    # -------------------------------------------------------------------------
+    # Mode C – folder scan + patient-level split
     # -------------------------------------------------------------------------
 
     def _build_from_folder(self, split: Optional[str]) -> list:
@@ -482,9 +546,10 @@ def _sep(title: str):
 
 def debug_init(root_dir: str, split: str = "train") -> MIMICCXRDataset:
     _sep(f"Debug 1: init  split={split}")
-    print(f"  root exists  : {os.path.exists(root_dir)}")
-    print(f"  files exists : {os.path.exists(os.path.join(root_dir, 'files'))}")
-    print(f"  split CSV    : {os.path.exists(os.path.join(root_dir, MIMICCXRDataset.SPLIT_CSV))}")
+    print(f"  root exists   : {os.path.exists(root_dir)}")
+    print(f"  files exists  : {os.path.exists(os.path.join(root_dir, 'files'))}")
+    print(f"  split CSV (A) : {os.path.exists(os.path.join(root_dir, MIMICCXRDataset.SPLIT_CSV))}")
+    print(f"  record CSV (B): {os.path.exists(os.path.join(root_dir, MIMICCXRDataset.RECORD_CSV))}")
 
     ds = MIMICCXRDataset(root_dir=root_dir, split=split, max_length=512)
     print(f"  mode={ds._mode}  samples={len(ds)}")
