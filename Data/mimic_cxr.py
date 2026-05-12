@@ -78,14 +78,23 @@ def parse_args():
                         help="metadata CSV filename (relative to root_path)")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
-    parser.add_argument("--split",      type=str, default="train",
+    parser.add_argument("--split",       type=str, default="train",
                         choices=["train", "validate", "test"],
                         help="dataset split to load")
-    parser.add_argument("--image_size", type=int, default=256,
+    parser.add_argument("--image_size",  type=int, default=256,
                         help="resize both sides to this value")
-    parser.add_argument("--max_length", type=int, default=512,
+    parser.add_argument("--max_length",  type=int, default=512,
                         help="max character length of report text")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size",  type=int, default=8)
+    parser.add_argument("--view_filter", type=str, nargs="+",
+                        default=["PA", "AP"],
+                        help="ViewPosition values to keep (requires metadata.csv). "
+                             "e.g. --view_filter PA AP  |  --view_filter PA  |  pass empty to disable")
+
+    # ── BioBERT ───────────────────────────────────────────────────────────────
+    parser.add_argument("--biobert_path", type=str,
+                        default="dmis-lab/biobert-base-cased-v1.2",
+                        help="local path or HuggingFace model ID for BioBERT")
 
     # ── prepare_split_dirs ────────────────────────────────────────────────────
     parser.add_argument("--make_split_dir", action="store_true",
@@ -126,8 +135,9 @@ class MIMICCXRDataset(Dataset):
         self.image_size = args.image_size
         self.max_length = getattr(args, "max_length", 512)
 
-        self.split_csv  = os.path.join(args.root_path, args.split_csv)
-        self.meta_csv   = os.path.join(args.root_path, args.meta_csv)
+        self.split_csv   = os.path.join(args.root_path, args.split_csv)
+        self.meta_csv    = os.path.join(args.root_path, args.meta_csv)
+        self.view_filter = getattr(args, "view_filter", ["PA", "AP"])
 
         self.transform  = transforms.Compose([
             transforms.Resize((self.image_size, self.image_size)),
@@ -195,6 +205,17 @@ class MIMICCXRDataset(Dataset):
                 on="dicom_id",
                 how="left",
             )
+            if self.view_filter and "ViewPosition" in split_df.columns:
+                before = len(split_df)
+                split_df = split_df[
+                    split_df["ViewPosition"].isin(self.view_filter)
+                ].reset_index(drop=True)
+                print(f"[MIMICCXRDataset] ViewPosition filter={self.view_filter}  "
+                      f"{before} → {len(split_df)} samples")
+        else:
+            if self.view_filter:
+                print(f"[MIMICCXRDataset] WARNING: --view_filter set but "
+                      f"metadata.csv not found at {self.meta_csv}. Filter skipped.")
 
         samples = []
         for _, row in split_df.iterrows():
@@ -485,7 +506,7 @@ def dataset_loader(
 
 
 # =============================================================================
-# Main  –  image / report 확인 (dataset.py 방식)
+# Main  –  image / context 확인 (dataset.py 방식)
 # =============================================================================
 
 if __name__ == "__main__":
@@ -494,16 +515,22 @@ if __name__ == "__main__":
     if args.make_split_dir:
         prepare_split_dirs(args)
 
-    dataset = MIMICCXRDataset(args)
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-    )
+    if BioBERTEmbedder is None:
+        raise ImportError(
+            "BioBERTEmbedder not found. "
+            "Check /home/hjchoi/PycharmProjects/PrivaText-CXR/Modules/BioBERT_embedder.py"
+        )
+
+    device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    embedder = BioBERTEmbedder(model_path=args.biobert_path).to(device)
+
+    dataloader = dataset_loader(args, embedder)
 
     for batch_id, data in enumerate(dataloader):
         if batch_id == 1:
             break
-        image, report = data[0], data[1]
-        print(f"image  : {image.shape}  min={image.min():.3f}  max={image.max():.3f}")
-        print(f"report : {report}")
+        image, context = data[0], data[1]
+        print(f"image  : {image.shape}  "
+              f"min={image.min():.3f}  max={image.max():.3f}")
+        print(f"context: {context.shape}  "       # [B, seq_len, output_dim]
+              f"dtype={context.dtype}")
