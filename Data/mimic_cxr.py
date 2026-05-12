@@ -2,52 +2,41 @@
 Data/mimic_cxr.py  –  MIMIC-CXR Map-Style Dataset
 ---------------------------------------------------
 Map-style dataset compatible with DP-SGD (Opacus UniformWithReplacementSampler).
-Each sample returns (image_tensor, report_str) for direct use with BioBERT embedder.
+Each sample returns (image_tensor, report_str).
 
-Original directory structure:
-    <root_dir>/
+Directory structure (original):
+    <root_path>/
     ├── files/
     │   └── p10/
     │       └── p10000032/
     │           ├── s50414267/
     │           │   └── <dicom_id>.dcm
     │           └── s50414267.txt
-    ├── mimic-cxr-2.0.0-split.csv      (Mode A – official split)
-    ├── mimic-cxr-2.0.0-metadata.csv   (Mode A – optional ViewPosition filter)
-    └── cxr-record-list.csv.gz         (Mode B – patient-level 80/10/10 split)
+    ├── mimic-cxr-2.0.0-split.csv      (Mode A – required)
+    └── mimic-cxr-2.0.0-metadata.csv   (Mode A – optional)
 
-Pre-split directory structure (created by prepare_split_dirs):
-    <split_dir>/
-    ├── train/
-    │   └── p10/
-    │       └── p10000032/
-    │           ├── s50414267/ → <dicom_id>.dcm  (symlink or copy)
-    │           └── s50414267.txt
-    ├── validate/
-    └── test/
+Modes:
+    Mode A  split.csv found  → official train / validate / test labels  [default]
+    Mode C  split.csv absent → folder scan + patient-level 80/10/10     [fallback]
 
-Four modes (tried in order):
-    Mode D  <root_dir>/train|validate|test/ exists  → pre-split folder (fastest)
-    Mode A  mimic-cxr-2.0.0-split.csv found         → official train/validate/test split
-    Mode B  cxr-record-list.csv.gz found             → record CSV, patient-level 80/10/10 split
-    Mode C  neither found                            → folder scan, patient-level 80/10/10 split
+prepare_split_dirs (--make_split_dir):
+    One-time preprocessing step. Reads Mode A/C sample list and creates:
+        <split_dir>/train/  validate/  test/
+    mirroring the original p10/pXXX/sYYY/ hierarchy via symlinks or copies.
+    Run once after data download completes.
 
-Workflow:
-    1. Run prepare_split_dirs() once to physically organise files:
-           prepare_split_dirs(root_dir, output_dir='<root_dir>/split')
-       This creates <root_dir>/split/train, /validate, /test mirroring the
-       original file hierarchy via symlinks (use_symlink=False for actual copies).
-
-    2. Point MIMICCXRDataset at the split root:
-           MIMICCXRDataset(root_dir='<root_dir>/split', split='train')
-       Mode D is detected automatically and loads only from the train/ subfolder.
+External usage (training scripts):
+    from Data.mimic_cxr import dataset_loader
+    train_loader = dataset_loader(args, embedder, split='train')
 """
 
 import os
 import re
+import sys
 import random
 import shutil
 import time
+import argparse
 from typing import Optional, Callable
 
 import numpy as np
@@ -57,11 +46,58 @@ from PIL import Image
 
 import torch
 import torch.nn as nn
-from contextlib import nullcontext
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
-from transformers import AutoTokenizer, AutoModel
+try:
+    sys.path.insert(0, '/home/hjchoi/PycharmProjects/PrivaText-CXR')
+    from Modules.BioBERT_embedder import BioBERTEmbedder
+except ImportError:
+    BioBERTEmbedder = None
+    print("[mimic_cxr] WARNING: BioBERTEmbedder not found. "
+          "dataset_loader() will not be available.")
+
+
+# =============================================================================
+# Args
+# =============================================================================
+
+SPLIT_CSV = "mimic-cxr-2.0.0-split.csv"
+META_CSV  = "mimic-cxr-2.0.0-metadata.csv"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="MIMIC-CXR Dataset")
+
+    # ── Paths ─────────────────────────────────────────────────────────────────
+    parser.add_argument("--root_path",  type=str, required=True,
+                        help="MIMIC-CXR dataset root directory")
+    parser.add_argument("--split_csv",  type=str, default=SPLIT_CSV,
+                        help="split CSV filename (relative to root_path)")
+    parser.add_argument("--meta_csv",   type=str, default=META_CSV,
+                        help="metadata CSV filename (relative to root_path)")
+
+    # ── Dataset ───────────────────────────────────────────────────────────────
+    parser.add_argument("--split",      type=str, default="train",
+                        choices=["train", "validate", "test"],
+                        help="dataset split to load")
+    parser.add_argument("--image_size", type=int, default=256,
+                        help="resize both sides to this value")
+    parser.add_argument("--max_length", type=int, default=512,
+                        help="max character length of report text")
+    parser.add_argument("--batch_size", type=int, default=8)
+
+    # ── prepare_split_dirs ────────────────────────────────────────────────────
+    parser.add_argument("--make_split_dir", action="store_true",
+                        help="organise files into train/validate/test folders "
+                             "(run once after data download completes)")
+    parser.add_argument("--split_dir",   type=str, default=None,
+                        help="output root for split folders "
+                             "(default: <root_path>/split)")
+    parser.add_argument("--use_symlink", action="store_true", default=True,
+                        help="use symlinks instead of file copies in split dirs")
+
+    return parser.parse_args()
 
 
 # =============================================================================
@@ -73,71 +109,45 @@ class MIMICCXRDataset(Dataset):
     MIMIC-CXR Map-Style Dataset.
 
     Args:
-        root_dir   : root path.
-                     For Mode D pass the split root (e.g. <root>/split),
-                     for Modes A-C pass the dataset root (e.g. <root>/2.1.0).
-        split      : 'train' | 'validate' | 'test' | None (None = full dataset)
-        transform  : torchvision transform applied to the PIL image
-        max_length : max character length of report text (None = no limit)
-        image_size : fallback image size used for blank tensors on load error
+        args : Namespace from parse_args()
+               Required fields: root_path, split, image_size, max_length,
+                                split_csv, meta_csv
     """
 
-    SPLIT_CSV  = "mimic-cxr-2.0.0-split.csv"
-    META_CSV   = "mimic-cxr-2.0.0-metadata.csv"
-    RECORD_CSV = "cxr-record-list.csv.gz"
+    SPLIT_CSV = SPLIT_CSV
+    META_CSV  = META_CSV
 
-    def __init__(
-        self,
-        root_dir  : str,
-        split     : Optional[str] = "train",
-        transform : Optional[Callable] = None,
-        max_length: Optional[int] = None,
-        image_size: int = 256,
-    ):
+    def __init__(self, args):
         super().__init__()
 
-        self.root_dir   = root_dir
-        self.split      = split
-        self.transform  = transform
-        self.max_length = max_length
-        self.image_size = image_size
+        self.root_dir   = args.root_path
+        self.files_dir  = os.path.join(args.root_path, "files")
+        self.split      = args.split
+        self.image_size = args.image_size
+        self.max_length = getattr(args, "max_length", 512)
 
-        if transform is None:
-            print("[MIMICCXRDataset] WARNING: transform=None. "
-                  "DataLoader will fail to collate PIL Images. "
-                  "Pass a torchvision transform.")
+        self.split_csv  = os.path.join(args.root_path, args.split_csv)
+        self.meta_csv   = os.path.join(args.root_path, args.meta_csv)
 
-        # ── Mode D: pre-split directory exists ────────────────────────────────
-        split_dir = os.path.join(root_dir, split) if split else None
-        if split is not None and split_dir and os.path.isdir(split_dir):
-            self._mode    = "D"
-            self.files_dir = split_dir
-            print(f"[MIMICCXRDataset] Mode D: pre-split folder found → {split_dir}")
-            self.samples  = self._scan_all_folders()
+        self.transform  = transforms.Compose([
+            transforms.Resize((self.image_size, self.image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5]),
+        ])
 
-        # ── Mode A: official split CSV ─────────────────────────────────────
+        # ── Mode A (primary) ──────────────────────────────────────────────────
+        if os.path.exists(self.split_csv):
+            self._mode   = "A"
+            print(f"[MIMICCXRDataset] Mode A: split CSV found → {self.split_csv}")
+            self.samples = self._build_from_csv()
+
+        # ── Mode C (fallback) ─────────────────────────────────────────────────
         else:
-            self.files_dir = os.path.join(root_dir, "files")
-            split_csv  = os.path.join(root_dir, self.SPLIT_CSV)
-            meta_csv   = os.path.join(root_dir, self.META_CSV)
-            record_csv = os.path.join(root_dir, self.RECORD_CSV)
+            self._mode   = "C"
+            print(f"[MIMICCXRDataset] Mode C: split CSV not found → folder scan")
+            self.samples = self._build_from_folder()
 
-            if os.path.exists(split_csv):
-                self._mode   = "A"
-                print("[MIMICCXRDataset] Mode A: official split CSV found")
-                self.samples = self._build_from_csv(split_csv, meta_csv, split)
-
-            elif os.path.exists(record_csv):
-                self._mode   = "B"
-                print("[MIMICCXRDataset] Mode B: cxr-record-list.csv.gz → patient-level split")
-                self.samples = self._build_from_record_csv(record_csv, split)
-
-            else:
-                self._mode   = "C"
-                print("[MIMICCXRDataset] Mode C: no CSV → folder scan + patient-level split")
-                self.samples = self._build_from_folder(split)
-
-        print(f"[MIMICCXRDataset] mode={self._mode}  split='{split}'  "
+        print(f"[MIMICCXRDataset] mode={self._mode}  split='{self.split}'  "
               f"total={len(self.samples)}")
 
     # -------------------------------------------------------------------------
@@ -150,16 +160,16 @@ class MIMICCXRDataset(Dataset):
     def __getitem__(self, idx: int):
         """
         Returns:
-            image  : Tensor [1, H, W] in [-1, 1]  (after Normalize(0.5,0.5))
-                     Falls back to zero tensor on DICOM load error.
-            report : str  –  FINDINGS + IMPRESSION text for BioBERT embedding
+            image  : Tensor [1, H, W]  normalised to [-1, 1]
+            report : str  – "FINDINGS: <...> IMPRESSION: <...>"
         """
         meta = self.samples[idx]
 
         try:
             image = self._load_dcm(meta["dcm_path"])
         except Exception as e:
-            print(f"  [MIMICCXRDataset] WARNING: failed to load {meta['dcm_path']}: {e}")
+            print(f"[MIMICCXRDataset] WARNING: failed to load "
+                  f"{meta['dcm_path']}: {e}")
             image = self._blank_image()
 
         report = self._load_report(meta["report_path"])
@@ -169,15 +179,16 @@ class MIMICCXRDataset(Dataset):
     # Mode A – official CSV split
     # -------------------------------------------------------------------------
 
-    def _build_from_csv(self, split_csv: str, meta_csv: str,
-                         split: Optional[str]) -> list:
-        split_df = pd.read_csv(split_csv)
+    def _build_from_csv(self) -> list:
+        split_df = pd.read_csv(self.split_csv)
 
-        if split is not None:
-            split_df = split_df[split_df["split"] == split].reset_index(drop=True)
+        if self.split is not None:
+            split_df = split_df[
+                split_df["split"] == self.split
+            ].reset_index(drop=True)
 
-        if os.path.exists(meta_csv):
-            meta_df  = pd.read_csv(meta_csv)
+        if os.path.exists(self.meta_csv):
+            meta_df  = pd.read_csv(self.meta_csv)
             split_df = pd.merge(
                 split_df,
                 meta_df[["dicom_id", "ViewPosition"]],
@@ -205,69 +216,81 @@ class MIMICCXRDataset(Dataset):
         return samples
 
     # -------------------------------------------------------------------------
-    # Mode B – cxr-record-list.csv.gz + patient-level split
+    # Helpers
     # -------------------------------------------------------------------------
 
-    def _build_from_record_csv(self, record_csv: str, split: Optional[str]) -> list:
+    def _get_patient_dir(self, subject_id: int) -> str:
+        """subject_id=10000032 → files/p10/p10000032"""
+        pid_str = f"p{subject_id}"
+        prefix  = pid_str[:3]
+        return os.path.join(self.files_dir, prefix, pid_str)
+
+    def _load_dcm(self, dcm_path: str):
+        dcm = pydicom.dcmread(dcm_path)
+        arr = dcm.pixel_array.astype(np.float32)
+
+        if getattr(dcm, "PhotometricInterpretation", "") == "MONOCHROME1":
+            arr = arr.max() - arr
+
+        arr_min, arr_max = arr.min(), arr.max()
+        if arr_max > arr_min:
+            arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
+        arr = np.clip(arr, 0, 255)
+
+        image = Image.fromarray(arr.astype(np.uint8)).convert("L")
+        return self.transform(image)
+
+    def _blank_image(self) -> torch.Tensor:
+        return torch.zeros(1, self.image_size, self.image_size)
+
+    def _load_report(self, report_path: str) -> str:
+        if not os.path.exists(report_path):
+            return ""
+
+        with open(report_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+
+        report = self._parse_report(raw)
+
+        if self.max_length and len(report) > self.max_length:
+            report = report[: self.max_length]
+
+        return report
+
+    def _parse_report(self, text: str) -> str:
         """
-        Build sample list from cxr-record-list.csv.gz.
-
-        Expected columns: subject_id, study_id, dicom_id, path
-            path  e.g. "files/p10/p10000032/s50414267/<dicom_id>.dcm"
-
-        Patient-level 80/10/10 random split (seed=42).
+        Extract FINDINGS and IMPRESSION sections.
+        Output: "FINDINGS: <text> IMPRESSION: <text>"
+        Falls back to full text if no sections are found.
         """
-        df = pd.read_csv(record_csv)
+        pattern = re.compile(
+            r"(FINDINGS|IMPRESSION)\s*:(.*?)(?=\n[A-Z ]+:|$)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        sections = {
+            name.lower(): content.strip()
+            for name, content in pattern.findall(text)
+        }
 
-        if not {"subject_id", "study_id", "dicom_id", "path"}.issubset(df.columns):
-            raise ValueError(
-                f"cxr-record-list.csv.gz must contain columns "
-                f"[subject_id, study_id, dicom_id, path]. "
-                f"Found: {list(df.columns)}"
-            )
+        if not sections:
+            return text.strip()
 
-        if split is not None:
-            patient_ids = sorted(df["subject_id"].unique().tolist())
-            random.seed(42)
-            random.shuffle(patient_ids)
-            n       = len(patient_ids)
-            n_train = int(n * 0.8)
-            n_val   = int(n * 0.1)
-            split_map = {
-                "train"   : set(patient_ids[:n_train]),
-                "validate": set(patient_ids[n_train : n_train + n_val]),
-                "test"    : set(patient_ids[n_train + n_val :]),
-            }
-            keep = split_map.get(split, set())
-            df   = df[df["subject_id"].isin(keep)].reset_index(drop=True)
+        parts = []
+        for key in ("findings", "impression"):
+            if key in sections and sections[key]:
+                parts.append(f"{key.upper()}: {sections[key]}")
 
-        samples = []
-        for _, row in df.iterrows():
-            subject_id = int(row["subject_id"])
-            study_id   = int(row["study_id"])
-            rel_path   = str(row["path"])
+        return " ".join(parts).strip()
 
-            dcm_path    = os.path.join(self.root_dir, rel_path)
-            patient_dir = self._get_patient_dir(subject_id)
-            report_path = os.path.join(patient_dir, f"s{study_id}.txt")
+    # =========================================================================
+    # Legacy – Mode C (folder scan + patient-level split)
+    # Used when mimic-cxr-2.0.0-split.csv is not available.
+    # =========================================================================
 
-            samples.append({
-                "dcm_path"   : dcm_path,
-                "report_path": report_path,
-                "study_id"   : f"s{study_id}",
-                "patient_id" : f"p{subject_id}",
-            })
-
-        return samples
-
-    # -------------------------------------------------------------------------
-    # Mode C – folder scan + patient-level split
-    # -------------------------------------------------------------------------
-
-    def _build_from_folder(self, split: Optional[str]) -> list:
+    def _build_from_folder(self) -> list:
         all_samples = self._scan_all_folders()
 
-        if split is None:
+        if self.split is None:
             return all_samples
 
         patient_ids = sorted(set(s["patient_id"] for s in all_samples))
@@ -284,14 +307,10 @@ class MIMICCXRDataset(Dataset):
             "test"    : set(patient_ids[n_train + n_val:]),
         }
 
-        target = split_map.get(split, set())
+        target = split_map.get(self.split, set())
         return [s for s in all_samples if s["patient_id"] in target]
 
     def _scan_all_folders(self) -> list:
-        """
-        Scan self.files_dir for DICOM files.
-        Works for both the original files/ tree and pre-split split/train/ trees.
-        """
         samples = []
 
         for prefix in sorted(os.listdir(self.files_dir)):
@@ -323,298 +342,125 @@ class MIMICCXRDataset(Dataset):
 
         return samples
 
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
-
-    def _get_patient_dir(self, subject_id: int) -> str:
-        """e.g. subject_id=10000032 → files/p10/p10000032"""
-        pid_str = f"p{subject_id}"
-        prefix  = pid_str[:3]
-        return os.path.join(self.files_dir, prefix, pid_str)
-
-    def _load_dcm(self, dcm_path: str):
-        dcm = pydicom.dcmread(dcm_path)
-        arr = dcm.pixel_array.astype(np.float32)
-
-        if getattr(dcm, "PhotometricInterpretation", "") == "MONOCHROME1":
-            arr = arr.max() - arr
-
-        arr_min, arr_max = arr.min(), arr.max()
-        if arr_max > arr_min:
-            arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
-        arr = np.clip(arr, 0, 255)
-
-        image = Image.fromarray(arr.astype(np.uint8)).convert("L")
-
-        if self.transform:
-            image = self.transform(image)
-        return image
-
-    def _blank_image(self):
-        if self.transform:
-            return torch.zeros(1, self.image_size, self.image_size)
-        return Image.fromarray(
-            np.zeros((self.image_size, self.image_size), dtype=np.uint8), "L"
-        )
-
-    def _load_report(self, report_path: str) -> str:
-        if not os.path.exists(report_path):
-            return ""
-
-        with open(report_path, "r", encoding="utf-8") as f:
-            raw = f.read()
-
-        report = self._parse_report(raw)
-
-        if self.max_length and len(report) > self.max_length:
-            report = report[: self.max_length]
-
-        return report
-
-    def _parse_report(self, text: str) -> str:
-        """
-        Extract FINDINGS and IMPRESSION sections.
-        Output: "FINDINGS: <text> IMPRESSION: <text>"
-        Falls back to full text if no sections found.
-        """
-        pattern = re.compile(
-            r"(FINDINGS|IMPRESSION)\s*:(.*?)(?=\n[A-Z ]+:|$)",
-            re.IGNORECASE | re.DOTALL,
-        )
-        sections = {
-            name.lower(): content.strip()
-            for name, content in pattern.findall(text)
-        }
-
-        if not sections:
-            return text.strip()
-
-        parts = []
-        for key in ("findings", "impression"):
-            if key in sections and sections[key]:
-                parts.append(f"{key.upper()}: {sections[key]}")
-
-        return " ".join(parts).strip()
-
 
 # =============================================================================
-# prepare_split_dirs  –  physically organise files into train/validate/test
+# prepare_split_dirs  –  one-time file organisation (--make_split_dir)
 # =============================================================================
 
-def prepare_split_dirs(
-    root_dir   : str,
-    output_dir : str,
-    use_symlink: bool = True,
-    splits     : list = None,
-) -> dict:
+def prepare_split_dirs(args) -> dict:
     """
     Physically organise MIMIC-CXR files into per-split subdirectories.
 
-    Mirrors the original p10/p10000032/s50414267/ hierarchy under each split
-    folder, making subsequent loads fast (Mode D: no CSV parsing required).
-
-    Output layout:
-        <output_dir>/
-        ├── train/
-        │   └── p10/
-        │       └── p10000032/
-        │           ├── s50414267/
-        │           │   └── <dicom_id>.dcm   ← symlink or copy
-        │           └── s50414267.txt        ← symlink or copy
+    Mirrors the original p10/pXXX/sYYY/ hierarchy under each split folder:
+        <split_dir>/
+        ├── train/    └── p10/ └── p10000032/ └── s50414267/ └── <id>.dcm
         ├── validate/
         └── test/
 
     Args:
-        root_dir    : original MIMIC-CXR root (contains files/ + CSV)
-        output_dir  : destination root for the split folders
-        use_symlink : True  → os.symlink (fast, no extra disk usage)
-                      False → shutil.copy2 (standalone copy, portable)
-        splits      : list of splits to prepare; default ['train','validate','test']
+        args : Namespace — uses root_path, split_dir, use_symlink
 
     Returns:
-        dict mapping split name → number of samples prepared
-        e.g. {'train': 227827, 'validate': 2000, 'test': 3858}
+        dict  split → number of samples  e.g. {'train': 227827, ...}
 
     Raises:
-        FileExistsError if output_dir/<split> already exists to prevent
-        accidental overwrites. Delete the folder manually to re-run.
+        FileExistsError if any split subdirectory already exists.
     """
-    if splits is None:
-        splits = ["train", "validate", "test"]
-
-    os.makedirs(output_dir, exist_ok=True)
+    split_dir = args.split_dir or os.path.join(args.root_path, "split")
+    os.makedirs(split_dir, exist_ok=True)
 
     counts = {}
-    for split in splits:
-        dest_split = os.path.join(output_dir, split)
+    for split in ["train", "validate", "test"]:
+        dest_split = os.path.join(split_dir, split)
         if os.path.exists(dest_split):
             raise FileExistsError(
                 f"'{dest_split}' already exists. "
-                f"Remove it manually before re-running prepare_split_dirs()."
+                "Remove it manually before re-running prepare_split_dirs()."
             )
 
-        print(f"\n[prepare_split_dirs] Building '{split}' split index ...")
-        ds = MIMICCXRDataset(root_dir=root_dir, split=split, transform=None)
+        print(f"\n[prepare_split_dirs] Building '{split}' sample list ...")
 
-        print(f"[prepare_split_dirs] Organising {len(ds.samples)} files into {dest_split} ...")
-        n_linked = 0
+        split_args = argparse.Namespace(**vars(args))
+        split_args.split = split
+        ds = MIMICCXRDataset(split_args)
+
+        print(f"[prepare_split_dirs] Writing {len(ds.samples)} entries → {dest_split}")
+        n = 0
         for meta in ds.samples:
             src_dcm    = meta["dcm_path"]
             src_report = meta["report_path"]
 
-            # ── Compute destination paths ──────────────────────────────────
-            # Strip the original files_dir prefix to get the relative path
-            # e.g. .../files/p10/p10000032/s50414267/xxx.dcm
-            #   →  p10/p10000032/s50414267/xxx.dcm
-            rel_dcm    = os.path.relpath(src_dcm,    os.path.join(root_dir, "files"))
-            rel_report = os.path.relpath(src_report, os.path.join(root_dir, "files"))
+            rel_dcm    = os.path.relpath(src_dcm,    os.path.join(args.root_path, "files"))
+            rel_report = os.path.relpath(src_report, os.path.join(args.root_path, "files"))
 
             dst_dcm    = os.path.join(dest_split, rel_dcm)
             dst_report = os.path.join(dest_split, rel_report)
 
-            # ── Create directory tree ──────────────────────────────────────
             os.makedirs(os.path.dirname(dst_dcm),    exist_ok=True)
             os.makedirs(os.path.dirname(dst_report), exist_ok=True)
 
-            # ── Link or copy ───────────────────────────────────────────────
             for src, dst in [(src_dcm, dst_dcm), (src_report, dst_report)]:
                 if os.path.exists(dst) or os.path.islink(dst):
                     continue
                 if not os.path.exists(src):
                     continue
-                if use_symlink:
+                if args.use_symlink:
                     os.symlink(os.path.abspath(src), dst)
                 else:
                     shutil.copy2(src, dst)
 
-            n_linked += 1
-            if n_linked % 10000 == 0:
-                print(f"  ... {n_linked}/{len(ds.samples)}")
+            n += 1
+            if n % 10000 == 0:
+                print(f"  ... {n}/{len(ds.samples)}")
 
-        counts[split] = n_linked
-        print(f"[prepare_split_dirs] '{split}' done: {n_linked} samples")
+        counts[split] = n
+        print(f"[prepare_split_dirs] '{split}' done: {n} samples")
 
-    print(f"\n[prepare_split_dirs] Complete. output_dir={output_dir}")
-    print(f"  To load:  MIMICCXRDataset(root_dir='{output_dir}', split='train')")
+    print(f"\n[prepare_split_dirs] Complete → {split_dir}")
     return counts
 
 
 # =============================================================================
-# BioBERTEmbedder
+# dataset_loader  –  DataLoader with BioBERT collate (used by training scripts)
 # =============================================================================
 
-class BioBERTEmbedder(nn.Module):
-    """
-    BioBERT-based text embedder for radiology reports.
-
-    Input  : list[str]  – report texts (FINDINGS: ~ IMPRESSION: ~)
-    Output : Tensor [B, seq_len, output_dim]
-
-    Args:
-        model_path : local path or HuggingFace model ID
-                     e.g. "/storage/hjchoi/biobert"
-                          "dmis-lab/biobert-base-cased-v1.2"
-        output_dim : projection output dim; must match UNet context_dim (default 512)
-        freeze     : freeze BioBERT weights (True for DP fine-tuning)
-        max_length : tokeniser max length in tokens (default 128)
-    """
-
-    def __init__(
-        self,
-        model_path : str,
-        output_dim : int  = 512,
-        freeze     : bool = True,
-        max_length : int  = 128,
-    ):
-        super().__init__()
-        self.max_length = max_length
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.bert      = AutoModel.from_pretrained(model_path)
-        self.proj      = nn.Linear(768, output_dim)
-
-        if freeze:
-            for p in self.bert.parameters():
-                p.requires_grad = False
-
-        n_proj = sum(p.numel() for p in self.proj.parameters())
-        print(f"[BioBERTEmbedder] model={model_path}  "
-              f"output_dim={output_dim}  freeze={freeze}  "
-              f"proj_params={n_proj:,}")
-
-    @property
-    def device(self):
-        return next(self.bert.parameters()).device
-
-    def forward(self, texts: list) -> torch.Tensor:
-        """
-        Args:
-            texts : list[str]
-        Returns:
-            Tensor [B, seq_len, output_dim]
-        """
-        enc = self.tokenizer(
-            texts,
-            return_tensors = "pt",
-            padding        = True,
-            truncation     = True,
-            max_length     = self.max_length,
-        ).to(self.device)
-
-        ctx = nullcontext() if self.bert.training else torch.no_grad()
-        with ctx:
-            out = self.bert(**enc)
-
-        return self.proj(out.last_hidden_state)
-
-
-# =============================================================================
-# DataLoader builder
-# =============================================================================
-
-def _default_transform(image_size: int):
-    return transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
-    ])
-
-
-def build_mimic_loader(
-    root_path  : str,
-    embedder   : BioBERTEmbedder,
-    split      : str  = "train",
-    image_size : int  = 256,
-    batch_size : int  = 8,
+def dataset_loader(
+    args,
+    embedder,
+    split      : str  = None,
     num_workers: int  = 0,
-    max_length : int  = 512,
     drop_last  : bool = True,
 ) -> DataLoader:
     """
     Build a DataLoader for MIMIC-CXR that yields (images, context).
 
+    Wraps MIMICCXRDataset with a BioBERT collate_fn so each batch contains:
+        images  : Tensor [B, 1, H, W]
+        context : Tensor [B, seq_len, output_dim]  (BioBERT embedding)
+
     Args:
-        root_path   : dataset root (original root for Modes A-C,
-                      or split root e.g. <root>/split for Mode D)
-        embedder    : BioBERTEmbedder instance (already .to(device))
-        split       : 'train' | 'validate' | 'test'
-        image_size  : spatial resolution after resize
-        batch_size  : logical batch size
-        num_workers : worker processes (use 0 when embedder is on GPU)
-        max_length  : report text character truncation before tokenisation
-        drop_last   : drop the last incomplete batch (required for DP-SGD)
+        args        : Namespace from parse_args() (or compatible Namespace)
+        embedder    : BioBERTEmbedder instance already moved to target device
+        split       : override args.split if provided
+        num_workers : use 0 when embedder is on GPU to avoid CUDA fork errors
+        drop_last   : True required for DP-SGD UniformWithReplacementSampler
 
     Returns:
         DataLoader yielding (images [B,1,H,W], context [B,seq_len,output_dim])
+
+    Example (training script):
+        from Data.mimic_cxr import dataset_loader
+        train_loader = dataset_loader(args, embedder, split='train')
     """
-    dataset = MIMICCXRDataset(
-        root_dir   = root_path,
-        split      = split,
-        transform  = _default_transform(image_size),
-        max_length = max_length,
-        image_size = image_size,
-    )
+    if BioBERTEmbedder is None:
+        raise ImportError("BioBERTEmbedder could not be imported. "
+                          "Check Modules/BioBERT_embedder.py path.")
+
+    loader_args = argparse.Namespace(**vars(args))
+    if split is not None:
+        loader_args.split = split
+
+    dataset = MIMICCXRDataset(loader_args)
 
     def collate_fn(batch):
         images, reports = zip(*batch)
@@ -624,164 +470,40 @@ def build_mimic_loader(
 
     loader = DataLoader(
         dataset,
-        batch_size  = batch_size,
-        shuffle     = (split == "train"),
+        batch_size  = args.batch_size,
+        shuffle     = (loader_args.split == "train"),
         num_workers = num_workers,
         collate_fn  = collate_fn,
         drop_last   = drop_last,
         pin_memory  = False,
     )
 
-    print(f"[build_mimic_loader] split={split}  "
-          f"samples={len(dataset)}  bs={batch_size}  "
+    print(f"[dataset_loader] split={loader_args.split}  "
+          f"samples={len(dataset)}  bs={args.batch_size}  "
           f"steps={len(loader)}")
     return loader
 
 
 # =============================================================================
-# Debug utilities
+# Main  –  image / report 확인 (dataset.py 방식)
 # =============================================================================
-
-def _sep(title: str):
-    print(f"\n{'=' * 60}\n  {title}\n{'=' * 60}")
-
-
-def debug_init(root_dir: str, split: str = "train") -> MIMICCXRDataset:
-    _sep(f"Debug 1: init  split={split}")
-    print(f"  root exists    : {os.path.exists(root_dir)}")
-    print(f"  split dir  (D) : {os.path.exists(os.path.join(root_dir, split))}")
-    print(f"  split CSV  (A) : {os.path.exists(os.path.join(root_dir, MIMICCXRDataset.SPLIT_CSV))}")
-    print(f"  record CSV (B) : {os.path.exists(os.path.join(root_dir, MIMICCXRDataset.RECORD_CSV))}")
-    print(f"  files dir  (C) : {os.path.exists(os.path.join(root_dir, 'files'))}")
-
-    ds = MIMICCXRDataset(root_dir=root_dir, split=split, max_length=512)
-    print(f"  mode={ds._mode}  samples={len(ds)}")
-    if ds.samples:
-        for k, v in ds.samples[0].items():
-            print(f"    {k}: {v}")
-    return ds
-
-
-def debug_single(ds: MIMICCXRDataset, idx: int = 0):
-    _sep(f"Debug 2: single item  idx={idx}")
-    meta = ds.samples[idx]
-    print(f"  dcm exists    : {os.path.exists(meta['dcm_path'])}")
-    print(f"  report exists : {os.path.exists(meta['report_path'])}")
-
-    t0 = time.time()
-    img, report = ds[idx]
-    print(f"  load time : {time.time()-t0:.3f}s")
-
-    if hasattr(img, "shape"):
-        print(f"  img shape : {img.shape}  dtype={img.dtype}"
-              f"  min={img.min():.3f}  max={img.max():.3f}")
-    else:
-        print(f"  img size  : {img.size}  mode={img.mode}")
-
-    print(f"  report len: {len(report)} chars")
-    print(f"  report[:200]: {repr(report[:200])}")
-
-
-def debug_multi(ds: MIMICCXRDataset, n: int = 5):
-    _sep(f"Debug 3: multi-sample  n={n}")
-    indices       = random.sample(range(len(ds)), min(n, len(ds)))
-    times, errors = [], []
-
-    for i, idx in enumerate(indices):
-        try:
-            t0 = time.time()
-            img, report = ds[idx]
-            elapsed = time.time() - t0
-            times.append(elapsed)
-            print(f"  [{i+1}/{n}] idx={idx:6d}  "
-                  f"patient={ds.samples[idx]['patient_id']}  "
-                  f"report={len(report):4d}c  t={elapsed:.3f}s")
-        except Exception as e:
-            errors.append((idx, str(e)))
-            print(f"  [{i+1}/{n}] idx={idx:6d}  ERROR: {e}")
-
-    if times:
-        print(f"\n  avg={sum(times)/len(times):.3f}s  errors={len(errors)}/{n}")
-
-
-def debug_loader(ds: MIMICCXRDataset, batch_size: int = 4):
-    _sep(f"Debug 4: DataLoader  bs={batch_size}")
-    has_tf = ds.transform is not None
-    if not has_tf:
-        print("  no transform → injecting minimal one for collation")
-        ds.transform = transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-        ])
-
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    imgs, reports = next(iter(loader))
-
-    print(f"  image shape : {imgs.shape}")
-    print(f"  image dtype : {imgs.dtype}")
-    print(f"  report lens : {[len(r) for r in reports]}")
-
-    if not has_tf:
-        ds.transform = None
-
-
-def debug_reports(ds: MIMICCXRDataset, n: int = 3):
-    _sep(f"Debug 5: report parsing  n={n}")
-    shown = 0
-    for meta in ds.samples:
-        if not os.path.exists(meta["report_path"]):
-            continue
-        with open(meta["report_path"], "r", encoding="utf-8") as f:
-            raw = f.read()
-        parsed = ds._parse_report(raw)
-        print(f"\n  {os.path.basename(meta['report_path'])}")
-        print(f"  RAW    : {raw[:300].strip()!r}")
-        print(f"  PARSED : {parsed[:200]!r}")
-        shown += 1
-        if shown >= n:
-            break
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-def main():
-    ROOT_DIR   = "/home/hjchoi/physionet.org/files/mimic-cxr/2.1.0"
-    SPLIT_ROOT = os.path.join(ROOT_DIR, "split")   # output of prepare_split_dirs
-
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
-    ])
-
-    # ── Step 1: prepare split dirs (run once) ─────────────────────────────────
-    if not os.path.exists(os.path.join(SPLIT_ROOT, "train")):
-        print("Split dirs not found – running prepare_split_dirs ...")
-        prepare_split_dirs(ROOT_DIR, SPLIT_ROOT, use_symlink=True)
-
-    # ── Step 2: load from split dirs (Mode D) ─────────────────────────────────
-    ds = debug_init(SPLIT_ROOT, split="train")
-    if len(ds) == 0:
-        print("ERROR: no samples found.")
-        return
-
-    ds = MIMICCXRDataset(
-        root_dir   = SPLIT_ROOT,
-        split      = "train",
-        transform  = transform,
-        max_length = 512,
-    )
-
-    debug_single(ds, idx=0)
-    debug_multi(ds,  n=5)
-    debug_loader(ds, batch_size=4)
-    debug_reports(ds, n=3)
-
-    _sep("Done")
-    print(f"  mode={ds._mode}  split={ds.split}  total={len(ds)}")
-
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    if args.make_split_dir:
+        prepare_split_dirs(args)
+
+    dataset = MIMICCXRDataset(args)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+    )
+
+    for batch_id, data in enumerate(dataloader):
+        if batch_id == 1:
+            break
+        image, report = data[0], data[1]
+        print(f"image  : {image.shape}  min={image.min():.3f}  max={image.max():.3f}")
+        print(f"report : {report}")
