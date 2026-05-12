@@ -157,6 +157,7 @@ class MIMICCXRDataset(Dataset):
             print(f"[MIMICCXRDataset] Mode C: split CSV not found → folder scan")
             self.samples = self._build_from_folder()
 
+        self.samples = self._filter_existing_samples(self.samples)
         print(f"[MIMICCXRDataset] mode={self._mode}  split='{self.split}'  "
               f"total={len(self.samples)}")
 
@@ -178,8 +179,7 @@ class MIMICCXRDataset(Dataset):
         try:
             image = self._load_dcm(meta["dcm_path"])
         except Exception as e:
-            print(f"[MIMICCXRDataset] WARNING: failed to load "
-                  f"{meta['dcm_path']}: {e}")
+            print(f"[MIMICCXRDataset] load error idx={idx}: {e}")
             image = self._blank_image()
 
         report = self._load_report(meta["report_path"])
@@ -239,6 +239,20 @@ class MIMICCXRDataset(Dataset):
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
+
+    def _filter_existing_samples(self, samples: list) -> list:
+        """
+        Remove entries whose DICOM file does not exist on disk.
+        Called once at __init__ so __getitem__ never hits a missing file.
+        Prints a single summary line instead of per-file warnings.
+        """
+        existing = [s for s in samples if os.path.exists(s["dcm_path"])]
+        n_missing = len(samples) - len(existing)
+        if n_missing:
+            print(f"[MIMICCXRDataset] WARNING: {n_missing} DICOM files missing "
+                  f"(download in progress?). "
+                  f"{len(existing)}/{len(samples)} samples available.")
+        return existing
 
     def _get_patient_dir(self, subject_id: int) -> str:
         """subject_id=10000032 → files/p10/p10000032"""
