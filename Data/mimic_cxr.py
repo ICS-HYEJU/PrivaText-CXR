@@ -49,8 +49,12 @@ import pydicom
 from PIL import Image
 
 import torch
+import torch.nn as nn
+from contextlib import nullcontext
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+
+from transformers import AutoTokenizer, AutoModel
 
 
 # =============================================================================
@@ -295,7 +299,14 @@ class MIMICCXRDataset(Dataset):
         return report
 
     def _parse_report(self, text: str) -> str:
-        """Extract FINDINGS and IMPRESSION sections, fall back to full text."""
+        """
+        Extract FINDINGS and IMPRESSION sections.
+
+        Output format:
+            "FINDINGS: <text> IMPRESSION: <text>"
+
+        Falls back to full text if no sections are found.
+        """
         pattern = re.compile(
             r"(FINDINGS|IMPRESSION)\s*:(.*?)(?=\n[A-Z ]+:|$)",
             re.IGNORECASE | re.DOTALL,
@@ -308,11 +319,157 @@ class MIMICCXRDataset(Dataset):
         if not sections:
             return text.strip()
 
-        return " ".join(
-            sections[k]
-            for k in ("findings", "impression")
-            if k in sections and sections[k]
-        ).strip()
+        parts = []
+        for key in ("findings", "impression"):
+            if key in sections and sections[key]:
+                parts.append(f"{key.upper()}: {sections[key]}")
+
+        return " ".join(parts).strip()
+
+
+# =============================================================================
+# BioBERTEmbedder
+# =============================================================================
+
+class BioBERTEmbedder(nn.Module):
+    """
+    BioBERT-based text embedder for radiology reports.
+
+    Input  : list[str]  – report texts (FINDINGS: ~ IMPRESSION: ~)
+    Output : Tensor [B, seq_len, output_dim]
+
+    Args:
+        model_path : local path or HuggingFace model ID
+                     e.g. "/storage/hjchoi/biobert"
+                          "dmis-lab/biobert-base-cased-v1.2"
+        output_dim : projection output dim; must match UNet context_dim (default 512)
+        freeze     : freeze BioBERT weights (True for DP fine-tuning)
+        max_length : tokeniser max length in tokens (default 128)
+    """
+
+    def __init__(
+        self,
+        model_path : str,
+        output_dim : int  = 512,
+        freeze     : bool = True,
+        max_length : int  = 128,
+    ):
+        super().__init__()
+        self.max_length = max_length
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.bert      = AutoModel.from_pretrained(model_path)   # hidden_dim = 768
+        self.proj      = nn.Linear(768, output_dim)
+
+        if freeze:
+            for p in self.bert.parameters():
+                p.requires_grad = False
+
+        n_proj = sum(p.numel() for p in self.proj.parameters())
+        print(f"[BioBERTEmbedder] model={model_path}  "
+              f"output_dim={output_dim}  freeze={freeze}  "
+              f"proj_params={n_proj:,}")
+
+    @property
+    def device(self):
+        return next(self.bert.parameters()).device
+
+    def forward(self, texts: list) -> torch.Tensor:
+        """
+        Args:
+            texts : list[str]
+        Returns:
+            Tensor [B, seq_len, output_dim]
+        """
+        enc = self.tokenizer(
+            texts,
+            return_tensors = "pt",
+            padding        = True,
+            truncation     = True,
+            max_length     = self.max_length,
+        ).to(self.device)
+
+        ctx = nullcontext() if self.bert.training else torch.no_grad()
+        with ctx:
+            out = self.bert(**enc)              # last_hidden_state [B, seq_len, 768]
+
+        return self.proj(out.last_hidden_state) # [B, seq_len, output_dim]
+
+
+# =============================================================================
+# DataLoader builder
+# =============================================================================
+
+def _default_transform(image_size: int):
+    return transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5]),
+    ])
+
+
+def build_mimic_loader(
+    root_path  : str,
+    embedder   : BioBERTEmbedder,
+    split      : str  = "train",
+    image_size : int  = 256,
+    batch_size : int  = 8,
+    num_workers: int  = 0,
+    max_length : int  = 512,
+    drop_last  : bool = True,
+) -> DataLoader:
+    """
+    Build a DataLoader for MIMIC-CXR that yields
+        (images, context)
+    where context is the BioBERT embedding of each report.
+
+    Args:
+        root_path   : dataset root directory
+        embedder    : BioBERTEmbedder instance (already .to(device))
+        split       : 'train' | 'validate' | 'test'
+        image_size  : spatial resolution after resize
+        batch_size  : logical batch size
+        num_workers : worker processes (use 0 when embedder is on GPU)
+        max_length  : report text character truncation before tokenisation
+        drop_last   : drop the last incomplete batch (required for DP-SGD)
+
+    Returns:
+        DataLoader yielding (images [B,1,H,W], context [B,seq_len,output_dim])
+
+    Note:
+        BioBERT embedding runs inside collate_fn, which executes in the
+        MAIN process regardless of num_workers. GPU embedding is therefore
+        safe, but set num_workers=0 if you encounter CUDA multiprocessing
+        errors.
+    """
+    dataset = MIMICCXRDataset(
+        root_dir   = root_path,
+        split      = split,
+        transform  = _default_transform(image_size),
+        max_length = max_length,
+        image_size = image_size,
+    )
+
+    def collate_fn(batch):
+        images, reports = zip(*batch)
+        images  = torch.stack(images)                       # [B, 1, H, W]
+        context = embedder(list(reports))                   # [B, seq_len, output_dim]
+        return images, context
+
+    loader = DataLoader(
+        dataset,
+        batch_size  = batch_size,
+        shuffle     = (split == "train"),
+        num_workers = num_workers,
+        collate_fn  = collate_fn,
+        drop_last   = drop_last,
+        pin_memory  = False,   # moved to device inside collate_fn
+    )
+
+    print(f"[build_mimic_loader] split={split}  "
+          f"samples={len(dataset)}  bs={batch_size}  "
+          f"steps={len(loader)}")
+    return loader
 
 
 # =============================================================================
