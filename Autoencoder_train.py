@@ -13,12 +13,14 @@ Resume from checkpoint:
 """
 
 import argparse
+import math
 import os
 import sys
 
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from transformers import get_cosine_schedule_with_warmup
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -97,6 +99,23 @@ def parse_args():
     parser.add_argument("--lr", default=1e-4, type=float)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
     parser.add_argument("--n_epochs", default=100, type=int)
+    parser.add_argument("--grad_clip", default=1.0, type=float, help="Max gradient norm for clipping (0 = disabled)")
+
+    # ------------------------------------------------------------------------------------------
+    # Gradient Accumulation
+    # ------------------------------------------------------------------------------------------
+    parser.add_argument("--use_accum", default=False, type=bool,
+                        help="Enable gradient accumulation")
+    parser.add_argument("--accum_steps", default=4, type=int,
+                        help="Micro-batches per optimizer update; effective_bs = bs * accum_steps")
+
+    # ------------------------------------------------------------------------------------------
+    # Scheduler
+    # ------------------------------------------------------------------------------------------
+    parser.add_argument("--use_scheduler", default=False, type=bool,
+                        help="Enable cosine scheduler with warmup")
+    parser.add_argument("--warmup_ratio", default=0.05, type=float,
+                        help="Fraction of total optimizer updates used for warmup")
 
     # ------------------------------------------------------------------------------------------
     # Checkpoint
@@ -213,38 +232,51 @@ def _save_recon_images(x, x_hat, save_dir, epoch, step, n: int = 4):
 # Training loop
 # ==============================================================================================================
 
-def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
+def train_one_epoch(model, loader, criterion, optimizer, scheduler, device, args, epoch):
     model.train()
     running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_kl", "loss_mmd")}
     debug_img_dir = os.path.join(args.save_dir, f"debug_imgs ({args.run_date})")
 
+    accum_steps = args.accum_steps if args.use_accum else 1
+    optimizer.zero_grad()  # initialise before accumulation window
+
     for step, (x, _) in enumerate(loader):
         x = x.to(device)
+        is_last_step = (step + 1 == len(loader))
+        is_update_step = ((step + 1) % accum_steps == 0) or is_last_step
 
         # Forward
-        posterior = model.encode(x)  #DiagonalGaussianDistribution
-        z = posterior.sample()  # reparameterisation trick  [B, z_ch, h, w]
-        x_hat = model.decode(z)  # reconstructed image       [B, C, H, W]
+        posterior = model.encode(x)  # DiagonalGaussianDistribution
+        z = posterior.sample()       # reparameterisation trick  [B, z_ch, h, w]
+        x_hat = model.decode(z)      # reconstructed image       [B, C, H, W]
 
         # Loss
         if args.debug and step == 0:
-            # First step of every epoch: detailed table + save images
             loss, loss_dict = criterion.debug_forward(x, x_hat, posterior, z)
             _save_recon_images(x, x_hat, debug_img_dir, epoch, step)
         else:
             loss, loss_dict = criterion(x, x_hat, posterior, z)
 
-        # Backpropa
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # Scale loss so accumulated gradients equal a single large-batch mean,
+        # then backward (gradients are summed across micro-batches by PyTorch)
+        (loss / accum_steps).backward()
 
-        # Accumulate
+        # Accumulate unscaled metrics for logging
         for k in running:
             running[k] += loss_dict[k]
 
+        # Optimizer update every accum_steps micro-batches (or at epoch end)
+        if is_update_step:
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad()  # reset after update, keep grads during accumulation
+
         # Step log
         if (step + 1) % args.log_every == 0:
+            cur_lr = optimizer.param_groups[0]["lr"]
             print(
                 f"  [Ep {epoch:4d} | Step {step + 1:5d}/{len(loader)}]"
                 f"  total={loss_dict['loss_total']:.4f}"
@@ -252,6 +284,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, args, epoch):
                 f"  ssim={loss_dict['loss_ssim']:.4f}"
                 f"  kl={loss_dict['loss_kl']:.6f}"
                 f"  mmd={loss_dict['loss_mmd']:.6f}"
+                f"  lr={cur_lr:.2e}"
             )
 
     n = len(loader)
@@ -273,8 +306,24 @@ def main():
     # Modeling
     loader = build_loader(args)
     model = build_model(args, device)
-    criterion = build_criterion(args,device)
+    criterion = build_criterion(args, device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    # Scheduler
+    # num_training_steps is measured in optimizer updates, not micro-batches,
+    # so the warmup / cosine curve is independent of accum_steps.
+    accum_steps = args.accum_steps if args.use_accum else 1
+    updates_per_epoch = math.ceil(len(loader) / accum_steps)
+    num_training_steps = updates_per_epoch * args.n_epochs
+    num_warmup_steps = int(num_training_steps * args.warmup_ratio)
+
+    scheduler = None
+    if args.use_scheduler:
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
 
     # Resume
     # If training was interrupted (e.g. server crash, time limit), resume from
@@ -284,24 +333,32 @@ def main():
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
+        if scheduler is not None and "scheduler" in ckpt and ckpt["scheduler"] is not None:
+            scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
         print(f"[Resume] Loaded epoch {ckpt['epoch']}")
 
     # Config summary
+    effective_bs = args.bs * accum_steps
     print(f"\n{'=' * 80}")
-    print(f"  device     : {device, args.device_id}")
-    print(f"  data       : {'FakeDataset' if args.test_case else 'NIH'}")
-    print(f"  batch size : {args.bs}   epochs : {args.n_epochs}   lr : {args.lr}")
-    print(f"  z_channels : {args.z_channels}   resolution : {args.resolution}")
+    print(f"  device        : {device, args.device_id}")
+    print(f"  data          : {'FakeDataset' if args.test_case else 'NIH'}")
+    print(f"  batch size    : {args.bs}  accum_steps : {accum_steps}  "
+          f"effective_bs : {effective_bs}")
+    print(f"  epochs        : {args.n_epochs}   lr : {args.lr}")
+    print(f"  z_channels    : {args.z_channels}   resolution : {args.resolution}")
     print(f"  λ_rec={args.lambda_rec}  λ_ssim={args.lambda_ssim}"
           f"  λ_kl={args.lambda_kl}    λ_mmd={args.lambda_mmd}")
-    print(f"  debug mode : {args.debug}   save_every : {args.save_every} epoch")
+    print(f"  scheduler     : {'cosine+warmup' if args.use_scheduler else 'none'}"
+          f"  warmup_steps={num_warmup_steps}  total_updates={num_training_steps}")
+    print(f"  debug mode    : {args.debug}   save_every : {args.save_every} epoch")
     print(f"{'=' * 80}\n")
 
     # Training Loop
     for epoch in range(start_epoch, args.n_epochs + 1):
-        avg = train_one_epoch(model, loader, criterion, optimizer, device, args, epoch)
+        avg = train_one_epoch(model, loader, criterion, optimizer, scheduler, device, args, epoch)
 
+        cur_lr = optimizer.param_groups[0]["lr"]
         print(
             f"[Epoch {epoch:4d}/{args.n_epochs}]"
             f"  total={avg['loss_total']:.4f}"
@@ -309,6 +366,7 @@ def main():
             f"  ssim={avg['loss_ssim']:.4f}"
             f"  kl={avg['loss_kl']:.6f}"
             f"  mmd={avg['loss_mmd']:.6f}"
+            f"  lr={cur_lr:.2e}"
         )
 
         # Save checkpoint (Periodic)
@@ -318,6 +376,7 @@ def main():
                 "epoch": epoch,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict() if scheduler is not None else None,
                 "args": vars(args),
             }, ckpt_path)
             print(f"  -> Checkpoint saved: {ckpt_path}")
