@@ -237,7 +237,57 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, device, args
     running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_kl", "loss_mmd")}
     debug_img_dir = os.path.join(args.save_dir, f"debug_imgs ({args.run_date})")
 
-    accum_steps = args.accum_steps if args.use_accum else 1
+    for step, (x, _) in enumerate(loader):
+        x = x.to(device)
+
+        # Forward
+        posterior = model.encode(x)  # DiagonalGaussianDistribution
+        z = posterior.sample()       # reparameterisation trick  [B, z_ch, h, w]
+        x_hat = model.decode(z)      # reconstructed image       [B, C, H, W]
+
+        # Loss
+        if args.debug and step == 0:
+            loss, loss_dict = criterion.debug_forward(x, x_hat, posterior, z)
+            _save_recon_images(x, x_hat, debug_img_dir, epoch, step)
+        else:
+            loss, loss_dict = criterion(x, x_hat, posterior, z)
+
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+
+        # Accumulate unscaled metrics for logging
+        for k in running:
+            running[k] += loss_dict[k]
+
+        # Step log
+        if (step + 1) % args.log_every == 0:
+            cur_lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"  [Ep {epoch:4d} | Step {step + 1:5d}/{len(loader)}]"
+                f"  total={loss_dict['loss_total']:.4f}"
+                f"  rec={loss_dict['loss_rec']:.4f}"
+                f"  ssim={loss_dict['loss_ssim']:.4f}"
+                f"  kl={loss_dict['loss_kl']:.6f}"
+                f"  mmd={loss_dict['loss_mmd']:.6f}"
+                f"  lr={cur_lr:.2e}"
+            )
+
+    n = len(loader)
+    return {k: v / n for k, v in running.items()}
+
+
+def train_one_epoch_accum(model, loader, criterion, optimizer, scheduler, device, args, epoch):
+    model.train()
+    running = {k: 0.0 for k in ("loss_total", "loss_rec", "loss_ssim", "loss_kl", "loss_mmd")}
+    debug_img_dir = os.path.join(args.save_dir, f"debug_imgs ({args.run_date})")
+
+    accum_steps = args.accum_steps
     optimizer.zero_grad()  # initialise before accumulation window
 
     for step, (x, _) in enumerate(loader):
@@ -355,8 +405,9 @@ def main():
     print(f"{'=' * 80}\n")
 
     # Training Loop
+    _train_fn = train_one_epoch_accum if args.use_accum else train_one_epoch
     for epoch in range(start_epoch, args.n_epochs + 1):
-        avg = train_one_epoch(model, loader, criterion, optimizer, scheduler, device, args, epoch)
+        avg = _train_fn(model, loader, criterion, optimizer, scheduler, device, args, epoch)
 
         cur_lr = optimizer.param_groups[0]["lr"]
         print(
