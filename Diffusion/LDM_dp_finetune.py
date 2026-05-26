@@ -336,16 +336,21 @@ def _raw_collate_fn(samples):
     }
 
 
-def build_dp_loader(dataset: Dataset, physical_batch: int,
+def build_dp_loader(dataset: Dataset, logical_batch: int,
                     num_workers: int = 4, pin_memory: bool = True) -> DataLoader:
     """
     Training DataLoader passed to Opacus make_private().
-    Returns raw strings (no BioBERT embedding) so Opacus can track grads
-    through the embedder's projection layer inside the model.
+
+    batch_size = logical_batch (e.g. 256) so Opacus Poisson-samples at
+    q = logical_batch / N.  This must match the q used in compute_noise_multiplier.
+    Physical splitting into smaller GPU-sized chunks is done in the training loop.
+
+    Mirrors DP-LDM's VirtualBatchWrapper approach:
+        config batch_size=256 (accounting unit) + max_batch_size=3 (GPU unit)
     """
     return DataLoader(
         dataset,
-        batch_size  = physical_batch,
+        batch_size  = logical_batch,
         shuffle     = True,
         num_workers = num_workers,
         drop_last   = True,
@@ -450,6 +455,8 @@ def main():
         f'logical_batch ({args.logical_batch}) must be divisible by '
         f'physical_batch ({args.physical_batch})'
     )
+    # Maximum number of physical chunks per logical batch (Poisson batches
+    # are ≈ logical_batch samples, so actual n_chunks may vary slightly)
     grad_accum_steps = args.logical_batch // args.physical_batch
 
     # ── Device ────────────────────────────────────────────────────────────────
@@ -545,31 +552,36 @@ def main():
     print(f'[DP] gradient checkpointing disabled on {n_patched} block(s)')
 
     # ── DataLoaders ───────────────────────────────────────────────────────────
+    # base_loader uses logical_batch so Opacus accounts at q = logical_batch/N
+    # (same as DP-LDM config batch_size=256 passed to make_private)
     base_loader = build_dp_loader(
         train_dataset,
-        physical_batch = args.physical_batch,
-        num_workers    = args.num_workers,
-        pin_memory     = args.pin_memory,
+        logical_batch = args.logical_batch,
+        num_workers   = args.num_workers,
+        pin_memory    = args.pin_memory,
     )
     val_loader = (
         build_val_loader(val_dataset, args.physical_batch, args.num_workers)
         if val_dataset is not None else None
     )
 
-    steps_per_epoch         = len(base_loader)
-    logical_steps_per_epoch = steps_per_epoch // grad_accum_steps
+    # One DP optimizer step per logical batch (= one item from dp_loader)
+    logical_steps_per_epoch = len(base_loader)
     total_logical_steps     = logical_steps_per_epoch * args.epochs
-    print(f'[Loader] phys_steps/epoch={steps_per_epoch}  '
-          f'logical_steps/epoch={logical_steps_per_epoch}  '
-          f'grad_accum={grad_accum_steps}')
+    print(f'[Loader] logical_steps/epoch={logical_steps_per_epoch}  '
+          f'physical_batch={args.physical_batch}  '
+          f'chunks_per_logical={grad_accum_steps}')
 
     # ── scale_factor init BEFORE make_private ─────────────────────────────────
     if args.scale_by_std:
         print('[LDM_dp] computing scale_factor from first batch ...')
         first_raw = next(iter(base_loader))
-        first_raw = {'image': first_raw['image'].to(device),
-                     'reports': first_raw['reports']}
-        ldm.init_scale_factor(first_raw, is_first_batch=True)
+        # Use first physical chunk only (saves GPU memory)
+        first_chunk = {
+            'image'  : first_raw['image'][:args.physical_batch].to(device),
+            'reports': first_raw['reports'][:args.physical_batch],
+        }
+        ldm.init_scale_factor(first_chunk, is_first_batch=True)
 
     # ── Selective parameter unfreeze ──────────────────────────────────────────
     attn_params = ldm.configure_dp_params(
@@ -646,48 +658,56 @@ def main():
     # =========================================================================
     print(f'\n[DP-Train] split={args.split}  epochs={args.epochs}  lr={args.lr}  '
           f'logical_batch={args.logical_batch}  physical_batch={args.physical_batch}  '
-          f'grad_accum={grad_accum_steps}  σ={sigma:.4f}')
+          f'chunks/step={grad_accum_steps}  σ={sigma:.4f}')
     print('=' * 60)
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
         ldm.train()
-        epoch_losses  = []
-        phys_step_idx = 0
-        t0            = time.time()
+        epoch_losses = []
+        t0           = time.time()
 
-        for batch in dp_loader:
-            batch = {
-                'image'  : batch['image'].to(device),
-                'reports': batch['reports'],
-            }
+        for logical_batch in dp_loader:
+            # logical_batch is one Poisson-sampled batch of size ≈ logical_batch
+            # (q = logical_batch/N — consistent with sigma and get_epsilon)
+            images  = logical_batch['image'].to(device)   # [B, 1, H, W]
+            reports = logical_batch['reports']             # list[str], len ≈ B
 
-            loss, loss_dict = ldm._module.training_step_dp(batch)
-            (loss / grad_accum_steps).backward()
+            B       = images.shape[0]
+            n_chunks = max(1, math.ceil(B / args.physical_batch))
 
-            phys_step_idx += 1
-            is_last_accum  = (phys_step_idx % grad_accum_steps == 0)
+            optimizer.zero_grad()
+            step_loss    = 0.0
+            last_loss_dict = {}
 
-            if not is_last_accum:
-                optimizer.signal_skip_step(do_skip=True)
-                optimizer.step()
-            else:
-                optimizer.step()
-                optimizer.zero_grad()
-                if scheduler is not None:
-                    scheduler.step()
+            # ── VirtualBatch: split logical batch into physical chunks ─────────
+            # Mirrors DP-LDM's VirtualBatchWrapper(max_batch_size=physical_batch)
+            # All per-sample grads accumulate before the single DP step below.
+            for i in range(n_chunks):
+                start = i * args.physical_batch
+                end   = min(start + args.physical_batch, B)
+                chunk = {
+                    'image'  : images[start:end],
+                    'reports': reports[start:end],
+                }
+                loss, loss_dict = ldm._module.training_step_dp(chunk)
+                (loss / n_chunks).backward()   # accumulate grad into param.grad_sample
+                step_loss     += loss.item() / n_chunks
+                last_loss_dict = loss_dict
 
-                epoch_losses.append(loss.item())
-                global_step += 1
+            # ── One DP step: clip all accumulated per-sample grads, add noise ──
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
-                if global_step % args.log_every == 0:
-                    info    = '  '.join(f'{k}={v.item():.4f}'
-                                        for k, v in loss_dict.items())
-                    eps_now = privacy_engine.get_epsilon(args.target_delta)
-                    print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
-                          f'{info}  ε={eps_now:.4f}')
+            epoch_losses.append(step_loss)
+            global_step += 1
 
-            if phys_step_idx >= steps_per_epoch:
-                break
+            if global_step % args.log_every == 0:
+                info    = '  '.join(f'{k}={v.item():.4f}'
+                                    for k, v in last_loss_dict.items())
+                eps_now = privacy_engine.get_epsilon(args.target_delta)
+                print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
+                      f'{info}  ε={eps_now:.4f}')
 
         # ── Epoch summary ─────────────────────────────────────────────────────
         elapsed   = time.time() - t0
