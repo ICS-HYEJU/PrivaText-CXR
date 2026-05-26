@@ -4,20 +4,29 @@ Data/mimic_cxr.py  —  MIMIC-CXR Map-Style Dataset
 Map-style dataset compatible with DP-SGD (Opacus UniformWithReplacementSampler).
 Each sample returns (image_tensor, report_str).
 
-Directory structure (original):
+Directory structure (pre-built split, Mode D — recommended):
+    <prebuilt_split_dir>/
+    ├── train/
+    │   ├── p10/
+    │   │   └── p10000032/
+    │   │       ├── s50414267/
+    │   │       │   └── <dicom_id>.dcm
+    │   │       └── s50414267.txt
+    │   ├── p11/ ... p19/
+    ├── validate/
+    └── test/
+
+Directory structure (original raw data, Mode A / C):
     <root_path>/
     ├── files/
-    │   └── p10/
-    │       └── p10000032/
-    │           ├── s50414267/
-    │           │   └── <dicom_id>.dcm
-    │           └── s50414267.txt
+    │   └── p10/ ... p19/
     ├── mimic-cxr-2.0.0-split.csv      (Mode A — required)
     └── mimic-cxr-2.0.0-metadata.csv   (Mode A — optional)
 
-Modes:
-    Mode A  split.csv found  -> official train / validate / test labels  [default]
-    Mode C  split.csv absent -> folder scan + patient-level 80/10/10     [fallback]
+Mode priority (highest → lowest):
+    Mode D  prebuilt_split_dir exists  -> scan pre-built split folder directly
+    Mode A  split.csv found            -> original data + CSV labels
+    Mode C  split.csv absent           -> original data + patient-level 80/10/10
 
 prepare_split_dirs (--make_split_dir):
     One-time preprocessing step. Reads Mode A/C sample list and creates:
@@ -86,6 +95,12 @@ def parse_args():
     # BioBERT
     parser.add_argument("--biobert_path", type=str, default="/storage/hjchoi")
 
+    # Pre-built split directory (Mode D)
+    parser.add_argument("--prebuilt_split_dir", type=str,
+                        default='/storage/hjchoi/mimic/split',
+                        help="root of pre-built split dirs (train/validate/test). "
+                             "When this path exists Mode D is used (highest priority).")
+
     # prepare_split_dirs
     parser.add_argument("--make_split_dir", default=False, action="store_true",
                         help="organise files into train/validate/test folders "
@@ -109,8 +124,9 @@ class MIMICCXRDataset(Dataset):
 
     Args:
         args            : Namespace from parse_args()
-                          Required fields: root_path, split, image_size, max_length,
-                                           split_csv, meta_csv
+                          Required fields: split, image_size, max_length
+                          Mode D also requires: prebuilt_split_dir
+                          Mode A also requires: root_path, split_csv, meta_csv
         filter_existing : If True (default), remove samples whose DICOM file is
                           missing.  Pass False in prepare_split_dirs so that all
                           CSV entries are processed regardless of current download
@@ -119,14 +135,9 @@ class MIMICCXRDataset(Dataset):
     def __init__(self, args, filter_existing: bool = True):
         super().__init__()
 
-        self.root_dir   = args.root_path
-        self.files_dir  = os.path.join(args.root_path, "files")
         self.split      = args.split
         self.image_size = args.image_size
         self.max_length = getattr(args, "max_length", 512)
-
-        self.split_csv   = os.path.join(args.root_path, args.split_csv)
-        self.meta_csv    = os.path.join(args.root_path, args.meta_csv)
         self.view_filter = getattr(args, "view_filter", ["PA", "AP"])
 
         self.transform  = transforms.Compose([
@@ -135,17 +146,36 @@ class MIMICCXRDataset(Dataset):
             transforms.Normalize(mean=[0.5], std=[0.5]),
         ])
 
-        # Mode A (primary)
-        if os.path.exists(self.split_csv):
-            self._mode   = "A"
-            print(f"[MIMICCXRDataset] Mode A: split CSV found -> {self.split_csv}")
-            self.samples = self._build_from_csv()
+        prebuilt_split_dir = getattr(args, "prebuilt_split_dir", None)
+        split_active_dir   = (
+            os.path.join(prebuilt_split_dir, self.split)
+            if prebuilt_split_dir else None
+        )
 
-        # Mode C (fallback)
+        # Mode D (highest priority): pre-built split directory
+        if split_active_dir and os.path.isdir(split_active_dir):
+            self._mode   = "D"
+            self._scan_root = split_active_dir
+            print(f"[MIMICCXRDataset] Mode D: pre-built split dir -> {split_active_dir}")
+            self.samples = self._build_from_split_dir()
+
         else:
-            self._mode   = "C"
-            print(f"[MIMICCXRDataset] Mode C: split CSV not found -> folder scan")
-            self.samples = self._build_from_folder()
+            self.root_dir  = args.root_path
+            self.files_dir = os.path.join(args.root_path, "files")
+            self.split_csv = os.path.join(args.root_path, args.split_csv)
+            self.meta_csv  = os.path.join(args.root_path, args.meta_csv)
+
+            # Mode A
+            if os.path.exists(self.split_csv):
+                self._mode   = "A"
+                print(f"[MIMICCXRDataset] Mode A: split CSV found -> {self.split_csv}")
+                self.samples = self._build_from_csv()
+
+            # Mode C (fallback)
+            else:
+                self._mode   = "C"
+                print(f"[MIMICCXRDataset] Mode C: split CSV not found -> folder scan")
+                self.samples = self._build_from_folder()
 
         if filter_existing:
             self.samples = self._filter_existing_samples(self.samples)
@@ -176,6 +206,54 @@ class MIMICCXRDataset(Dataset):
 
         report = self._load_report(meta["report_path"])
         return image, report
+
+    # -------------------------------------------------------------------------
+    # Mode D : pre-built split directory
+    # -------------------------------------------------------------------------
+
+    def _build_from_split_dir(self) -> list:
+        """
+        Scan <prebuilt_split_dir>/<split>/ and collect all DICOM samples.
+
+        Expected structure (mirrors original hierarchy):
+            <scan_root>/
+            ├── p10/
+            │   └── p10000032/
+            │       ├── s50414267/
+            │       │   └── <dicom_id>.dcm
+            │       └── s50414267.txt
+            ├── p11/ ... p19/
+        """
+        samples = []
+
+        for prefix in sorted(os.listdir(self._scan_root)):
+            prefix_dir = os.path.join(self._scan_root, prefix)
+            if not os.path.isdir(prefix_dir) or not prefix.startswith("p"):
+                continue
+
+            for patient_id in sorted(os.listdir(prefix_dir)):
+                patient_dir = os.path.join(prefix_dir, patient_id)
+                if not os.path.isdir(patient_dir):
+                    continue
+
+                for entry in sorted(os.listdir(patient_dir)):
+                    study_dir = os.path.join(patient_dir, entry)
+                    if not os.path.isdir(study_dir) or not entry.startswith("s"):
+                        continue
+
+                    report_path = os.path.join(patient_dir, f"{entry}.txt")
+
+                    for fname in sorted(os.listdir(study_dir)):
+                        if not fname.endswith(".dcm"):
+                            continue
+                        samples.append({
+                            "dcm_path"   : os.path.join(study_dir, fname),
+                            "report_path": report_path,
+                            "study_id"   : entry,
+                            "patient_id" : patient_id,
+                        })
+
+        return samples
 
     # -------------------------------------------------------------------------
     # Mode A : official CSV split
