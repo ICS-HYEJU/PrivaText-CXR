@@ -5,9 +5,17 @@ Fine-tunes only the cross-attention (SpatialTransformer) blocks of a
 pre-trained LatentDiffusion model under (ε, δ)-differential privacy using
 Opacus DP-SGD.
 
-Key differences vs LDM_train.py:
-  1. BioBERT embedder lives INSIDE LatentDiffusionDP (not in collate_fn)
-     so Opacus computes per-sample grads for its projection layer.
+Expected directory layout (produced by Data/mimic_cxr.py prepare_split_dirs):
+    <root_path>/
+    ├── train/
+    │   └── p10/ └── p10000032/ └── s50414267/ └── <id>.dcm
+    │                            └── s50414267.txt
+    ├── validate/
+    └── test/
+
+Key design notes:
+  1. BioBERT lives INSIDE LatentDiffusionDP (not in collate_fn) so Opacus
+     computes per-sample grads for its projection layer.
   2. Loader yields raw strings; embedding happens inside training_step_dp.
   3. Only SpatialTransformer blocks (+ optionally BioBERT proj) are trained;
      VAE is fully frozen.
@@ -21,7 +29,8 @@ Key differences vs LDM_train.py:
 Usage:
     python Diffusion/LDM_dp_finetune.py \\
         --pretrained_ckpt ./checkpoints/ldm_epoch0100.pt \\
-        --root_path /data/mimic-cxr \\
+        --root_path /storage/hjchoi/mimic/split \\
+        --split train \\
         --target_epsilon 10.0 \\
         --target_delta 1e-5 \\
         --max_grad_norm 1.0 \\
@@ -41,37 +50,112 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_this_dir  = os.path.dirname(os.path.abspath(__file__))
-_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))
-_model_dir = os.path.join(_proj_root, 'Model')
-_data_dir  = os.path.join(_proj_root, 'Data')
-for _d in [_proj_root, _model_dir, _data_dir, _this_dir]:
+_this_dir  = os.path.dirname(os.path.abspath(__file__))       # Diffusion/
+_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))  # PrivaText-CXR/
+
+# _proj_root  → enables  Data.*  Model.*  packages
+# _this_dir   → enables  privacy.*  package (Diffusion/privacy/)
+for _d in [_proj_root, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-from LDM_dp        import LatentDiffusionDP             # Diffusion/LDM_dp.py
-from UNetModel     import UNetModel                     # Diffusion/UNetModel.py
-from autoencoder   import AutoencoderKL                 # Model/autoencoder.py
-from attention_module_dp import disable_checkpointing   # Model/attention_module_dp.py
-from mimic_cxr     import MIMICCXRDataset               # Data/mimic_cxr.py
-from privacy.privacy_analysis import (                  # Diffusion/privacy/
+# User-specified import paths; fallback to direct imports for local dev
+try:
+    from Model.Diffusion.LDM_dp    import LatentDiffusionDP   # Model/Diffusion/LDM_dp.py
+    from Model.Diffusion.UNetmodel import UNetModel            # Model/Diffusion/UNetmodel.py
+    from Model.autoencoder         import AutoencoderKL        # Model/autoencoder.py
+    from Model.attention_module_dp import disable_checkpointing# Model/attention_module_dp.py
+except ImportError:
+    # Running directly from PrivaText-CXR/ project root
+    sys.path.insert(0, os.path.join(_proj_root, 'Model'))
+    from LDM_dp          import LatentDiffusionDP              # Diffusion/LDM_dp.py
+    from UNetModel       import UNetModel                      # Diffusion/UNetModel.py
+    from autoencoder     import AutoencoderKL                  # Model/autoencoder.py
+    from attention_module_dp import disable_checkpointing      # Model/attention_module_dp.py
+
+from Data.mimic_cxr import MIMICCXRDataset                    # Data/mimic_cxr.py
+from privacy.privacy_analysis import (                         # Diffusion/privacy/
     compute_noise_multiplier,
-    get_epsilon_spent,
     print_privacy_summary,
 )
 
 try:
     from Modules.BioBERT_embedder import BioBERTEmbedder
 except ImportError:
-    sys.path.insert(0, _proj_root)
-    try:
-        from Modules.BioBERT_embedder import BioBERTEmbedder
-    except ImportError:
-        BioBERTEmbedder = None
+    BioBERTEmbedder = None
+
+
+# =============================================================================
+# Split-directory Dataset
+# =============================================================================
+
+class _SplitDirDataset(MIMICCXRDataset):
+    """
+    Loads MIMIC-CXR from a pre-split directory produced by prepare_split_dirs().
+
+    Layout expected at `mode_dir`:
+        <mode_dir>/p10/p10000032/s50414267/<dicom_id>.dcm
+                   p10/p10000032/s50414267.txt
+
+    Unlike MIMICCXRDataset (which appends 'files/' to root_path), this class
+    treats mode_dir itself as the scan root.
+
+    Supports map-style access (dataset[idx]) required by Opacus
+    UniformWithReplacementSampler.
+    """
+
+    def __init__(self, mode_dir: str, image_size: int = 256, max_length: int = 512):
+        if not os.path.isdir(mode_dir):
+            raise FileNotFoundError(
+                f"Split mode directory not found: {mode_dir}\n"
+                f"Run Data/mimic_cxr.py --make_split_dir first."
+            )
+
+        # Bypass MIMICCXRDataset.__init__ — initialise Dataset directly
+        Dataset.__init__(self)
+
+        self.root_dir    = mode_dir
+        self.files_dir   = mode_dir   # scan p*/p*/s*/ directly here (no 'files/' subdir)
+        self.split       = None
+        self.image_size  = image_size
+        self.max_length  = max_length
+        self.view_filter = []
+        self._mode       = 'split_dir'
+
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5]),
+        ])
+
+        self.samples = self._scan_all_folders()          # inherited from MIMICCXRDataset
+        self.samples = self._filter_existing_samples(self.samples)
+        print(f"[SplitDirDataset] {mode_dir}  samples={len(self.samples)}")
+
+
+def build_split_dataset(root_path: str, split: str,
+                        image_size: int = 256,
+                        max_length: int = 512) -> _SplitDirDataset:
+    """
+    Construct a _SplitDirDataset for the given split.
+
+    Args:
+        root_path : root containing train/ validate/ test/ subdirectories
+                    e.g. /storage/hjchoi/mimic/split
+        split     : one of 'train', 'validate', 'test'
+        image_size: resize target
+        max_length: max report character length
+    """
+    valid_splits = ('train', 'validate', 'test')
+    if split not in valid_splits:
+        raise ValueError(f"split must be one of {valid_splits}, got '{split}'")
+
+    mode_dir = os.path.join(root_path, split)
+    return _SplitDirDataset(mode_dir, image_size=image_size, max_length=max_length)
 
 
 # =============================================================================
@@ -80,7 +164,7 @@ except ImportError:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='DP-SGD Fine-Tuning of LDM on MIMIC-CXR',
+        description='DP-SGD Fine-Tuning of LDM on MIMIC-CXR (pre-split dirs)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -88,18 +172,22 @@ def parse_args():
     parser.add_argument('--device_id', default='0',
                         help='GPU id (e.g. "0", "1")')
 
-    # DATA (MIMIC-CXR) ---------------------------------------------------------
-    parser.add_argument('--root_path',    required=True,
-                        help='MIMIC-CXR dataset root directory')
-    parser.add_argument('--split_csv',    default='mimic-cxr-2.0.0-split.csv')
-    parser.add_argument('--meta_csv',     default='mimic-cxr-2.0.0-metadata.csv')
-    parser.add_argument('--view_filter',  nargs='+', default=['PA', 'AP'],
-                        help='ViewPosition filter for frontal CXRs')
-    parser.add_argument('--image_size',   default=256,  type=int)
-    parser.add_argument('--max_length',   default=512,  type=int,
-                        help='BioBERT tokeniser max length')
-    parser.add_argument('--num_workers',  default=4,    type=int)
-    parser.add_argument('--pin_memory',   default=True,
+    # DATA (pre-split MIMIC-CXR) -----------------------------------------------
+    parser.add_argument('--root_path', default='/storage/hjchoi/mimic/split',
+                        help='Root containing train/ validate/ test/ subdirectories')
+    parser.add_argument('--split',     default='train',
+                        choices=['train', 'validate', 'test'],
+                        help='Which split to use as training data')
+    parser.add_argument('--do_validation', default=True,
+                        type=lambda x: x.lower() != 'false',
+                        help='Run validation loop after each epoch')
+    parser.add_argument('--val_batches', default=-1, type=int,
+                        help='Max validation batches per epoch (-1 = all)')
+    parser.add_argument('--image_size',  default=256,  type=int)
+    parser.add_argument('--max_length',  default=512,  type=int,
+                        help='Report text character limit')
+    parser.add_argument('--num_workers', default=4,    type=int)
+    parser.add_argument('--pin_memory',  default=True,
                         type=lambda x: x.lower() != 'false')
 
     # VAE: Encoder / Decoder ---------------------------------------------------
@@ -118,9 +206,7 @@ def parse_args():
     parser.add_argument('--double_z',             default=True,
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--vae_out_ch',           default=1,             type=int)
-
-    # VAE checkpoint (required – VAE must be pretrained) -----------------------
-    parser.add_argument('--vae_ckpt', default=None,
+    parser.add_argument('--vae_ckpt',             default=None,
                         help='Path to pretrained VAE checkpoint (.pt / .pth)')
 
     # UNet ---------------------------------------------------------------------
@@ -153,7 +239,7 @@ def parse_args():
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--write_json',  default=False,
                         type=lambda x: x.lower() != 'false')
-    parser.add_argument('--conv_dims',   default=2,   type=int, choices=[1, 2, 3])
+    parser.add_argument('--conv_dims',   default=2, type=int, choices=[1, 2, 3])
 
     # Diffusion / LDM ----------------------------------------------------------
     parser.add_argument('--timesteps',     default=1000,  type=int)
@@ -163,9 +249,9 @@ def parse_args():
                         help='Auto-compute scale_factor from first-batch latent std')
     parser.add_argument('--use_ema',       default=False,
                         type=lambda x: x.lower() != 'false',
-                        help='EMA is disabled by default for DP fine-tuning')
+                        help='EMA disabled by default for DP fine-tuning')
 
-    # Pretrained LDM checkpoint (required) -------------------------------------
+    # Pretrained LDM checkpoint ------------------------------------------------
     parser.add_argument('--pretrained_ckpt', default=None,
                         help='Pretrained LDM checkpoint to fine-tune from')
 
@@ -174,35 +260,35 @@ def parse_args():
                         help='HuggingFace model ID or local path for BioBERT')
 
     # DP-SGD -------------------------------------------------------------------
-    parser.add_argument('--target_epsilon',  default=10.0,  type=float,
+    parser.add_argument('--target_epsilon',   default=10.0,  type=float,
                         help='Target ε privacy budget')
-    parser.add_argument('--target_delta',    default=1e-5,  type=float,
+    parser.add_argument('--target_delta',     default=1e-5,  type=float,
                         help='Target δ (recommend 1/dataset_size)')
-    parser.add_argument('--max_grad_norm',   default=1.0,   type=float,
-                        help='Per-sample gradient clipping norm')
-    parser.add_argument('--noise_multiplier', default=None, type=float,
+    parser.add_argument('--max_grad_norm',    default=1.0,   type=float,
+                        help='Per-sample gradient clipping norm C')
+    parser.add_argument('--noise_multiplier', default=None,  type=float,
                         help='Override auto-computed σ (skips compute_noise_multiplier)')
-    parser.add_argument('--logical_batch',   default=256,   type=int,
+    parser.add_argument('--logical_batch',    default=256,   type=int,
                         help='Logical batch size for privacy accounting')
-    parser.add_argument('--physical_batch',  default=8,     type=int,
-                        help='Physical batch size (must divide logical_batch)')
-    parser.add_argument('--ablation_blocks', default=-1,    type=int,
+    parser.add_argument('--physical_batch',   default=8,     type=int,
+                        help='Physical batch size that fits in GPU memory')
+    parser.add_argument('--ablation_blocks',  default=-1,    type=int,
                         help='-1 = all SpatialTransformer blocks; '
-                             'N = only last N blocks (DP-LDM ablation)')
+                             'N = only last N blocks (DP-LDM ablation study)')
     parser.add_argument('--finetune_biobert', default=True,
                         type=lambda x: x.lower() != 'false',
                         help='Unfreeze BioBERT projection layer under DP')
 
     # Training -----------------------------------------------------------------
-    parser.add_argument('--epochs',      default=30,     type=int)
-    parser.add_argument('--lr',          default=1e-4,   type=float)
-    parser.add_argument('--warmup_steps',default=500,    type=int,
-                        help='Linear warmup steps (0 = disabled)')
+    parser.add_argument('--epochs',       default=30,    type=int)
+    parser.add_argument('--lr',           default=1e-4,  type=float)
+    parser.add_argument('--warmup_steps', default=500,   type=int,
+                        help='Linear warmup steps for LR scheduler (0 = disabled)')
     parser.add_argument('--save_dir',    default='./checkpoints_dp')
-    parser.add_argument('--save_every',  default=5,      type=int,
-                        help='Save checkpoint every N epochs')
-    parser.add_argument('--log_every',   default=50,     type=int,
-                        help='Log training loss every N logical steps')
+    parser.add_argument('--save_every',  default=5,     type=int,
+                        help='Save DP checkpoint every N epochs')
+    parser.add_argument('--log_every',   default=50,    type=int,
+                        help='Print training loss every N logical steps')
     parser.add_argument('--resume_ckpt', default=None,
                         help='DP checkpoint to resume from (saved by this script)')
 
@@ -210,7 +296,7 @@ def parse_args():
 
 
 # =============================================================================
-# Build helpers
+# Model build helpers
 # =============================================================================
 
 def build_vae(args) -> AutoencoderKL:
@@ -255,7 +341,7 @@ def build_unet(args) -> UNetModel:
         resblock_updown        = args.resblock_updown,
         num_classes            = args.num_classes,
         n_embed                = args.n_embed,
-        use_checkpoint         = False,     # always False for DP
+        use_checkpoint         = False,     # must be False for Opacus
         use_fp16               = args.use_fp16,
         write_json             = args.write_json,
     )
@@ -288,34 +374,80 @@ def _load_vae_ckpt(vae: AutoencoderKL, ckpt_path: str, device):
 
 
 # =============================================================================
-# DataLoader  (raw strings – NO pre-embedding)
+# DataLoaders  (raw strings – NO pre-embedding, BioBERT runs inside model)
 # =============================================================================
 
-def build_dp_loader(args, dataset: MIMICCXRDataset, batch_size: int) -> DataLoader:
-    """
-    Build a DataLoader whose batches are:
-        {'image': Tensor[B,1,H,W], 'reports': list[str]}
+def _raw_collate_fn(samples):
+    """Collate into {'image': Tensor[B,1,H,W], 'reports': list[str]}."""
+    images, reports = zip(*samples)
+    return {
+        'image'  : torch.stack(images),
+        'reports': list(reports),
+    }
 
-    BioBERT embedding is intentionally NOT done here; it must happen inside
-    LatentDiffusionDP.training_step_dp so Opacus can track per-sample grads
-    for the projection layer.
-    """
-    def collate_fn(samples):
-        images, reports = zip(*samples)
-        return {
-            'image'  : torch.stack(images),   # [B, 1, H, W]
-            'reports': list(reports),          # list[str]
-        }
 
+def build_dp_loader(dataset: Dataset, physical_batch: int,
+                    num_workers: int = 4, pin_memory: bool = True) -> DataLoader:
+    """
+    Training DataLoader passed to Opacus make_private().
+    Returns raw strings (no BioBERT embedding) so Opacus can track grads
+    through the embedder's projection layer inside the model.
+
+    Note: Opacus replaces the sampler with UniformWithReplacementSampler
+    (Poisson subsampling) when make_private(poisson_sampling=True) is called.
+    """
+    return DataLoader(
+        dataset,
+        batch_size  = physical_batch,
+        shuffle     = True,
+        num_workers = num_workers,
+        drop_last   = True,
+        pin_memory  = pin_memory and torch.cuda.is_available(),
+        collate_fn  = _raw_collate_fn,
+    )
+
+
+def build_val_loader(dataset: Dataset, batch_size: int,
+                     num_workers: int = 4) -> DataLoader:
+    """
+    Validation DataLoader (no DP, shuffle=False, no drop_last).
+    Same batch format as training: {'image': Tensor, 'reports': list[str]}.
+    """
     return DataLoader(
         dataset,
         batch_size  = batch_size,
-        shuffle     = True,
-        num_workers = args.num_workers,
-        drop_last   = True,
-        pin_memory  = args.pin_memory and torch.cuda.is_available(),
-        collate_fn  = collate_fn,
+        shuffle     = False,
+        num_workers = num_workers,
+        drop_last   = False,
+        pin_memory  = False,
+        collate_fn  = _raw_collate_fn,
     )
+
+
+# =============================================================================
+# Validation
+# =============================================================================
+
+@torch.no_grad()
+def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> float:
+    """
+    Compute average diffusion loss on the validation set.
+    Uses ldm._module (unwrapped from GradSampleModule) in eval mode.
+    No gradients are computed.
+    """
+    inner = ldm._module if hasattr(ldm, '_module') else ldm
+    inner.eval()
+
+    losses = []
+    for i, batch in enumerate(val_loader):
+        if max_batches > 0 and i >= max_batches:
+            break
+        batch = {'image': batch['image'].to(device), 'reports': batch['reports']}
+        loss, _ = inner.training_step_dp(batch)
+        losses.append(loss.item())
+
+    inner.train()
+    return float(np.mean(losses)) if losses else float('nan')
 
 
 # =============================================================================
@@ -323,46 +455,41 @@ def build_dp_loader(args, dataset: MIMICCXRDataset, batch_size: int) -> DataLoad
 # =============================================================================
 
 def save_dp_checkpoint(
-    save_path  : str,
+    save_path    : str,
     model,
     optimizer,
     privacy_engine,
-    epoch      : int,
-    global_step: int,
+    epoch        : int,
+    global_step  : int,
     args,
-    target_delta: float,
+    target_delta : float,
 ):
     """
-    Save a DP training checkpoint.
+    Save DP training state.
 
-    After make_private(), `model` is a GradSampleModule.  Use
-    `model._module.state_dict()` to get the unwrapped weights so they can be
-    loaded back into a plain LatentDiffusionDP without Opacus.
+    model is a GradSampleModule after make_private(); use
+    model._module.state_dict() to save unwrapped weights that can be
+    reloaded into a plain LatentDiffusionDP without Opacus.
     """
     eps_spent = privacy_engine.get_epsilon(target_delta)
-    state = {
-        'epoch'       : epoch,
-        'global_step' : global_step,
-        'model'       : model._module.state_dict(),
-        'optimizer'   : optimizer.original_optimizer.state_dict(),
-        'epsilon_spent': eps_spent,
-        'args'        : vars(args),
-    }
-    torch.save(state, save_path)
+    torch.save({
+        'epoch'         : epoch,
+        'global_step'   : global_step,
+        'model'         : model._module.state_dict(),
+        'optimizer'     : optimizer.original_optimizer.state_dict(),
+        'epsilon_spent' : eps_spent,
+        'args'          : vars(args),
+    }, save_path)
     print(f'  [ckpt] saved → {save_path}  (ε_spent={eps_spent:.4f})')
 
 
 def load_dp_checkpoint(load_path: str, model, optimizer=None, device='cpu'):
     """
     Resume from a checkpoint saved by save_dp_checkpoint.
-
-    Works whether `model` is a plain LatentDiffusionDP or a GradSampleModule
-    (i.e. can be called before or after make_private).
+    Works before or after make_private() (handles both plain and GradSampleModule).
     """
-    ckpt = torch.load(load_path, map_location=device)
-    sd   = ckpt.get('model', ckpt)  # fallback if raw state_dict was saved
-
-    # If wrapped by Opacus, target the inner module
+    ckpt   = torch.load(load_path, map_location=device)
+    sd     = ckpt.get('model', ckpt)
     target = model._module if hasattr(model, '_module') else model
     missing, unexpected = target.load_state_dict(sd, strict=False)
     print(f'[load_dp_checkpoint] missing={len(missing)}  unexpected={len(unexpected)}  '
@@ -370,19 +497,18 @@ def load_dp_checkpoint(load_path: str, model, optimizer=None, device='cpu'):
 
     if optimizer is not None and 'optimizer' in ckpt:
         opt_target = (optimizer.original_optimizer
-                      if hasattr(optimizer, 'original_optimizer')
-                      else optimizer)
+                      if hasattr(optimizer, 'original_optimizer') else optimizer)
         opt_target.load_state_dict(ckpt['optimizer'])
 
     return ckpt.get('epoch', 0), ckpt.get('global_step', 0)
 
 
 # =============================================================================
-# LR Scheduler helpers
+# LR Scheduler
 # =============================================================================
 
 def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
-    """Linear warmup then cosine decay."""
+    """Linear warmup → cosine decay."""
     from torch.optim.lr_scheduler import LambdaLR
 
     def lr_lambda(step):
@@ -401,7 +527,6 @@ def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
 def main():
     args = parse_args()
 
-    # Validate gradient accumulation
     assert args.logical_batch % args.physical_batch == 0, (
         f'logical_batch ({args.logical_batch}) must be divisible by '
         f'physical_batch ({args.physical_batch})'
@@ -413,31 +538,44 @@ def main():
         f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu'
     )
     print(f'Device : {device}')
+    print(f'Split root : {args.root_path}')
 
-    # ── Dataset ───────────────────────────────────────────────────────────────
-    mimic_args = argparse.Namespace(
-        root_path    = args.root_path,
-        split_csv    = args.split_csv,
-        meta_csv     = args.meta_csv,
-        split        = 'train',
-        image_size   = args.image_size,
-        max_length   = args.max_length,
-        view_filter  = args.view_filter,
-        biobert_path = args.biobert_path,
+    # ── Datasets ──────────────────────────────────────────────────────────────
+    train_dataset = build_split_dataset(
+        root_path  = args.root_path,
+        split      = args.split,
+        image_size = args.image_size,
+        max_length = args.max_length,
     )
-    dataset = MIMICCXRDataset(mimic_args)
-    n_samples = len(dataset)
-    print(f'[MIMIC-CXR] train samples: {n_samples}')
-    if n_samples == 0:
-        raise RuntimeError('No samples found. Check --root_path and CSV files.')
+    n_train = len(train_dataset)
+    if n_train == 0:
+        raise RuntimeError(
+            f"No samples found in {os.path.join(args.root_path, args.split)}. "
+            "Run Data/mimic_cxr.py --make_split_dir first."
+        )
 
-    sample_rate = args.logical_batch / n_samples
-    print(f'[MIMIC-CXR] sample_rate q = {args.logical_batch}/{n_samples} = {sample_rate:.6f}')
+    val_dataset = None
+    if args.do_validation:
+        try:
+            val_dataset = build_split_dataset(
+                root_path  = args.root_path,
+                split      = 'validate',
+                image_size = args.image_size,
+                max_length = args.max_length,
+            )
+            print(f'[Validation] validate samples: {len(val_dataset)}')
+        except FileNotFoundError as e:
+            print(f'[Validation] WARNING: {e}  – validation disabled')
+            val_dataset = None
+
+    sample_rate = args.logical_batch / n_train
+    print(f'[{args.split}] samples={n_train}  '
+          f'sample_rate q={args.logical_batch}/{n_train}={sample_rate:.6f}')
 
     # ── BioBERT Embedder ──────────────────────────────────────────────────────
     assert BioBERTEmbedder is not None, (
         'BioBERTEmbedder could not be imported. '
-        'Ensure Modules/BioBERT_embedder.py is accessible.'
+        'Check Modules/BioBERT_embedder.py is accessible.'
     )
     embedder = BioBERTEmbedder(
         model_path = args.biobert_path,
@@ -445,13 +583,13 @@ def main():
     ).to(device)
     print(f'[BioBERT] loaded: {args.biobert_path}')
 
-    # ── VAE ───────────────────────────────────────────────────────────────────
+    # ── VAE (always frozen) ───────────────────────────────────────────────────
     vae = build_vae(args).to(device)
     if args.vae_ckpt:
-        print(f'[VAE] loading checkpoint: {args.vae_ckpt}')
+        print(f'[VAE] loading: {args.vae_ckpt}')
         _load_vae_ckpt(vae, args.vae_ckpt, device)
     else:
-        print('[VAE] WARNING: no --vae_ckpt provided; using random weights')
+        print('[VAE] WARNING: no --vae_ckpt; using random weights')
     vae.eval()
     for p in vae.parameters():
         p.requires_grad = False
@@ -485,25 +623,35 @@ def main():
     else:
         print('[LDM_dp] WARNING: no --pretrained_ckpt; fine-tuning from scratch')
 
-    # ── Disable gradient checkpointing (Opacus incompatible) ──────────────────
+    # ── Disable gradient checkpointing (must do BEFORE make_private) ──────────
     n_patched = disable_checkpointing(ldm)
     print(f'[DP] gradient checkpointing disabled on {n_patched} block(s)')
 
-    # ── DataLoader (pre-Opacus, Opacus will re-wrap with Poisson sampler) ─────
-    base_loader = build_dp_loader(args, dataset, batch_size=args.physical_batch)
-    steps_per_epoch   = len(base_loader)
+    # ── DataLoaders ───────────────────────────────────────────────────────────
+    base_loader = build_dp_loader(
+        train_dataset,
+        physical_batch = args.physical_batch,
+        num_workers    = args.num_workers,
+        pin_memory     = args.pin_memory,
+    )
+    val_loader = (
+        build_val_loader(val_dataset, args.physical_batch, args.num_workers)
+        if val_dataset is not None else None
+    )
+
+    steps_per_epoch       = len(base_loader)
     logical_steps_per_epoch = steps_per_epoch // grad_accum_steps
-    total_logical_steps = logical_steps_per_epoch * args.epochs
-    print(f'[Loader] physical steps/epoch={steps_per_epoch}  '
-          f'logical steps/epoch={logical_steps_per_epoch}  '
+    total_logical_steps   = logical_steps_per_epoch * args.epochs
+    print(f'[Loader] phys_steps/epoch={steps_per_epoch}  '
+          f'logical_steps/epoch={logical_steps_per_epoch}  '
           f'grad_accum={grad_accum_steps}')
 
-    # ── scale_factor init BEFORE make_private (register_buffer restriction) ───
+    # ── scale_factor init BEFORE make_private ─────────────────────────────────
     if args.scale_by_std:
         print('[LDM_dp] computing scale_factor from first batch ...')
         first_raw = next(iter(base_loader))
-        first_raw = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in first_raw.items()}
+        first_raw = {'image': first_raw['image'].to(device),
+                     'reports': first_raw['reports']}
         ldm.init_scale_factor(first_raw, is_first_batch=True)
 
     # ── Selective parameter unfreeze ──────────────────────────────────────────
@@ -514,7 +662,7 @@ def main():
     if not attn_params:
         raise RuntimeError(
             'configure_dp_params returned empty param list. '
-            'Check UNet has SpatialTransformer blocks and use_spatial_transformer=True.'
+            'Check UNet has SpatialTransformer blocks and --use_spatial_transformer=True.'
         )
 
     # ── Noise multiplier ──────────────────────────────────────────────────────
@@ -541,7 +689,7 @@ def main():
     # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(attn_params, lr=args.lr)
 
-    # ── Opacus: make_private ──────────────────────────────────────────────────
+    # ── Opacus: wrap model + optimizer + loader ────────────────────────────────
     try:
         from opacus import PrivacyEngine
     except ImportError:
@@ -556,21 +704,19 @@ def main():
         max_grad_norm    = args.max_grad_norm,
         poisson_sampling = True,
     )
-    print(f'[Opacus] model wrapped with GradSampleModule')
-    print(f'[Opacus] noise_multiplier={sigma:.6f}  max_grad_norm={args.max_grad_norm}')
+    print(f'[Opacus] GradSampleModule ready  σ={sigma:.6f}  C={args.max_grad_norm}')
 
     # ── LR Scheduler ──────────────────────────────────────────────────────────
-    scheduler = build_scheduler(
-        optimizer    = optimizer,
-        warmup_steps = args.warmup_steps,
-        total_steps  = total_logical_steps,
-    ) if args.warmup_steps > 0 else None
+    scheduler = (
+        build_scheduler(optimizer, args.warmup_steps, total_logical_steps)
+        if args.warmup_steps > 0 else None
+    )
 
-    # ── Resume DP checkpoint ──────────────────────────────────────────────────
+    # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 0
     global_step = 0
     if args.resume_ckpt:
-        print(f'[resume] loading DP checkpoint: {args.resume_ckpt}')
+        print(f'[resume] {args.resume_ckpt}')
         start_epoch, global_step = load_dp_checkpoint(
             args.resume_ckpt, ldm, optimizer, device=str(device)
         )
@@ -581,7 +727,7 @@ def main():
     # =========================================================================
     # Training Loop
     # =========================================================================
-    print(f'\n[DP-Train] epochs={args.epochs}  lr={args.lr}  '
+    print(f'\n[DP-Train] split={args.split}  epochs={args.epochs}  lr={args.lr}  '
           f'logical_batch={args.logical_batch}  physical_batch={args.physical_batch}  '
           f'grad_accum={grad_accum_steps}  σ={sigma:.4f}')
     print('=' * 60)
@@ -593,25 +739,24 @@ def main():
         t0            = time.time()
 
         for batch in dp_loader:
-            # Move image tensor to device; leave reports as list[str]
             batch = {
                 'image'  : batch['image'].to(device),
-                'reports': batch['reports'],
+                'reports': batch['reports'],              # list[str] — stay on CPU
             }
 
-            # ── Forward + Backward ────────────────────────────────────────────
+            # Forward + backward
             loss, loss_dict = ldm._module.training_step_dp(batch)
             (loss / grad_accum_steps).backward()
 
-            phys_step_idx += 1
-            is_last_accum = (phys_step_idx % grad_accum_steps == 0)
+            phys_step_idx  += 1
+            is_last_accum   = (phys_step_idx % grad_accum_steps == 0)
 
             if not is_last_accum:
-                # Accumulate gradients: skip DP mechanism (no clip / no noise)
+                # Skip DP mechanism; just accumulate raw gradients
                 optimizer.signal_skip_step(do_skip=True)
                 optimizer.step()
             else:
-                # Actual DP step: clip per-sample grads, add Gaussian noise
+                # Real DP step: per-sample clip + Gaussian noise + weight update
                 optimizer.step()
                 optimizer.zero_grad()
                 if scheduler is not None:
@@ -621,43 +766,46 @@ def main():
                 global_step += 1
 
                 if global_step % args.log_every == 0:
-                    info = '  '.join(
-                        f'{k}={v.item():.4f}' for k, v in loss_dict.items()
-                    )
+                    info    = '  '.join(f'{k}={v.item():.4f}'
+                                        for k, v in loss_dict.items())
                     eps_now = privacy_engine.get_epsilon(args.target_delta)
                     print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
                           f'{info}  ε={eps_now:.4f}')
 
-            # Reset phys counter at end of epoch
             if phys_step_idx >= steps_per_epoch:
                 break
 
         # ── Epoch summary ─────────────────────────────────────────────────────
-        elapsed  = time.time() - t0
-        eps_now  = privacy_engine.get_epsilon(args.target_delta)
+        elapsed   = time.time() - t0
+        eps_now   = privacy_engine.get_epsilon(args.target_delta)
         mean_loss = float(np.mean(epoch_losses)) if epoch_losses else float('nan')
+
+        val_str = ''
+        if val_loader is not None:
+            val_loss = evaluate(ldm, val_loader, device, args.val_batches)
+            val_str  = f'  val_loss={val_loss:.4f}'
+
         print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '
-              f'loss={mean_loss:.4f}  ε={eps_now:.4f}  δ={args.target_delta}  '
+              f'loss={mean_loss:.4f}{val_str}  '
+              f'ε={eps_now:.4f}  δ={args.target_delta}  '
               f'time={elapsed:.1f}s')
 
         if eps_now > args.target_epsilon * 1.05:
-            print(f'[WARNING] ε_spent={eps_now:.4f} exceeds target ε={args.target_epsilon}. '
-                  f'Consider stopping.')
+            print(f'[WARNING] ε_spent={eps_now:.4f} exceeds target '
+                  f'ε={args.target_epsilon}. Consider early stopping.')
 
-        # ── Checkpoint ────────────────────────────────────────────────────────
+        # ── Periodic checkpoint ───────────────────────────────────────────────
         if (epoch + 1) % args.save_every == 0:
-            ckpt_path = os.path.join(
-                args.save_dir, f'ldm_dp_epoch{epoch+1:04d}.pt'
-            )
+            ckpt_path = os.path.join(args.save_dir, f'ldm_dp_epoch{epoch+1:04d}.pt')
             save_dp_checkpoint(
-                save_path     = ckpt_path,
-                model         = ldm,
-                optimizer     = optimizer,
-                privacy_engine= privacy_engine,
-                epoch         = epoch + 1,
-                global_step   = global_step,
-                args          = args,
-                target_delta  = args.target_delta,
+                save_path      = ckpt_path,
+                model          = ldm,
+                optimizer      = optimizer,
+                privacy_engine = privacy_engine,
+                epoch          = epoch + 1,
+                global_step    = global_step,
+                args           = args,
+                target_delta   = args.target_delta,
             )
 
     # ── Final checkpoint ──────────────────────────────────────────────────────
