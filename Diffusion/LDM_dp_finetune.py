@@ -57,28 +57,17 @@ from torchvision import transforms
 _this_dir  = os.path.dirname(os.path.abspath(__file__))       # Diffusion/
 _proj_root = os.path.normpath(os.path.join(_this_dir, '..'))  # PrivaText-CXR/
 
-# _proj_root  → enables  Data.*  Model.*  packages
-# _this_dir   → enables  privacy.*  package (Diffusion/privacy/)
 for _d in [_proj_root, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-# User-specified import paths; fallback to direct imports for local dev
-try:
-    from Model.Diffusion.LDM_dp    import LatentDiffusionDP   # Model/Diffusion/LDM_dp.py
-    from Model.Diffusion.UNetmodel import UNetModel            # Model/Diffusion/UNetmodel.py
-    from Model.autoencoder         import AutoencoderKL        # Model/autoencoder.py
-    from Model.attention_module_dp import disable_checkpointing# Model/attention_module_dp.py
-except ImportError:
-    # Running directly from PrivaText-CXR/ project root
-    sys.path.insert(0, os.path.join(_proj_root, 'Model'))
-    from LDM_dp          import LatentDiffusionDP              # Diffusion/LDM_dp.py
-    from UNetModel       import UNetModel                      # Diffusion/UNetModel.py
-    from autoencoder     import AutoencoderKL                  # Model/autoencoder.py
-    from attention_module_dp import disable_checkpointing      # Model/attention_module_dp.py
+from Model.Diffusion.LDM_dp    import LatentDiffusionDP
+from Model.Diffusion.UNetmodel import UNetModel
+from Model.VAE.Autoencoder     import VAE
+from Model.attention_module_dp import disable_checkpointing
 
 from Data.mimic_cxr import MIMICCXRDataset                    # Data/mimic_cxr.py
-from privacy.privacy_analysis import (                         # Diffusion/privacy/
+from privacy.privacy_analysis import (
     compute_noise_multiplier,
     print_privacy_summary,
 )
@@ -90,72 +79,33 @@ except ImportError:
 
 
 # =============================================================================
-# Split-directory Dataset
+# Dataset helper
 # =============================================================================
 
-class _SplitDirDataset(MIMICCXRDataset):
+def _make_dataset(root_path: str, split: str,
+                  image_size: int = 256,
+                  max_length: int = 512) -> MIMICCXRDataset:
     """
-    Loads MIMIC-CXR from a pre-split directory produced by prepare_split_dirs().
-
-    Layout expected at `mode_dir`:
-        <mode_dir>/p10/p10000032/s50414267/<dicom_id>.dcm
-                   p10/p10000032/s50414267.txt
-
-    Unlike MIMICCXRDataset (which appends 'files/' to root_path), this class
-    treats mode_dir itself as the scan root.
-
-    Supports map-style access (dataset[idx]) required by Opacus
-    UniformWithReplacementSampler.
-    """
-
-    def __init__(self, mode_dir: str, image_size: int = 256, max_length: int = 512):
-        if not os.path.isdir(mode_dir):
-            raise FileNotFoundError(
-                f"Split mode directory not found: {mode_dir}\n"
-                f"Run Data/mimic_cxr.py --make_split_dir first."
-            )
-
-        # Bypass MIMICCXRDataset.__init__ — initialise Dataset directly
-        Dataset.__init__(self)
-
-        self.root_dir    = mode_dir
-        self.files_dir   = mode_dir   # scan p*/p*/s*/ directly here (no 'files/' subdir)
-        self.split       = None
-        self.image_size  = image_size
-        self.max_length  = max_length
-        self.view_filter = []
-        self._mode       = 'split_dir'
-
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5]),
-        ])
-
-        self.samples = self._scan_all_folders()          # inherited from MIMICCXRDataset
-        self.samples = self._filter_existing_samples(self.samples)
-        print(f"[SplitDirDataset] {mode_dir}  samples={len(self.samples)}")
-
-
-def build_split_dataset(root_path: str, split: str,
-                        image_size: int = 256,
-                        max_length: int = 512) -> _SplitDirDataset:
-    """
-    Construct a _SplitDirDataset for the given split.
+    Construct a MIMICCXRDataset for the given split.
 
     Args:
-        root_path : root containing train/ validate/ test/ subdirectories
-                    e.g. /storage/hjchoi/mimic/split
-        split     : one of 'train', 'validate', 'test'
-        image_size: resize target
-        max_length: max report character length
+        root_path  : root containing train/ validate/ test/ subdirectories
+                     e.g. /storage/hjchoi/mimic/split
+        split      : one of 'train', 'validate', 'test'
+        image_size : resize target
+        max_length : max report character length
     """
     valid_splits = ('train', 'validate', 'test')
     if split not in valid_splits:
         raise ValueError(f"split must be one of {valid_splits}, got '{split}'")
 
-    mode_dir = os.path.join(root_path, split)
-    return _SplitDirDataset(mode_dir, image_size=image_size, max_length=max_length)
+    ds_args = argparse.Namespace(
+        prebuilt_split_dir = root_path,
+        split              = split,
+        image_size         = image_size,
+        max_length         = max_length,
+    )
+    return MIMICCXRDataset(ds_args)
 
 
 # =============================================================================
@@ -256,7 +206,7 @@ def parse_args():
                         help='Pretrained LDM checkpoint to fine-tune from')
 
     # BioBERT ------------------------------------------------------------------
-    parser.add_argument('--biobert_path', default='dmis-lab/biobert-base-cased-v1.2',
+    parser.add_argument('--biobert_path', default='/storage/hjchoi',
                         help='HuggingFace model ID or local path for BioBERT')
 
     # DP-SGD -------------------------------------------------------------------
@@ -284,7 +234,7 @@ def parse_args():
     parser.add_argument('--lr',           default=1e-4,  type=float)
     parser.add_argument('--warmup_steps', default=500,   type=int,
                         help='Linear warmup steps for LR scheduler (0 = disabled)')
-    parser.add_argument('--save_dir',    default='./checkpoints_dp')
+    parser.add_argument('--save_dir',    default='./finetune_dp')
     parser.add_argument('--save_every',  default=5,     type=int,
                         help='Save DP checkpoint every N epochs')
     parser.add_argument('--log_every',   default=50,    type=int,
@@ -299,7 +249,7 @@ def parse_args():
 # Model build helpers
 # =============================================================================
 
-def build_vae(args) -> AutoencoderKL:
+def build_vae(args) -> VAE:
     vae_cfg = argparse.Namespace(
         in_channels      = args.vae_in_ch,
         out_channels     = args.vae_out_ch,
@@ -314,7 +264,7 @@ def build_vae(args) -> AutoencoderKL:
         double_z         = args.double_z,
         dims             = args.conv_dims,
     )
-    return AutoencoderKL(vae_cfg)
+    return VAE(vae_cfg)
 
 
 def build_unet(args) -> UNetModel:
@@ -348,7 +298,7 @@ def build_unet(args) -> UNetModel:
     return UNetModel(unet_cfg)
 
 
-def _load_vae_ckpt(vae: AutoencoderKL, ckpt_path: str, device):
+def _load_vae_ckpt(vae: VAE, ckpt_path: str, device):
     raw = torch.load(ckpt_path, map_location=device)
     for key in ('state_dict', 'model', 'model_state_dict', 'net', 'weights'):
         if isinstance(raw, dict) and key in raw:
@@ -392,9 +342,6 @@ def build_dp_loader(dataset: Dataset, physical_batch: int,
     Training DataLoader passed to Opacus make_private().
     Returns raw strings (no BioBERT embedding) so Opacus can track grads
     through the embedder's projection layer inside the model.
-
-    Note: Opacus replaces the sampler with UniformWithReplacementSampler
-    (Poisson subsampling) when make_private(poisson_sampling=True) is called.
     """
     return DataLoader(
         dataset,
@@ -409,10 +356,7 @@ def build_dp_loader(dataset: Dataset, physical_batch: int,
 
 def build_val_loader(dataset: Dataset, batch_size: int,
                      num_workers: int = 4) -> DataLoader:
-    """
-    Validation DataLoader (no DP, shuffle=False, no drop_last).
-    Same batch format as training: {'image': Tensor, 'reports': list[str]}.
-    """
+    """Validation DataLoader (no DP, shuffle=False, no drop_last)."""
     return DataLoader(
         dataset,
         batch_size  = batch_size,
@@ -430,11 +374,6 @@ def build_val_loader(dataset: Dataset, batch_size: int,
 
 @torch.no_grad()
 def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> float:
-    """
-    Compute average diffusion loss on the validation set.
-    Uses ldm._module (unwrapped from GradSampleModule) in eval mode.
-    No gradients are computed.
-    """
     inner = ldm._module if hasattr(ldm, '_module') else ldm
     inner.eval()
 
@@ -454,23 +393,8 @@ def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> floa
 # Checkpoint helpers  (GradSampleModule-aware)
 # =============================================================================
 
-def save_dp_checkpoint(
-    save_path    : str,
-    model,
-    optimizer,
-    privacy_engine,
-    epoch        : int,
-    global_step  : int,
-    args,
-    target_delta : float,
-):
-    """
-    Save DP training state.
-
-    model is a GradSampleModule after make_private(); use
-    model._module.state_dict() to save unwrapped weights that can be
-    reloaded into a plain LatentDiffusionDP without Opacus.
-    """
+def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
+                       epoch, global_step, args, target_delta):
     eps_spent = privacy_engine.get_epsilon(target_delta)
     torch.save({
         'epoch'         : epoch,
@@ -483,11 +407,7 @@ def save_dp_checkpoint(
     print(f'  [ckpt] saved → {save_path}  (ε_spent={eps_spent:.4f})')
 
 
-def load_dp_checkpoint(load_path: str, model, optimizer=None, device='cpu'):
-    """
-    Resume from a checkpoint saved by save_dp_checkpoint.
-    Works before or after make_private() (handles both plain and GradSampleModule).
-    """
+def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
     ckpt   = torch.load(load_path, map_location=device)
     sd     = ckpt.get('model', ckpt)
     target = model._module if hasattr(model, '_module') else model
@@ -508,7 +428,6 @@ def load_dp_checkpoint(load_path: str, model, optimizer=None, device='cpu'):
 # =============================================================================
 
 def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
-    """Linear warmup → cosine decay."""
     from torch.optim.lr_scheduler import LambdaLR
 
     def lr_lambda(step):
@@ -541,7 +460,7 @@ def main():
     print(f'Split root : {args.root_path}')
 
     # ── Datasets ──────────────────────────────────────────────────────────────
-    train_dataset = build_split_dataset(
+    train_dataset = _make_dataset(
         root_path  = args.root_path,
         split      = args.split,
         image_size = args.image_size,
@@ -557,7 +476,7 @@ def main():
     val_dataset = None
     if args.do_validation:
         try:
-            val_dataset = build_split_dataset(
+            val_dataset = _make_dataset(
                 root_path  = args.root_path,
                 split      = 'validate',
                 image_size = args.image_size,
@@ -594,7 +513,7 @@ def main():
     for p in vae.parameters():
         p.requires_grad = False
 
-    # ── UNet (use_checkpoint=False enforced in build_unet) ────────────────────
+    # ── UNet ──────────────────────────────────────────────────────────────────
     unet = build_unet(args).to(device)
     print(f'[UNet] params: {sum(p.numel() for p in unet.parameters()):,}')
 
@@ -616,14 +535,12 @@ def main():
         lr                = args.lr,
     ).to(device)
 
-    # ── Load pretrained weights ───────────────────────────────────────────────
     if args.pretrained_ckpt:
         print(f'[LDM_dp] loading pretrained: {args.pretrained_ckpt}')
         ldm.init_from_ckpt(args.pretrained_ckpt)
     else:
         print('[LDM_dp] WARNING: no --pretrained_ckpt; fine-tuning from scratch')
 
-    # ── Disable gradient checkpointing (must do BEFORE make_private) ──────────
     n_patched = disable_checkpointing(ldm)
     print(f'[DP] gradient checkpointing disabled on {n_patched} block(s)')
 
@@ -639,9 +556,9 @@ def main():
         if val_dataset is not None else None
     )
 
-    steps_per_epoch       = len(base_loader)
+    steps_per_epoch         = len(base_loader)
     logical_steps_per_epoch = steps_per_epoch // grad_accum_steps
-    total_logical_steps   = logical_steps_per_epoch * args.epochs
+    total_logical_steps     = logical_steps_per_epoch * args.epochs
     print(f'[Loader] phys_steps/epoch={steps_per_epoch}  '
           f'logical_steps/epoch={logical_steps_per_epoch}  '
           f'grad_accum={grad_accum_steps}')
@@ -689,7 +606,7 @@ def main():
     # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(attn_params, lr=args.lr)
 
-    # ── Opacus: wrap model + optimizer + loader ────────────────────────────────
+    # ── Opacus ────────────────────────────────────────────────────────────────
     try:
         from opacus import PrivacyEngine
     except ImportError:
@@ -741,22 +658,19 @@ def main():
         for batch in dp_loader:
             batch = {
                 'image'  : batch['image'].to(device),
-                'reports': batch['reports'],              # list[str] — stay on CPU
+                'reports': batch['reports'],
             }
 
-            # Forward + backward
             loss, loss_dict = ldm._module.training_step_dp(batch)
             (loss / grad_accum_steps).backward()
 
-            phys_step_idx  += 1
-            is_last_accum   = (phys_step_idx % grad_accum_steps == 0)
+            phys_step_idx += 1
+            is_last_accum  = (phys_step_idx % grad_accum_steps == 0)
 
             if not is_last_accum:
-                # Skip DP mechanism; just accumulate raw gradients
                 optimizer.signal_skip_step(do_skip=True)
                 optimizer.step()
             else:
-                # Real DP step: per-sample clip + Gaussian noise + weight update
                 optimizer.step()
                 optimizer.zero_grad()
                 if scheduler is not None:
@@ -794,7 +708,6 @@ def main():
             print(f'[WARNING] ε_spent={eps_now:.4f} exceeds target '
                   f'ε={args.target_epsilon}. Consider early stopping.')
 
-        # ── Periodic checkpoint ───────────────────────────────────────────────
         if (epoch + 1) % args.save_every == 0:
             ckpt_path = os.path.join(args.save_dir, f'ldm_dp_epoch{epoch+1:04d}.pt')
             save_dp_checkpoint(
