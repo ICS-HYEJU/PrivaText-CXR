@@ -6,7 +6,12 @@ compute_noise_multiplier:
     Given target (ε, δ, sample_rate, epochs), return the Gaussian noise
     multiplier σ such that the training run satisfies (ε, δ)-DP.
 
-    Uses Opacus's built-in RDP accountant (same as DP-LDM approach).
+    sample_rate = logical_batch_size / dataset_size
+                = 1 / steps_per_epoch   (Poisson subsampling rate q)
+
+    This must match the batch_size passed to make_private() divided by N.
+    DP-LDM uses accountant='prv' (Privacy Random Variables) which gives
+    tighter epsilon bounds than 'rdp', especially for larger epsilon values.
 
 Usage:
     from Diffusion.privacy import compute_noise_multiplier
@@ -14,7 +19,7 @@ Usage:
     sigma = compute_noise_multiplier(
         target_epsilon = 10.0,
         target_delta   = 1e-5,
-        sample_rate    = batch_size / dataset_size,
+        sample_rate    = logical_batch / dataset_size,
         epochs         = 30,
     )
     print(f"noise_multiplier = {sigma:.4f}")
@@ -28,26 +33,29 @@ def compute_noise_multiplier(
     target_delta  : float,
     sample_rate   : float,
     epochs        : int,
-    accountant    : str = 'rdp',
-    epsilon_tol   : float = 0.01,
+    accountant    : str = 'prv',
+    epsilon_tol   : float = 1e-3,
 ) -> float:
     """
     Compute the Gaussian noise multiplier σ for (ε, δ)-DP training.
 
-    The total number of optimizer steps is estimated as:
-        steps = ceil(epochs / sample_rate)
-              = epochs * (dataset_size / batch_size)
+    steps = ceil(epochs / sample_rate)
+          = epochs * ceil(dataset_size / logical_batch_size)
+
+    This equals the total number of optimizer.step() calls (one per logical
+    batch), which is what Opacus's privacy accountant tracks.
 
     Args:
-        target_epsilon : target ε privacy budget (smaller = more private)
-        target_delta   : target δ (typically 1/dataset_size or 1e-5)
-        sample_rate    : q = batch_size / dataset_size  (Poisson subsampling rate)
+        target_epsilon : target ε privacy budget
+        target_delta   : target δ (recommend 1/dataset_size or 1e-5)
+        sample_rate    : q = logical_batch / dataset_size
+                         Must equal batch_size/N used in make_private()
         epochs         : total training epochs
-        accountant     : Opacus accountant type ('rdp' recommended)
-        epsilon_tol    : convergence tolerance for binary search
+        accountant     : 'prv' (DP-LDM default, tighter bounds) or 'rdp'
+        epsilon_tol    : binary search convergence tolerance
 
     Returns:
-        float : noise multiplier σ (Gaussian std relative to clipping bound)
+        float : noise multiplier σ
 
     Raises:
         ImportError : if opacus is not installed
@@ -64,17 +72,17 @@ def compute_noise_multiplier(
     steps = math.ceil(epochs / sample_rate)
 
     sigma = get_noise_multiplier(
-        target_epsilon = target_epsilon,
-        target_delta   = target_delta,
-        sample_rate    = sample_rate,
-        steps          = steps,
-        accountant     = accountant,
+        target_epsilon    = target_epsilon,
+        target_delta      = target_delta,
+        sample_rate       = sample_rate,
+        steps             = steps,
+        accountant        = accountant,
         epsilon_tolerance = epsilon_tol,
     )
 
     print(f'[privacy_analysis] ε={target_epsilon}  δ={target_delta}  '
           f'q={sample_rate:.6f}  epochs={epochs}  steps={steps}  '
-          f'→ σ={sigma:.6f}')
+          f'accountant={accountant}  → σ={sigma:.6f}')
     return sigma
 
 
