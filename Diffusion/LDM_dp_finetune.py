@@ -22,9 +22,9 @@ Key design notes:
   4. Gradient checkpointing is disabled (incompatible with Opacus hooks).
   5. scale_factor initialised BEFORE make_private() to avoid buffer issues.
   6. Checkpoint save/load uses model._module.state_dict() (GradSampleModule).
-  7. Gradient accumulation via signal_skip_step:
-       logical_batch = physical_batch × grad_accum_steps
-     Privacy accounting is done at the logical-batch level.
+  7. Gradient accumulation via VirtualBatch chunk splitting:
+       logical_batch → n_chunks = ceil(B / physical_batch) physical chunks
+     Each chunk accumulates per-sample grads; one optimizer.step() per logical batch.
 
 Usage:
     python Diffusion/LDM_dp_finetune.py \\
@@ -451,14 +451,6 @@ def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
 def main():
     args = parse_args()
 
-    assert args.logical_batch % args.physical_batch == 0, (
-        f'logical_batch ({args.logical_batch}) must be divisible by '
-        f'physical_batch ({args.physical_batch})'
-    )
-    # Maximum number of physical chunks per logical batch (Poisson batches
-    # are ≈ logical_batch samples, so actual n_chunks may vary slightly)
-    grad_accum_steps = args.logical_batch // args.physical_batch
-
     # ── Device ────────────────────────────────────────────────────────────────
     device = torch.device(
         f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu'
@@ -494,9 +486,7 @@ def main():
             print(f'[Validation] WARNING: {e}  – validation disabled')
             val_dataset = None
 
-    sample_rate = args.logical_batch / n_train
-    print(f'[{args.split}] samples={n_train}  '
-          f'sample_rate q={args.logical_batch}/{n_train}={sample_rate:.6f}')
+    print(f'[{args.split}] samples={n_train}')
 
     # ── BioBERT Embedder ──────────────────────────────────────────────────────
     assert BioBERTEmbedder is not None, (
@@ -565,12 +555,15 @@ def main():
         if val_dataset is not None else None
     )
 
-    # One DP optimizer step per logical batch (= one item from dp_loader)
-    logical_steps_per_epoch = len(base_loader)
+    # DP-LDM 방식: sample_rate = 1 / len(dataloader) = logical_batch / N
+    # steps = int(1/sample_rate) = len(dataloader) per epoch
+    logical_steps_per_epoch = len(base_loader)                # = floor(N / logical_batch)
     total_logical_steps     = logical_steps_per_epoch * args.epochs
-    print(f'[Loader] logical_steps/epoch={logical_steps_per_epoch}  '
-          f'physical_batch={args.physical_batch}  '
-          f'chunks_per_logical={grad_accum_steps}')
+    sample_rate             = 1.0 / logical_steps_per_epoch   # q ≈ logical_batch / N
+    approx_chunks           = math.ceil(args.logical_batch / args.physical_batch)
+    print(f'[Loader] N={n_train}  logical_steps/epoch={logical_steps_per_epoch}  '
+          f'sample_rate=1/{logical_steps_per_epoch}={sample_rate:.6f}  '
+          f'physical_batch={args.physical_batch}  chunks/logical≈{approx_chunks}')
 
     # ── scale_factor init BEFORE make_private ─────────────────────────────────
     if args.scale_by_std:
@@ -658,7 +651,7 @@ def main():
     # =========================================================================
     print(f'\n[DP-Train] split={args.split}  epochs={args.epochs}  lr={args.lr}  '
           f'logical_batch={args.logical_batch}  physical_batch={args.physical_batch}  '
-          f'chunks/step={grad_accum_steps}  σ={sigma:.4f}')
+          f'chunks/step≈{approx_chunks}  σ={sigma:.4f}')
     print('=' * 60)
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
