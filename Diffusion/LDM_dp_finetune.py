@@ -1,6 +1,6 @@
 """
-Diffusion/LDM_dp_finetune.py  –  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
-=========================================================================
+LDM_dp_finetune.py  –  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
+================================================================
 Fine-tunes only the cross-attention (SpatialTransformer) blocks of a
 pre-trained LatentDiffusion model under (ε, δ)-differential privacy using
 Opacus DP-SGD.
@@ -26,8 +26,8 @@ Key design notes:
        logical_batch → n_chunks = ceil(B / physical_batch) physical chunks
      Each chunk accumulates per-sample grads; one optimizer.step() per logical batch.
 
-Usage:
-    python Diffusion/LDM_dp_finetune.py \\
+Usage (run from project root):
+    python LDM_dp_finetune.py \\
         --pretrained_ckpt ./checkpoints/ldm_epoch0100.pt \\
         --root_path /storage/hjchoi/mimic/split \\
         --split train \\
@@ -54,21 +54,20 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_this_dir  = os.path.dirname(os.path.abspath(__file__))       # Diffusion/
-_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))  # PrivaText-CXR/
-_model_dir = os.path.join(_proj_root, 'Model')                 # Model/
+# File lives at project root: <proj_root>/LDM_dp_finetune.py
+_proj_root = os.path.dirname(os.path.abspath(__file__))
 
-for _d in [_proj_root, _model_dir, _this_dir]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+if _proj_root not in sys.path:
+    sys.path.insert(0, _proj_root)
 
-from LDM_dp               import LatentDiffusionDP
-from UNetModel             import UNetModel
-from Model.autoencoder     import AutoencoderKL
-from attention_module_dp   import disable_checkpointing
-from context_encoder       import BioBERTContextEncoder
+from Model.Diffusion.LDM_dp    import LatentDiffusionDP
+from Model.Diffusion.UNetmodel  import UNetModel
+from Model.VAE.Autoencoder      import VAE
+from Model.attention_module_dp  import disable_checkpointing
 
-from Data.mimic_cxr import MIMICCXRDataset                    # Data/mimic_cxr.py
+from Modules.BioBERT_embedder   import BioBERTEmbedder
+
+from Data.mimic_cxr import MIMICCXRDataset
 from privacy.privacy_analysis import (
     compute_noise_multiplier,
     print_privacy_summary,
@@ -249,7 +248,7 @@ def parse_args():
 # Model build helpers
 # =============================================================================
 
-def build_vae(args) -> AutoencoderKL:
+def build_vae(args) -> VAE:
     vae_cfg = argparse.Namespace(
         in_channels      = args.vae_in_ch,
         out_channels     = args.vae_out_ch,
@@ -264,7 +263,7 @@ def build_vae(args) -> AutoencoderKL:
         double_z         = args.double_z,
         dims             = args.conv_dims,
     )
-    return AutoencoderKL(vae_cfg)
+    return VAE(vae_cfg)
 
 
 def build_unet(args) -> UNetModel:
@@ -494,12 +493,10 @@ def main():
 
     print(f'[{args.split}] samples={n_train}')
 
-    # ── BioBERT Context Encoder ───────────────────────────────────────────────
-    embedder = BioBERTContextEncoder(
-        model_name = args.biobert_path,
-        output_dim = args.context_dim,
+    # ── BioBERT Embedder ──────────────────────────────────────────────────────
+    embedder = BioBERTEmbedder(
+        model_path = args.biobert_path,
         max_length = args.max_length,
-        freeze     = True,
     ).to(device)
     print(f'[BioBERT] loaded: {args.biobert_path}')
 
