@@ -35,20 +35,52 @@ class VAELoss(nn.Module):
         self.args = args
         self.device = device
         self.lambda_rec=args.lambda_rec
+        self.lambda_perc = args.lambda_perc
         self.lambda_ssim=args.lambda_ssim
         self.lambda_kl=args.lambda_kl
         self.lambda_mmd=args.lambda_mmd
-        self.mmd_sigma=args.mmd_sigma
-        self.data_range = args.data_range
-        self.lambda_LPIPS = args.lambda_LPIPS
-        if self.lambda_LPIPS >0:
+        self.data_range=args.data_range
+
+        # Multi-kernel bandwidths: mmd_sigma acts as the base scale.
+        # Relative ratios [0.1, 0.5, 1.0, 2.0, 5.0, 10.0] are multiplied by mmd_sigma
+        # so the kernel spread adapts to the configured latent scale.
+        _base = args.mmd_sigma
+        if args.multi_mmd_sigmas:
+            self.mmd_sigmas = [float(r) * _base for r in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]]
+        else:
+            self.mmd_sigmas = [_base]  # single kernel fallback
+
+        # Load LPIPS only when needed, avoids unnecessary checkpoint download
+        if self.lambda_perc > 0.0:
             from Loss.lpips import LPIPS
-            self.perceptual_loss = LPIPS().eval().to(self.device)
+            self.lpips = LPIPS().eval().to(device)
+        else:
+            self.lpips = None
 
     # 1. Reconstruction (L1)
     def reconstruction_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
         """L_rec = ||x - x'||"""
         return F.l1_loss(x_hat, x, reduction='mean')
+
+    # plus, perceptual_loss
+    def perceptual_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
+        """
+        L_perc = LPIPS(x, x')
+
+        LPIPS.forward() returns [B, 1, 1, 1]; reduced to scalar via .mean().
+        Grayscale inputs (C=1) are expanded to 3 channels before VGG.
+        Returns tensor(0.0) - no gradient - when lambda_perc == 0.0.
+        """
+        if self.lpips is None:
+            return torch.tensor(0.0, device=x.device)
+
+        # Grayscale -> pseudo-RGB for VGG ScalingLayer (expects 3 channels)
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+            x_hat = x_hat.repeat(1, 3, 1, 1)
+
+        # [B, 1, 1, 1] -> scalar
+        return self.lpips(x.contiguous(), x_hat.contiguous()).mean()
 
     # 2. SSIM Loss
     def ssim_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
@@ -71,50 +103,63 @@ class VAELoss(nn.Module):
     # 4. MMD Loss (InfoVAE)
     def mmd_loss(self, z_q: torch.Tensor, z_p: torch.Tensor = None) -> torch.Tensor:
         """
-        MMD: Maximum Mean Discrepancy, (x-y)**2 = x**2 + y**2 - 2xy
-        MMD(q(z), p(z)) = E[k(z,z')] + E[k(z',z')] - 2*E[k(z,z')]
-        k(z, z') = exp( -||z - z'||^2 / (2* sigma^2) )
+        Multi-kernel MMD(q(z), p(z)) with spatial pooling and latent normalization.
 
-        z_p defaults to N(0, I) samples of the same shape as z_q.
+        Improvements over naive flatten + single-sigma:
+          1) Spatial pooling: [B,C,H,W] -> [B,C] via mean ? reduces dimensionality
+             so pairwise distances stay in a sensible range.
+          2) Latent standardization before kernel eval ? prevents kernel saturation
+             caused by large-norm latents (norm >> sigma).
+          3) Multi-kernel: sum over several bandwidths ? robust to scale mismatch
+             and avoids the all-zero cross-kernel problem.
         """
-        # 1) making p(z) ~ N(0,I), shape == z_q == [B, 1, 16, 16]
         if z_p is None:
             z_p = torch.randn_like(z_q)
-        # 2) latent -> vector
-        z_q = z_q.reshape(z_q.size(0), -1)  # [B, D] =[B, C*W*H] = [B, 256]
-        z_p = z_p.reshape(z_p.size(0), -1)  # [B, D]
 
-        # 3) Compute kernel matrices for MMD
-        # 3-1) k_qq: similarity between samples within q(z), latent distribution
-        # 3-2) k_pp: similarity between samples within p(z), prior distribution(N(0,I))
-        # 3-3) k_qp: cross-similarity between q(z) samples and p(z) samples
-        k_qq = self._gaussian_kernel(z_q, z_q)
-        k_pp = self._gaussian_kernel(z_p, z_p)
-        k_qp = self._gaussian_kernel(z_q, z_p)
+        # 1) Spatial pooling: [B, C, H, W] -> [B, C]  (handles already-flat tensors too)
+        if z_q.dim() == 4:
+            z_q = z_q.mean(dim=(2, 3))
+            z_p = z_p.mean(dim=(2, 3))
+        else:
+            z_q = z_q.reshape(z_q.size(0), -1)
+            z_p = z_p.reshape(z_p.size(0), -1)
 
-        return k_qq.mean() + k_pp.mean() - 2.0 * k_qp.mean()
+        # 2) Standardize z_q so that latents are roughly unit-scale
+        z_q = (z_q - z_q.mean(dim=0, keepdim=True)) / (z_q.std(dim=0, keepdim=True) + 1e-6)
 
-    def _gaussian_kernel(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """k(x, y) = exp(-||x-y||/ 2*sigma^2),  x:[N,D] y:[M,D] -> [N,M]"""
+        # 3) Multi-kernel MMD
+        mmd = torch.tensor(0.0, device=z_q.device)
+        for sigma in self.mmd_sigmas:
+            k_qq = self._gaussian_kernel(z_q, z_q, sigma)
+            k_pp = self._gaussian_kernel(z_p, z_p, sigma)
+            k_qp = self._gaussian_kernel(z_q, z_p, sigma)
+            mmd = mmd + k_qq.mean() + k_pp.mean() - 2.0 * k_qp.mean()
+
+        return mmd / len(self.mmd_sigmas)
+
+    def _gaussian_kernel(self, x: torch.Tensor, y: torch.Tensor, sigma: float) -> torch.Tensor:
+        """k(x, y) = exp(-||x-y||^2 / 2*sigma**2),  x:[N,D] y:[M,D] -> [N,M]"""
         x_sq = (x ** 2).sum(1, keepdim=True)  # [N, 1]
         y_sq = (y ** 2).sum(1, keepdim=True).t()  # [1, M]
         dist2 = x_sq + y_sq - 2.0 * (x @ y.t())  # [N, M]
-        return torch.exp(-dist2 / (2.0 * self.mmd_sigma ** 2))
+        dist2 = dist2.clamp(min=0.0)  # numerical safety
+        return torch.exp(-dist2 / (2.0 * sigma ** 2))
 
     # Shared computation
     def _compute(self, x, x_hat, posterior, z_q):
         l_rec = self.reconstruction_loss(x, x_hat)
+        l_perc = self.perceptual_loss(x, x_hat)
         l_ssim = self.ssim_loss(x, x_hat)
         l_kl = self.kl_loss(posterior)
         l_mmd = self.mmd_loss(z_q)
-        p_loss = self.perceptual_loss(x.contiguous(), x_hat.contiguous())
-        total = (self.lambda_rec * l_rec +
+
+        total = (self.lambda_rec * l_rec+
+                 self.lambda_perc * l_perc +
                  self.lambda_ssim * l_ssim +
                  self.lambda_kl * l_kl +
-                 self.lambda_mmd * l_mmd +
-                 self.lambda_LPIPS * p_loss
+                  self.lambda_mmd * l_mmd
                  )
-        return total, l_rec, l_ssim, l_kl, l_mmd, p_loss
+        return total, l_rec, l_ssim, l_kl, l_mmd, l_perc
 
     # forward
     def forward(self, x, x_hat, posterior, z_q):
@@ -124,24 +169,22 @@ class VAELoss(nn.Module):
         total     : scalar loss tensor (differentiable)
         loss_dict : dict of float values for logging
         """
-        total, l_rec, l_ssim, l_kl, l_mmd, p_loss = self._compute(x, x_hat, posterior, z_q)
+        total, l_rec, l_ssim, l_kl, l_mmd, l_perc = self._compute(x, x_hat, posterior, z_q)
         return total, {
             "loss_total": total.item(),
             "loss_rec": l_rec.item(),
             "loss_ssim": l_ssim.item(),
             "loss_kl": l_kl.item(),
             "loss_mmd": l_mmd.item(),
-            "loss_lpips": p_loss.item(),
+            "loss_lpips": l_perc.item(),
         }
 
-    # debug_forward
     def debug_forward(self, x, x_hat, posterior, z_q):
         """
         Same as forward but prints a detailed breakdown of every loss term
         including tensor shapes, value ranges, and weighted contributions.
-        Useful for verifying that each component is in a reasonable range.
         """
-        total, l_rec, l_ssim, l_kl, l_mmd,p_loss = self._compute(x, x_hat, posterior, z_q)
+        total, l_rec, l_ssim, l_perc, l_kl, l_mmd = self._compute(x, x_hat, posterior, z_q)
 
         W = 65
         print("\n" + "=" * W)
@@ -158,15 +201,17 @@ class VAELoss(nn.Module):
         print(f"  {'posterior std':<18}: shape={tuple(posterior.std.shape)}"
               f"  std.mean={posterior.std.mean():.4f}")
         print("-" * W)
-        print(f"  {'Term':<10}  {'args':>8}  {'raw value':>12}  {'weighted':>12}")
-        print(f"  {'-' * 10}  {'-' * 8}  {'-' * 12}  {'-' * 12}")
-        print(f"  {'L_rec':<10}  {self.lambda_rec:>8.4f}  {l_rec.item():>12.6f}"
+        print(f"  {'Term':<12}  {'weight':>8}  {'raw value':>12}  {'weighted':>12}")
+        print(f"  {'-' * 12}  {'-' * 8}  {'-' * 12}  {'-' * 12}")
+        print(f"  {'L_rec':<12}  {self.lambda_rec:>8.4f}  {l_rec.item():>12.6f}"
               f"  {(self.lambda_rec * l_rec).item():>12.6f}")
-        print(f"  {'L_ssim':<10}  {self.lambda_ssim:>8.4f}  {l_ssim.item():>12.6f}"
+        print(f"  {'L_ssim':<12}  {self.lambda_ssim:>8.4f}  {l_ssim.item():>12.6f}"
               f"  {(self.lambda_ssim * l_ssim).item():>12.6f}")
-        print(f"  {'L_kl':<10}  {self.lambda_kl:>8.4f}  {l_kl.item():>12.6f}"
+        print(f"  {'L_perc(LPIPS)':<10}  {self.lambda_perc:>8.4f}  {l_perc.item():>12.6f}"
+              f"  {(self.lambda_perc * l_perc).item():>12.6f}")
+        print(f"  {'L_kl':<12}  {self.lambda_kl:>8.4f}  {l_kl.item():>12.6f}"
               f"  {(self.lambda_kl * l_kl).item():>12.6f}")
-        print(f"  {'L_mmd':<10}  {self.lambda_mmd:>8.4f}  {l_mmd.item():>12.6f}"
+        print(f"  {'L_mmd':<12}  {self.lambda_mmd:>8.4f}  {l_mmd.item():>12.6f}"
               f"  {(self.lambda_mmd * l_mmd).item():>12.6f}")
         print("-" * W)
         print(f"  {'L_total':<10}                            {total.item():>12.6f}")
@@ -176,6 +221,7 @@ class VAELoss(nn.Module):
             "loss_total": total.item(),
             "loss_rec": l_rec.item(),
             "loss_ssim": l_ssim.item(),
+            "loss_perc": l_perc.item(),
             "loss_kl": l_kl.item(),
             "loss_mmd": l_mmd.item(),
         }
