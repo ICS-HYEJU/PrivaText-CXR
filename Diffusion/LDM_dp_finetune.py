@@ -530,6 +530,7 @@ def main():
         scale_by_std      = args.scale_by_std,
         use_ema           = args.use_ema,
         lr                = args.lr,
+        device            = device,
     ).to(device)
 
     if args.pretrained_ckpt:

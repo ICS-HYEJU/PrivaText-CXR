@@ -32,6 +32,7 @@ are inherited unchanged from LatentDiffusion.
 
 import os
 import sys
+import inspect
 
 import torch
 import torch.nn as nn
@@ -77,8 +78,17 @@ class LatentDiffusionDP(LatentDiffusion):
         first_stage_key   = 'image',
         scale_factor      = 1.0,
         scale_by_std      = False,
+        device            = None,
         *args, **kwargs
     ):
+        # Some LatentDiffusion variants take `device` as an explicit __init__
+        # arg, others expose it as a read-only @property (inferred from buffers).
+        # Forward `device` only when the parent's signature accepts it, so this
+        # class works against both implementations.
+        parent_params = inspect.signature(LatentDiffusion.__init__).parameters
+        if 'device' in parent_params:
+            kwargs.setdefault('device', device)
+
         super().__init__(
             unet              = unet,
             first_stage_model = first_stage_model,
