@@ -56,26 +56,23 @@ from torchvision import transforms
 # ── Path setup ────────────────────────────────────────────────────────────────
 _this_dir  = os.path.dirname(os.path.abspath(__file__))       # Diffusion/
 _proj_root = os.path.normpath(os.path.join(_this_dir, '..'))  # PrivaText-CXR/
+_model_dir = os.path.join(_proj_root, 'Model')                 # Model/
 
-for _d in [_proj_root, _this_dir]:
+for _d in [_proj_root, _model_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-from Model.Diffusion.LDM_dp    import LatentDiffusionDP
-from Model.Diffusion.UNetmodel import UNetModel
-from Model.VAE.Autoencoder     import VAE
-from Model.attention_module_dp import disable_checkpointing
+from LDM_dp               import LatentDiffusionDP
+from UNetModel             import UNetModel
+from Model.autoencoder     import AutoencoderKL
+from attention_module_dp   import disable_checkpointing
+from context_encoder       import BioBERTContextEncoder
 
 from Data.mimic_cxr import MIMICCXRDataset                    # Data/mimic_cxr.py
 from privacy.privacy_analysis import (
     compute_noise_multiplier,
     print_privacy_summary,
 )
-
-try:
-    from Modules.BioBERT_embedder import BioBERTEmbedder
-except ImportError:
-    BioBERTEmbedder = None
 
 
 # =============================================================================
@@ -252,7 +249,7 @@ def parse_args():
 # Model build helpers
 # =============================================================================
 
-def build_vae(args) -> VAE:
+def build_vae(args) -> AutoencoderKL:
     vae_cfg = argparse.Namespace(
         in_channels      = args.vae_in_ch,
         out_channels     = args.vae_out_ch,
@@ -267,7 +264,7 @@ def build_vae(args) -> VAE:
         double_z         = args.double_z,
         dims             = args.conv_dims,
     )
-    return VAE(vae_cfg)
+    return AutoencoderKL(vae_cfg)
 
 
 def build_unet(args) -> UNetModel:
@@ -497,14 +494,12 @@ def main():
 
     print(f'[{args.split}] samples={n_train}')
 
-    # ── BioBERT Embedder ──────────────────────────────────────────────────────
-    assert BioBERTEmbedder is not None, (
-        'BioBERTEmbedder could not be imported. '
-        'Check Modules/BioBERT_embedder.py is accessible.'
-    )
-    embedder = BioBERTEmbedder(
-        model_path = args.biobert_path,
+    # ── BioBERT Context Encoder ───────────────────────────────────────────────
+    embedder = BioBERTContextEncoder(
+        model_name = args.biobert_path,
+        output_dim = args.context_dim,
         max_length = args.max_length,
+        freeze     = True,
     ).to(device)
     print(f'[BioBERT] loaded: {args.biobert_path}')
 
@@ -539,7 +534,6 @@ def main():
         scale_by_std      = args.scale_by_std,
         use_ema           = args.use_ema,
         lr                = args.lr,
-        device            = device,
         use_dp            = args.use_dp,
     ).to(device)
 

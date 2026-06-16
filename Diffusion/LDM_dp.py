@@ -5,7 +5,7 @@ Extends LatentDiffusion (LDM.py) with DP-specific additions only:
 
 1. __init__
    -------
-   Accepts an extra `embedder` argument (BioBERTEmbedder) and delegates
+   Accepts an extra `embedder` argument (BioBERTContextEncoder) and delegates
    everything else to LatentDiffusion.__init__.
 
 2. configure_dp_params(ablation_blocks, finetune_biobert)
@@ -32,25 +32,24 @@ are inherited unchanged from LatentDiffusion.
 
 import os
 import sys
-import inspect
 
 import torch
 import torch.nn as nn
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-# File lives at:  <proj_root>/Model/Diffusion/LDM_dp.py
-_this_dir  = os.path.dirname(os.path.abspath(__file__))   # …/Model/Diffusion/
-_model_dir = os.path.dirname(_this_dir)                    # …/Model/
-_proj_root = os.path.dirname(_model_dir)                   # …/PrivaText-CXR/
+# File lives at:  <proj_root>/Diffusion/LDM_dp.py
+_this_dir  = os.path.dirname(os.path.abspath(__file__))   # …/Diffusion/
+_proj_root = os.path.dirname(_this_dir)                    # …/PrivaText-CXR/
+_model_dir = os.path.join(_proj_root, 'Model')             # …/Model/
 
 for _d in [_proj_root, _model_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-from Model.Diffusion.LDM  import LatentDiffusion            # noqa: E402
-from Model.attention_module import SpatialTransformer        # noqa: E402  isinstance check
-# UNetmodel.py uses Model.attention_module.SpatialTransformer;
-# must import the same class or isinstance() always returns False.
+from LDM import LatentDiffusion                 # noqa: E402  same directory (Diffusion/)
+from attention_module import SpatialTransformer  # noqa: E402  Model/ in sys.path
+# UNetModel.py imports SpatialTransformer from Model/attention_module.py;
+# must use the same class object or isinstance() always returns False.
 
 
 # =============================================================================
@@ -62,7 +61,7 @@ class LatentDiffusionDP(LatentDiffusion):
     LatentDiffusion with DP-SGD fine-tuning support.
 
     Extra arg vs LatentDiffusion:
-        embedder : BioBERTEmbedder instance (required for training_step_dp /
+        embedder : BioBERTContextEncoder instance (required for training_step_dp /
                    configure_dp_params with finetune_biobert=True)
 
     Usage in LDM_dp_finetune.py:
@@ -83,17 +82,8 @@ class LatentDiffusionDP(LatentDiffusion):
         first_stage_key   = 'image',
         scale_factor      = 1.0,
         scale_by_std      = False,
-        device            = None,
         *args, **kwargs
     ):
-        # Some LatentDiffusion variants take `device` as an explicit __init__
-        # arg, others expose it as a read-only @property (inferred from buffers).
-        # Forward `device` only when the parent's signature accepts it, so this
-        # class works against both implementations.
-        parent_params = inspect.signature(LatentDiffusion.__init__).parameters
-        if 'device' in parent_params:
-            kwargs.setdefault('device', device)
-
         super().__init__(
             unet              = unet,
             first_stage_model = first_stage_model,
@@ -103,7 +93,7 @@ class LatentDiffusionDP(LatentDiffusion):
             scale_by_std      = scale_by_std,
             *args, **kwargs,
         )
-        self.embedder = embedder    # BioBERTEmbedder or None
+        self.embedder = embedder    # BioBERTContextEncoder or None
 
     # =========================================================================
     # Checkpoint (override: broader key unwrapping than parent)
@@ -215,9 +205,14 @@ class LatentDiffusionDP(LatentDiffusion):
 
         # Context: gradient flows through proj when unfrozen
         assert self.embedder is not None, (
-            "embedder is None. Pass a BioBERTEmbedder to LatentDiffusionDP.__init__."
+            "embedder is None. Pass a BioBERTContextEncoder to LatentDiffusionDP.__init__."
         )
-        c = self.embedder(batch['reports'])    # list[str] → [B, seq_len, output_dim]
+        # BioBERTContextEncoder: forward(texts, mode) → [B, 1, output_dim]
+        # BioBERTEmbedder:       forward(texts)       → [B, seq_len, output_dim]
+        try:
+            c = self.embedder(batch['reports'], mode='description')
+        except TypeError:
+            c = self.embedder(batch['reports'])
 
         return z, c
 
