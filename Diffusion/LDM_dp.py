@@ -112,6 +112,14 @@ class LatentDiffusionDP(LatentDiffusion):
                 del sd[k]
         missing, unexpected = self.load_state_dict(sd, strict=False)
         print(f'[LDM_dp] loaded  missing={len(missing)}  unexpected={len(unexpected)}')
+        if missing:
+            print('[LDM_dp] missing keys:')
+            for k in missing:
+                print(f'  - {k}')
+        if unexpected:
+            print('[LDM_dp] unexpected keys:')
+            for k in unexpected:
+                print(f'  - {k}')
         self._restarted_from_ckpt = True
 
     # =========================================================================
