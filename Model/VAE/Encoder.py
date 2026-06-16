@@ -7,9 +7,9 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from swin_attention import SwinTransformerBlock
-from UNetBlock_module import ResBlock, Downsample
-from util_network import conv_nd, normalization
+from Model.swin_attention import SwinTransformerBlock
+from Model.UNetBlock_module import ResBlock, Downsample
+from Model.util_network import conv_nd, normalization
 
 
 # ============================================================================
@@ -331,7 +331,7 @@ class DiagonalGaussianDistribution(object):
 # ============================================================================
 
 if __name__ == "__main__":
-    from Data.dataset import NIH
+    from Data.nih import NIH
 
     parser = argparse.ArgumentParser()
 

@@ -6,8 +6,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from UNetBlock_module import ResBlock, Upsample
-from util_network import conv_nd, normalization
+from Model.UNetBlock_module import ResBlock, Upsample
+from Model.util_network import conv_nd, normalization
 from Encoder import SwinWrapper2D, Encoder, DiagonalGaussianDistribution
 
 
