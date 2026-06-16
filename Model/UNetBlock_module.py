@@ -4,8 +4,8 @@ Shared Block: ResBlock, DownSample, UpSample
 
 import torch
 import torch.nn as nn
-from timestep_block import *
-from util_network import *
+from Model.timestep_block import *
+from Model.util_network import *
 
 
 class ResBlock(TimestepBlock):

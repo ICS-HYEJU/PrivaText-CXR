@@ -6,7 +6,7 @@ from typing import Iterable
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-from attention_module import *
+from Model.attention_module import *
 
 class TimestepBlock(nn.Module):
     """
