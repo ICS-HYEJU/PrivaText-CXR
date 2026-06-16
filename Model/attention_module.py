@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import nn, einsum
 from einops import rearrange, repeat
 
-from util_network import *
+from Model.util_network import *
 
 class GEGLU(nn.Module):
     def __init__(self, dim_in, dim_out):
