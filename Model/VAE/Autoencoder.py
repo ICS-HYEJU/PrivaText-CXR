@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from Encoder import Encoder, DiagonalGaussianDistribution
 from Decoder import Decoder
-from Data.dataset import NIH
-from util_network import *
+from Data.nih import NIH
+from Model.util_network import *
 
 # ============================================================================
 # VAE
@@ -99,7 +99,7 @@ if __name__ == "__main__":
 
     # Data
     parser.add_argument("--root_path", default="/storage/hjchoi/archive/DATA")
-    parser.add_argument("--task", default="train", choices=["train", "val", "test"])
+    parser.add_argument("--task", default="test", choices=["train", "val", "test"])
     parser.add_argument("--bs", default=2, type=int, help='batch size')
     parser.add_argument("--image_size", default=256, type=int, help='the value to resize')
     parser.add_argument("--image_show", default=True, type=bool)
