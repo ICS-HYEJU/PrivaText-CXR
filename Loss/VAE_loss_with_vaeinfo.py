@@ -72,41 +72,36 @@ class InfoVAELoss(nn.Module):
     MMD weight = (alpha + lambda_info - 1)
     """
 
-    def __init__(
-            self,
-            lambda_rec: float = 1.0,
-            lambda_ssim: float = 1.0,
-            alpha: float = 0.0,
-            lambda_info: float = 1.0,
-            mmd_sigma: float = 1.0,
-            data_range: float = 2.0,
-    ):
+    def __init__(self,args,device):
         super().__init__()
-        self.lambda_rec = lambda_rec
-        self.lambda_ssim = lambda_ssim
-        self.alpha = alpha
-        self.lambda_info = lambda_info
-        self.mmd_sigma = mmd_sigma
-        self.data_range = data_range
+        self.args = args
+        self.device = device
 
-    # ���� 1. Reconstruction (L1) ������������������������������������������������������������������������������������������������
+        self.lambda_rec = self.args.lambda_rec
+        self.lambda_ssim = self.args.lambda_ssim
+        self.alpha = self.args.alpha
+        self.lambda_info = self.args.lambda_info
+        self.mmd_sigma = self.args.mmd_sigma
+        self.data_range = self.args.data_range
+
+    # 1. Reconstruction (L1)
     def reconstruction_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
-        """L_rec = mean( |x - x?| )  ? pixel-wise L1, averaged over the batch."""
+        """L_rec = mean( |x - x?| ): pixel-wise L1, averaged over the batch."""
         return F.l1_loss(x_hat, x, reduction="mean")
 
-    # ���� 2. SSIM loss ��������������������������������������������������������������������������������������������������������������������
+    # 2. SSIM loss
     def ssim_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
         """
-        L_ssim = 1 - SSIM(x, x?)
+        L_ssim = 1 - SSIM(x, x')
 
-        SSIM �� [0, 1], so this loss �� [0, 1].
-        Uses torchmetrics stateless functional API ? safe to call per batch.
+        SSIM -> [0, 1], so this loss -> [0, 1].
+        Uses torchmetrics stateless functional API -> safe to call per batch.
         data_range must match image normalisation; default 2.0 for [-1, 1].
         """
         ssim_val = _ssim_fn(x_hat, x, data_range=self.data_range)
         return 1.0 - ssim_val
 
-    # ���� 3. KL divergence ������������������������������������������������������������������������������������������������������������
+    # 3. KL divergence
     def kl_loss(self, posterior) -> torch.Tensor:
         """
         KL( q(z|x) || N(0, I) ) ? closed-form solution for diagonal Gaussian:
@@ -117,13 +112,13 @@ class InfoVAELoss(nn.Module):
         """
         return posterior.kl().mean()
 
-    # ���� 4. MMD ? aggregate posterior vs prior ������������������������������������������������������������������
+    # 4. MMD : aggregate posterior vs prior
     def mmd_loss(self, z_q: torch.Tensor, z_p: torch.Tensor = None) -> torch.Tensor:
         """
         Unbiased MMD�� estimate using a Gaussian kernel:
-            MMD��(q, p) = E_{z,z'~q}[k(z,z')]
+            MMD(q, p) = E_{z,z'~q}[k(z,z')]
                        + E_{z,z'~p}[k(z,z')]
-                       - 2 �� E_{z~q, z'~p}[k(z,z')]
+                       - 2 * E_{z~q, z'~p}[k(z,z')]
 
         z_q  : latent samples from the encoder  ( aggregate posterior q(z) )
         z_p  : prior samples from N(0, I); if None, sampled automatically.
@@ -146,36 +141,36 @@ class InfoVAELoss(nn.Module):
 
     def _gaussian_kernel(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Gaussian (RBF) kernel:  k(x, y) = exp( -?x - y?�� / (2����) )
-
+        Gaussian (RBF) kernel
         x : [N, D]
         y : [M, D]
-        �� [N, M]  pairwise kernel matrix
+        x@y: [N, M]  pairwise kernel matrix
         """
         x_sq = (x ** 2).sum(1, keepdim=True)  # [N, 1]
         y_sq = (y ** 2).sum(1, keepdim=True).t()  # [1, M]
         dist2 = x_sq + y_sq - 2.0 * (x @ y.t())  # [N, M]  squared L2 distances
         return torch.exp(-dist2 / (2.0 * self.mmd_sigma ** 2))
 
-    # ���� 5. InfoVAE coefficient structure ����������������������������������������������������������������������������
-    def infovae_weights(self) -> tuple[float, float]:
+    # 5. InfoVAE coefficient structure
+    def infovae_weights(self):
         """
         Derive effective KL and MMD weights from the InfoVAE hyperparameters.
 
         From InfoVAE eq. 7 (converted to minimisation):
-            KL  weight = (1 - ��)
-            MMD weight = (�� + ��_info - 1)
+            KL  weight = (1 - alpha)
+            MMD weight = (alpha + lambda_info - 1)
 
         Corner cases:
-            ��=0, ��_info=1  ��  KL=1, MMD=0  (standard VAE)
-            ��=1, ��_info=1  ��  KL=0, MMD=1  (pure MMD-VAE)
-            ��=0, ��_info=2  ��  KL=1, MMD=1  (balanced KL + MMD)
+            alpha=0, lambda_info=1  ->  KL=1, MMD=0  (standard VAE)
+            alpha=1, lambda_info=1  ->  KL=0, MMD=1  (pure MMD-VAE)
+            alpha=0, lambda_info=2  ->  KL=1, MMD=1  (balanced KL + MMD)
+            alpha=1, lambda_info=0  ->  KL=0, MMD=0  (no latent regularisation)
         """
         kl_weight = 1.0 - self.alpha
         mmd_weight = self.alpha + self.lambda_info - 1.0
         return kl_weight, mmd_weight
 
-    # ���� 6. Shared computation (reused by forward and debug_forward) ����������������������
+    # 6. Shared computation (reused by forward and debug_forward)
     def _compute(self, x, x_hat, posterior, z_q):
         l_rec = self.reconstruction_loss(x, x_hat)
         l_ssim = self.ssim_loss(x, x_hat)
@@ -192,7 +187,7 @@ class InfoVAELoss(nn.Module):
         )
         return total, l_rec, l_ssim, l_kl, l_mmd, kl_weight, mmd_weight
 
-    # ���� 7. Forward ������������������������������������������������������������������������������������������������������������������������
+    #7. Forward ������������������������������������������������������������������������������������������������������������������������
     def forward(self, x, x_hat, posterior, z_q):
         """
         Parameters
