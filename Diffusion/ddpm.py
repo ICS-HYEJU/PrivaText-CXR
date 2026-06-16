@@ -263,6 +263,7 @@ class DDPM(nn.Module):
                  learn_logvar: bool = False,
                  logvar_init: float = 0.,
                  lr: float = 1e-4,
+                 use_dp: bool = False,
                  ):
         super().__init__()
         assert parameterization in ("eps", "x0"), \
@@ -307,12 +308,29 @@ class DDPM(nn.Module):
         if ckpt_path is not None:
             self.load_from_ckpt(ckpt_path, ignore_keys)
 
+        # DP-SGD support
+        self.use_dp = use_dp
+        if use_dp:
+            try:
+                import opacus
+                self.privacy_engine = opacus.PrivacyEngine()
+                print('[DDPM] DP enabled  –  PrivacyEngine initialised')
+            except ImportError:
+                raise ImportError(
+                    'opacus is required for DP training. pip install opacus'
+                )
+
     # ── Device property ────────────────────────────────────────────────────────
 
     @property
     def device(self) -> torch.device:
-        """Current device inferred from the registered noise schedule buffers."""
-        return self.betas.device
+        """Device: returns explicitly set value, or falls back to noise-schedule buffer."""
+        return getattr(self, '_device', None) or self.betas.device
+
+    @device.setter
+    def device(self, value):
+        """Allow subclasses (e.g. LatentDiffusion) to store device explicitly."""
+        self._device = value
 
     # ── Noise schedule ─────────────────────────────────────────────────────────
 

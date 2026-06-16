@@ -210,6 +210,9 @@ def parse_args():
                         help='HuggingFace model ID or local path for BioBERT')
 
     # DP-SGD -------------------------------------------------------------------
+    parser.add_argument('--use_dp',           default=True,
+                        type=lambda x: x.lower() != 'false',
+                        help='Enable DP-SGD. Set --use_dp false for non-DP baseline.')
     parser.add_argument('--target_epsilon',   default=10.0,  type=float,
                         help='Target ε privacy budget')
     parser.add_argument('--target_delta',     default=1e-5,  type=float,
@@ -400,16 +403,22 @@ def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> floa
 
 def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
                        epoch, global_step, args, target_delta):
-    eps_spent = privacy_engine.get_epsilon(target_delta)
+    eps_spent  = (privacy_engine.get_epsilon(target_delta)
+                  if privacy_engine is not None else None)
+    model_sd   = (model._module.state_dict()
+                  if hasattr(model, '_module') else model.state_dict())
+    opt_sd     = (optimizer.original_optimizer.state_dict()
+                  if hasattr(optimizer, 'original_optimizer') else optimizer.state_dict())
     torch.save({
         'epoch'         : epoch,
         'global_step'   : global_step,
-        'model'         : model._module.state_dict(),
-        'optimizer'     : optimizer.original_optimizer.state_dict(),
+        'model'         : model_sd,
+        'optimizer'     : opt_sd,
         'epsilon_spent' : eps_spent,
         'args'          : vars(args),
     }, save_path)
-    print(f'  [ckpt] saved → {save_path}  (ε_spent={eps_spent:.4f})')
+    eps_str = f'{eps_spent:.4f}' if eps_spent is not None else 'N/A (no DP)'
+    print(f'  [ckpt] saved → {save_path}  (ε_spent={eps_str})')
 
 
 def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
@@ -531,6 +540,7 @@ def main():
         use_ema           = args.use_ema,
         lr                = args.lr,
         device            = device,
+        use_dp            = args.use_dp,
     ).to(device)
 
     if args.pretrained_ckpt:
@@ -588,46 +598,51 @@ def main():
             'Check UNet has SpatialTransformer blocks and --use_spatial_transformer=True.'
         )
 
-    # ── Noise multiplier ──────────────────────────────────────────────────────
-    if args.noise_multiplier is not None:
-        sigma = args.noise_multiplier
-        print(f'[DP] using provided noise_multiplier σ={sigma:.6f}')
-    else:
-        sigma = compute_noise_multiplier(
-            target_epsilon = args.target_epsilon,
-            target_delta   = args.target_delta,
-            sample_rate    = sample_rate,
-            epochs         = args.epochs,
-        )
-
-    print_privacy_summary(
-        noise_multiplier = sigma,
-        max_grad_norm    = args.max_grad_norm,
-        sample_rate      = sample_rate,
-        epochs           = args.epochs,
-        target_epsilon   = args.target_epsilon,
-        target_delta     = args.target_delta,
-    )
-
     # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(attn_params, lr=args.lr)
 
-    # ── Opacus ────────────────────────────────────────────────────────────────
-    try:
-        from opacus import PrivacyEngine
-    except ImportError:
-        raise ImportError('opacus is required. Install with: pip install opacus')
+    # ── DP-SGD setup (skipped when --use_dp false) ────────────────────────────
+    if args.use_dp:
+        if args.noise_multiplier is not None:
+            sigma = args.noise_multiplier
+            print(f'[DP] using provided noise_multiplier σ={sigma:.6f}')
+        else:
+            sigma = compute_noise_multiplier(
+                target_epsilon = args.target_epsilon,
+                target_delta   = args.target_delta,
+                sample_rate    = sample_rate,
+                epochs         = args.epochs,
+            )
 
-    privacy_engine = PrivacyEngine()
-    ldm, optimizer, dp_loader = privacy_engine.make_private(
-        module           = ldm,
-        optimizer        = optimizer,
-        data_loader      = base_loader,
-        noise_multiplier = sigma,
-        max_grad_norm    = args.max_grad_norm,
-        poisson_sampling = True,
-    )
-    print(f'[Opacus] GradSampleModule ready  σ={sigma:.6f}  C={args.max_grad_norm}')
+        print_privacy_summary(
+            noise_multiplier = sigma,
+            max_grad_norm    = args.max_grad_norm,
+            sample_rate      = sample_rate,
+            epochs           = args.epochs,
+            target_epsilon   = args.target_epsilon,
+            target_delta     = args.target_delta,
+        )
+
+        try:
+            from opacus import PrivacyEngine
+        except ImportError:
+            raise ImportError('opacus is required. Install with: pip install opacus')
+
+        privacy_engine = PrivacyEngine()
+        ldm, optimizer, dp_loader = privacy_engine.make_private(
+            module           = ldm,
+            optimizer        = optimizer,
+            data_loader      = base_loader,
+            noise_multiplier = sigma,
+            max_grad_norm    = args.max_grad_norm,
+            poisson_sampling = True,
+        )
+        print(f'[Opacus] GradSampleModule ready  σ={sigma:.6f}  C={args.max_grad_norm}')
+    else:
+        sigma          = None
+        privacy_engine = None
+        dp_loader      = base_loader
+        print('[DP] DP disabled – running standard fine-tuning (no Opacus)')
 
     # ── LR Scheduler ──────────────────────────────────────────────────────────
     scheduler = (
@@ -647,12 +662,16 @@ def main():
 
     os.makedirs(args.save_dir, exist_ok=True)
 
+    # ── Inner model reference (unwrap GradSampleModule when DP is on) ─────────
+    inner_model = ldm._module if args.use_dp else ldm
+
     # =========================================================================
     # Training Loop
     # =========================================================================
+    sigma_str = f'σ={sigma:.4f}' if sigma is not None else 'no-DP'
     print(f'\n[DP-Train] split={args.split}  epochs={args.epochs}  lr={args.lr}  '
           f'logical_batch={args.logical_batch}  physical_batch={args.physical_batch}  '
-          f'chunks/step≈{approx_chunks}  σ={sigma:.4f}')
+          f'chunks/step≈{approx_chunks}  {sigma_str}')
     print('=' * 60)
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
@@ -661,21 +680,17 @@ def main():
         t0           = time.time()
 
         for logical_batch in dp_loader:
-            # logical_batch is one Poisson-sampled batch of size ≈ logical_batch
-            # (q = logical_batch/N — consistent with sigma and get_epsilon)
             images  = logical_batch['image'].to(device)   # [B, 1, H, W]
             reports = logical_batch['reports']             # list[str], len ≈ B
 
-            B       = images.shape[0]
+            B        = images.shape[0]
             n_chunks = max(1, math.ceil(B / args.physical_batch))
 
             optimizer.zero_grad()
-            step_loss    = 0.0
+            step_loss      = 0.0
             last_loss_dict = {}
 
             # ── VirtualBatch: split logical batch into physical chunks ─────────
-            # Mirrors DP-LDM's VirtualBatchWrapper(max_batch_size=physical_batch)
-            # All per-sample grads accumulate before the single DP step below.
             for i in range(n_chunks):
                 start = i * args.physical_batch
                 end   = min(start + args.physical_batch, B)
@@ -683,12 +698,11 @@ def main():
                     'image'  : images[start:end],
                     'reports': reports[start:end],
                 }
-                loss, loss_dict = ldm._module.training_step_dp(chunk)
-                (loss / n_chunks).backward()   # accumulate grad into param.grad_sample
+                loss, loss_dict = inner_model.training_step_dp(chunk)
+                (loss / n_chunks).backward()
                 step_loss     += loss.item() / n_chunks
                 last_loss_dict = loss_dict
 
-            # ── One DP step: clip all accumulated per-sample grads, add noise ──
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -697,15 +711,17 @@ def main():
             global_step += 1
 
             if global_step % args.log_every == 0:
-                info    = '  '.join(f'{k}={v.item():.4f}'
-                                    for k, v in last_loss_dict.items())
-                eps_now = privacy_engine.get_epsilon(args.target_delta)
-                print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
-                      f'{info}  ε={eps_now:.4f}')
+                info = '  '.join(f'{k}={v.item():.4f}'
+                                 for k, v in last_loss_dict.items())
+                if args.use_dp:
+                    eps_now = privacy_engine.get_epsilon(args.target_delta)
+                    print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
+                          f'{info}  ε={eps_now:.4f}')
+                else:
+                    print(f'  ep {epoch+1:04d}  step {global_step:06d} | {info}')
 
         # ── Epoch summary ─────────────────────────────────────────────────────
         elapsed   = time.time() - t0
-        eps_now   = privacy_engine.get_epsilon(args.target_delta)
         mean_loss = float(np.mean(epoch_losses)) if epoch_losses else float('nan')
 
         val_str = ''
@@ -713,14 +729,18 @@ def main():
             val_loss = evaluate(ldm, val_loader, device, args.val_batches)
             val_str  = f'  val_loss={val_loss:.4f}'
 
-        print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '
-              f'loss={mean_loss:.4f}{val_str}  '
-              f'ε={eps_now:.4f}  δ={args.target_delta}  '
-              f'time={elapsed:.1f}s')
+        if args.use_dp:
+            eps_now  = privacy_engine.get_epsilon(args.target_delta)
+            dp_str   = f'  ε={eps_now:.4f}  δ={args.target_delta}'
+            if eps_now > args.target_epsilon * 1.05:
+                print(f'[WARNING] ε_spent={eps_now:.4f} exceeds target '
+                      f'ε={args.target_epsilon}. Consider early stopping.')
+        else:
+            dp_str = ''
 
-        if eps_now > args.target_epsilon * 1.05:
-            print(f'[WARNING] ε_spent={eps_now:.4f} exceeds target '
-                  f'ε={args.target_epsilon}. Consider early stopping.')
+        print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '
+              f'loss={mean_loss:.4f}{val_str}{dp_str}  '
+              f'time={elapsed:.1f}s')
 
         if (epoch + 1) % args.save_every == 0:
             ckpt_path = os.path.join(args.save_dir, f'ldm_dp_epoch{epoch+1:04d}.pt')
