@@ -38,14 +38,19 @@ import torch
 import torch.nn as nn
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_this_dir  = os.path.dirname(os.path.abspath(__file__))
-_model_dir = os.path.join(_this_dir, '..', 'Model')
-for _d in [_model_dir, _this_dir]:
+# File lives at:  <proj_root>/Model/Diffusion/LDM_dp.py
+_this_dir  = os.path.dirname(os.path.abspath(__file__))   # …/Model/Diffusion/
+_model_dir = os.path.dirname(_this_dir)                    # …/Model/
+_proj_root = os.path.dirname(_model_dir)                   # …/PrivaText-CXR/
+
+for _d in [_proj_root, _model_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-from LDM              import LatentDiffusion                 # noqa: E402
-from attention_module import SpatialTransformer              # noqa: E402  isinstance check
+from Model.Diffusion.LDM  import LatentDiffusion            # noqa: E402
+from Model.attention_module import SpatialTransformer        # noqa: E402  isinstance check
+# UNetmodel.py uses Model.attention_module.SpatialTransformer;
+# must import the same class or isinstance() always returns False.
 
 
 # =============================================================================
