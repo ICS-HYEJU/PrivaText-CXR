@@ -127,8 +127,10 @@ class NIH(Dataset):
         - val / test : resize and normalize only
         """
         if self.task == "train":
+            import torchvision.transforms.functional as TF
             return transforms.Compose([
                 transforms.Resize((self.args.image_size, self.args.image_size)),
+                transforms.Lambda(lambda img: TF.adjust_contrast(img, contrast_factor=1.5)), # TODO: experiment
                 transforms.RandomHorizontalFlip(p=0.5),   # augmentation for training
                 transforms.ToTensor(),                     # (1, H, W) in [0, 1]
                 transforms.Normalize(mean=[0.5], std=[0.5]),
