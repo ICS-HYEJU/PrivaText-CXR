@@ -229,10 +229,17 @@ def parse_args():
                         help='Unfreeze BioBERT projection layer under DP')
 
     # Training -----------------------------------------------------------------
-    parser.add_argument('--epochs',       default=30,    type=int)
-    parser.add_argument('--lr',           default=1e-4,  type=float)
-    parser.add_argument('--warmup_steps', default=500,   type=int,
-                        help='Linear warmup steps for LR scheduler (0 = disabled)')
+    parser.add_argument('--epochs',         default=30,              type=int)
+    parser.add_argument('--lr',             default=2e-5,            type=float,
+                        help='Peak learning rate. DP-SGD typically needs 2x-5x lower '
+                             'than non-private training (e.g. non-DP: 1e-4 → DP: 2e-5~5e-5)')
+    parser.add_argument('--warmup_steps',   default=500,             type=int,
+                        help='Linear warmup steps (0 = no warmup)')
+    parser.add_argument('--scheduler_type', default='cosine_warmup',
+                        choices=['cosine_warmup', 'linear_warmup', 'none'],
+                        help='LR scheduler: cosine_warmup = warmup + cosine decay, '
+                             'linear_warmup = warmup + linear decay, '
+                             'none = constant LR')
     parser.add_argument('--save_dir',    default='./finetune_dp')
     parser.add_argument('--save_every',  default=5,     type=int,
                         help='Save DP checkpoint every N epochs')
@@ -437,16 +444,32 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
 # LR Scheduler
 # =============================================================================
 
-def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
+def build_scheduler(optimizer, warmup_steps: int, total_steps: int,
+                    scheduler_type: str = 'cosine_warmup'):
+    """
+    cosine_warmup : linear warmup → cosine decay to 0
+    linear_warmup : linear warmup → linear decay to 0
+    Both are suitable for DP-SGD; warmup stabilises early training
+    before the clipping/noise regime settles.
+    """
     from torch.optim.lr_scheduler import LambdaLR
 
-    def lr_lambda(step):
+    def _cosine(step):
         if warmup_steps > 0 and step < warmup_steps:
             return float(step) / max(1, warmup_steps)
         progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
-    return LambdaLR(optimizer, lr_lambda)
+    def _linear(step):
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step) / max(1, warmup_steps)
+        progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 1.0 - progress)
+
+    fn = _cosine if scheduler_type == 'cosine_warmup' else _linear
+    print(f'[Scheduler] type={scheduler_type}  warmup_steps={warmup_steps}  '
+          f'total_steps={total_steps}')
+    return LambdaLR(optimizer, fn)
 
 
 # =============================================================================
@@ -636,10 +659,16 @@ def main():
         print('[DP] DP disabled – running standard fine-tuning (no Opacus)')
 
     # ── LR Scheduler ──────────────────────────────────────────────────────────
-    scheduler = (
-        build_scheduler(optimizer, args.warmup_steps, total_logical_steps)
-        if args.warmup_steps > 0 else None
-    )
+    if args.scheduler_type == 'none':
+        scheduler = None
+        print('[Scheduler] disabled (constant LR)')
+    else:
+        scheduler = build_scheduler(
+            optimizer,
+            warmup_steps   = args.warmup_steps,
+            total_steps    = total_logical_steps,
+            scheduler_type = args.scheduler_type,
+        )
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 0
