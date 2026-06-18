@@ -308,17 +308,8 @@ class DDPM(nn.Module):
         if ckpt_path is not None:
             self.load_from_ckpt(ckpt_path, ignore_keys)
 
-        # DP-SGD support
+        # DP-SGD support flag (PrivacyEngine is managed externally in LDM_dp_finetune.py)
         self.use_dp = use_dp
-        if use_dp:
-            try:
-                import opacus
-                self.privacy_engine = opacus.PrivacyEngine()
-                print('[DDPM] DP enabled  –  PrivacyEngine initialised')
-            except ImportError:
-                raise ImportError(
-                    'opacus is required for DP training. pip install opacus'
-                )
 
     # ── Device property ────────────────────────────────────────────────────────
 

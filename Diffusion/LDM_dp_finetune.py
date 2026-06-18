@@ -639,8 +639,15 @@ def main():
 
         try:
             from opacus import PrivacyEngine
+            from opacus.grad_sample import GradSampleModule
         except ImportError:
             raise ImportError('opacus is required. Install with: pip install opacus')
+
+        # Unwrap if model was already wrapped by a previous make_private call
+        # (happens when PyCharm reuses the Python process between runs)
+        if isinstance(ldm, GradSampleModule):
+            print('[DP] WARNING: model already wrapped – unwrapping before make_private')
+            ldm = ldm._module
 
         privacy_engine = PrivacyEngine()
         ldm, optimizer, dp_loader = privacy_engine.make_private(
