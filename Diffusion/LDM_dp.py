@@ -202,10 +202,10 @@ class LatentDiffusionDP(LatentDiffusion):
             c : Tensor [B, seq_len, out_dim] – BioBERT context
         """
         # Latent: frozen VAE, no gradient
+        # encode_first_stage is decorated with @torch.no_grad() in LDM.py
         x = self._get_raw_image(batch).to(self.device)
-        with torch.no_grad():
-            posterior = self.first_stage_model.encode(x)
-            z = self.get_first_stage_encoding(posterior)   # scale_factor applied
+        posterior = self.encode_first_stage(x)
+        z = self.scale_factor * posterior.sample().detach().to(self.device)
 
         # Context: gradient flows through proj when unfrozen
         assert self.embedder is not None, (
