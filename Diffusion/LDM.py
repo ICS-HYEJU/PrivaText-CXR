@@ -172,7 +172,7 @@ class LatentDiffusion(DDPM):
 
         posterior: DiagonalGaussianDistribution  OR  plain Tensor
         """
-        if isinstance(posterior, DiagonalGaussianDistribution):
+        if type(posterior).__name__ == 'DiagonalGaussianDistribution':
             z = posterior.sample()
         elif isinstance(posterior, torch.Tensor):
             z = posterior
