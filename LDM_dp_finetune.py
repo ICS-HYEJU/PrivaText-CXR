@@ -449,6 +449,19 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
 # LR Scheduler
 # =============================================================================
 
+def _pin_ldm_buffers_to_device(ldm, device, offload_device):
+    """
+    After offloading VAE/BioBERT to offload_device, ensure that all LDM-level
+    buffers (DDPM schedule tensors: sqrt_alphas_cumprod, betas, etc.) remain on
+    the main device.  VAE and BioBERT buffers are intentionally excluded.
+    """
+    offload_prefixes = ('first_stage_model.', 'embedder.')
+    for name, buf in ldm.named_buffers():
+        if not any(name.startswith(p) for p in offload_prefixes):
+            if buf.device != device:
+                buf.data = buf.data.to(device)
+
+
 def build_scheduler(optimizer, warmup_steps: int, total_steps: int,
                     scheduler_type: str = 'cosine_warmup'):
     from torch.optim.lr_scheduler import LambdaLR
@@ -578,6 +591,9 @@ def main():
     if model_parallel:
         ldm.first_stage_model.to(offload_device)
         ldm.embedder.to(offload_device)
+        # DDPM schedule buffers (sqrt_alphas_cumprod, betas, …) must stay on
+        # the main device after the above .to() calls.
+        _pin_ldm_buffers_to_device(ldm, device, offload_device)
 
     # Tell get_input_dp which device the frozen submodels live on.
     ldm.offload_device = offload_device
@@ -585,11 +601,11 @@ def main():
     if args.pretrained_ckpt:
         print(f'[LDM_dp] loading pretrained: {args.pretrained_ckpt}')
         ldm.init_from_ckpt(args.pretrained_ckpt)
-        # Checkpoint loading calls load_state_dict which may move tensors;
-        # re-pin VAE/BioBERT to their target device.
+        # Re-pin after checkpoint load: load_state_dict may silently move tensors.
         if model_parallel:
             ldm.first_stage_model.to(offload_device)
             ldm.embedder.to(offload_device)
+            _pin_ldm_buffers_to_device(ldm, device, offload_device)
     else:
         print('[LDM_dp] WARNING: no --pretrained_ckpt; fine-tuning from scratch')
 
