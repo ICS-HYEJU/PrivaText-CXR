@@ -187,7 +187,14 @@ def parse_args():
     parser.add_argument('--num_classes',  default=None, type=int)
     parser.add_argument('--n_embed',      default=None, type=int)
     parser.add_argument('--use_fp16',    default=False,
-                        type=lambda x: x.lower() != 'false')
+                        type=lambda x: x.lower() != 'false',
+                        help='[DEPRECATED] Converts UNet weights to fp16 at init; '
+                             'breaks when loading fp32 checkpoints. Use --use_autocast instead.')
+    parser.add_argument('--use_autocast', default=False,
+                        type=lambda x: x.lower() != 'false',
+                        help='Use torch.autocast (fp16 compute, fp32 weights). '
+                             'Saves GPU memory without dtype conflicts. '
+                             'Compatible with Opacus per-sample gradients.')
     parser.add_argument('--write_json',  default=False,
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--conv_dims',   default=2, type=int, choices=[1, 2, 3])
@@ -380,7 +387,8 @@ def build_val_loader(dataset: Dataset, batch_size: int,
 # =============================================================================
 
 @torch.no_grad()
-def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> float:
+def evaluate(ldm, val_loader: DataLoader, device,
+             max_batches: int = -1, use_autocast: bool = False) -> float:
     inner = ldm._module if hasattr(ldm, '_module') else ldm
     inner.eval()
 
@@ -389,7 +397,8 @@ def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> floa
         if max_batches > 0 and i >= max_batches:
             break
         batch = {'image': batch['image'].to(device), 'reports': batch['reports']}
-        loss, _ = inner.training_step_dp(batch)
+        with torch.cuda.amp.autocast(enabled=use_autocast):
+            loss, _ = inner.training_step_dp(batch)
         losses.append(loss.item())
 
     inner.train()
@@ -685,7 +694,8 @@ def main():
                     'image'  : images[start:end],
                     'reports': reports[start:end],
                 }
-                loss, loss_dict = ldm._module.training_step_dp(chunk)
+                with torch.cuda.amp.autocast(enabled=args.use_autocast):
+                    loss, loss_dict = ldm._module.training_step_dp(chunk)
                 (loss / n_chunks).backward()   # accumulate grad into param.grad_sample
                 step_loss     += loss.item() / n_chunks
                 last_loss_dict = loss_dict
@@ -712,7 +722,7 @@ def main():
 
         val_str = ''
         if val_loader is not None:
-            val_loss = evaluate(ldm, val_loader, device, args.val_batches)
+            val_loss = evaluate(ldm, val_loader, device, args.val_batches, args.use_autocast)
             val_str  = f'  val_loss={val_loss:.4f}'
 
         print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '
