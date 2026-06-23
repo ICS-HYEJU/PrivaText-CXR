@@ -620,6 +620,8 @@ def main():
     except ImportError:
         raise ImportError('opacus is required. Install with: pip install opacus')
 
+    from opacus.utils.batch_memory_manager import BatchMemoryManager
+
     privacy_engine = PrivacyEngine()
     ldm, optimizer, dp_loader = privacy_engine.make_private(
         module           = ldm,
@@ -662,48 +664,50 @@ def main():
         epoch_losses = []
         t0           = time.time()
 
-        for logical_batch in dp_loader:
-            # logical_batch is one Poisson-sampled batch of size ? logical_batch
-            # (q = logical_batch/N ? consistent with sigma and get_epsilon)
-            images  = logical_batch['image'].to(device)   # [B, 1, H, W]
-            reports = logical_batch['reports']             # list[str], len ? B
-
-            B       = images.shape[0]
-            n_chunks = max(1, math.ceil(B / args.physical_batch))
-
-            optimizer.zero_grad()
-            step_loss    = 0.0
+        # BatchMemoryManager splits each Poisson-sampled logical batch into
+        # physical chunks of size <= physical_batch and signals the optimizer
+        # to perform a real DP step only at the last chunk of each logical batch.
+        with BatchMemoryManager(
+            data_loader            = dp_loader,
+            max_physical_batch_size = args.physical_batch,
+            optimizer              = optimizer,
+        ) as memory_loader:
+            step_loss      = 0.0
+            n_physical     = 0
             last_loss_dict = {}
 
-            # ¦¡¦¡ VirtualBatch: split logical batch into physical chunks ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-            # Mirrors DP-LDM's VirtualBatchWrapper(max_batch_size=physical_batch)
-            # All per-sample grads accumulate before the single DP step below.
-            for i in range(n_chunks):
-                start = i * args.physical_batch
-                end   = min(start + args.physical_batch, B)
-                chunk = {
-                    'image'  : images[start:end],
-                    'reports': reports[start:end],
-                }
+            for physical_batch in memory_loader:
+                images  = physical_batch['image'].to(device)
+                reports = physical_batch['reports']
+
+                chunk = {'image': images, 'reports': reports}
+
+                optimizer.zero_grad()
                 loss, loss_dict = ldm._module.training_step_dp(chunk)
-                (loss / n_chunks).backward()   # accumulate grad into param.grad_sample
-                step_loss     += loss.item() / n_chunks
+                loss.backward()
+                optimizer.step()
+
+                step_loss  += loss.item()
+                n_physical += 1
                 last_loss_dict = loss_dict
 
-            # ¦¡¦¡ One DP step: clip all accumulated per-sample grads, add noise ¦¡¦¡
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+                # A real DP step (not a virtual skip) marks the end of a logical batch.
+                if not optimizer._is_last_step_skipped:
+                    mean_step_loss = step_loss / max(n_physical, 1)
+                    epoch_losses.append(mean_step_loss)
+                    global_step += 1
+                    step_loss   = 0.0
+                    n_physical  = 0
 
-            epoch_losses.append(step_loss)
-            global_step += 1
+                    if scheduler is not None:
+                        scheduler.step()
 
-            if global_step % args.log_every == 0:
-                info    = '  '.join(f'{k}={v.item():.4f}'
-                                    for k, v in last_loss_dict.items())
-                eps_now = privacy_engine.get_epsilon(args.target_delta)
-                print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
-                      f'{info}  ¥å={eps_now:.4f}')
+                    if global_step % args.log_every == 0:
+                        info    = '  '.join(f'{k}={v.item():.4f}'
+                                            for k, v in last_loss_dict.items())
+                        eps_now = privacy_engine.get_epsilon(args.target_delta)
+                        print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
+                              f'{info}  ¥å={eps_now:.4f}')
 
         # ¦¡¦¡ Epoch summary ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
         elapsed   = time.time() - t0
