@@ -387,8 +387,7 @@ def build_val_loader(dataset: Dataset, batch_size: int,
 # =============================================================================
 
 @torch.no_grad()
-def evaluate(ldm, val_loader: DataLoader, device,
-             max_batches: int = -1, use_autocast: bool = False) -> float:
+def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> float:
     inner = ldm._module if hasattr(ldm, '_module') else ldm
     inner.eval()
 
@@ -397,8 +396,7 @@ def evaluate(ldm, val_loader: DataLoader, device,
         if max_batches > 0 and i >= max_batches:
             break
         batch = {'image': batch['image'].to(device), 'reports': batch['reports']}
-        with torch.cuda.amp.autocast(enabled=use_autocast):
-            loss, _ = inner.training_step_dp(batch)
+        loss, _ = inner.training_step_dp(batch)
         losses.append(loss.item())
 
     inner.train()
@@ -550,6 +548,10 @@ def main():
     else:
         print('[LDM_dp] WARNING: no --pretrained_ckpt; fine-tuning from scratch')
 
+    # autocast only for frozen VAE forward in get_input_dp; Opacus-tracked layers stay fp32
+    ldm.use_autocast = args.use_autocast
+    print(f'[AMP] use_autocast={args.use_autocast} (VAE encoding only; UNet/BioBERT in fp32)')
+
     n_patched = disable_checkpointing(ldm)
     print(f'[DP] gradient checkpointing disabled on {n_patched} block(s)')
 
@@ -694,8 +696,7 @@ def main():
                     'image'  : images[start:end],
                     'reports': reports[start:end],
                 }
-                with torch.cuda.amp.autocast(enabled=args.use_autocast):
-                    loss, loss_dict = ldm._module.training_step_dp(chunk)
+                loss, loss_dict = ldm._module.training_step_dp(chunk)
                 (loss / n_chunks).backward()   # accumulate grad into param.grad_sample
                 step_loss     += loss.item() / n_chunks
                 last_loss_dict = loss_dict
@@ -722,7 +723,7 @@ def main():
 
         val_str = ''
         if val_loader is not None:
-            val_loss = evaluate(ldm, val_loader, device, args.val_batches, args.use_autocast)
+            val_loss = evaluate(ldm, val_loader, device, args.val_batches)
             val_str  = f'  val_loss={val_loss:.4f}'
 
         print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '

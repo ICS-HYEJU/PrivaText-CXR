@@ -203,16 +203,20 @@ class LatentDiffusionDP(LatentDiffusion):
             c : Tensor [B, seq_len, out_dim] ? BioBERT context
         """
         # Latent: frozen VAE, no gradient
+        # autocast only here (frozen, no_grad) — Opacus-tracked layers must stay fp32
         x = self._get_raw_image(batch).to(self.device)
+        use_autocast = getattr(self, 'use_autocast', False)
         with torch.no_grad():
-            posterior = self.first_stage_model.encode(x)
-            z = self.get_first_stage_encoding(posterior)   # scale_factor applied
+            with torch.cuda.amp.autocast(enabled=use_autocast):
+                posterior = self.first_stage_model.encode(x)
+                z = self.get_first_stage_encoding(posterior)   # scale_factor applied
+        z = z.float()   # cast back to fp32 for Opacus per-sample grad computation
 
-        # Context: gradient flows through proj when unfrozen
+        # Context: gradient flows through proj when unfrozen — must remain fp32 for Opacus
         assert self.embedder is not None, (
             "embedder is None. Pass a BioBERTEmbedder to LatentDiffusionDP.__init__."
         )
-        c = self.embedder(batch['reports'])    # list[str] ¡æ [B, seq_len, output_dim]
+        c = self.embedder(batch['reports'])    # list[str] → [B, seq_len, output_dim]
 
         return z, c
 
