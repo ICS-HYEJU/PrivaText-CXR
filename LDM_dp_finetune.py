@@ -449,17 +449,26 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
 # LR Scheduler
 # =============================================================================
 
-def _pin_ldm_buffers_to_device(ldm, device, offload_device):
+def _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=False):
     """
     After offloading VAE/BioBERT to offload_device, ensure that all LDM-level
     buffers (DDPM schedule tensors: sqrt_alphas_cumprod, betas, etc.) remain on
     the main device.  VAE and BioBERT buffers are intentionally excluded.
     """
-    offload_prefixes = ('first_stage_model.', 'embedder.')
+    offload_prefixes = ('first_stage_model.', 'embedder.',
+                        '_module.first_stage_model.', '_module.embedder.')
+    moved, kept = [], []
     for name, buf in ldm.named_buffers():
-        if not any(name.startswith(p) for p in offload_prefixes):
-            if buf.device != device:
-                buf.data = buf.data.to(device)
+        if any(name.startswith(p) for p in offload_prefixes):
+            kept.append((name, buf.device))
+            continue
+        if buf.device != device:
+            buf.data = buf.data.to(device)
+            moved.append(name)
+    if verbose:
+        print(f'[pin_buffers] moved {len(moved)} buffer(s) → {device}')
+        for n in moved[:5]:
+            print(f'              - {n}')
 
 
 def build_scheduler(optimizer, warmup_steps: int, total_steps: int,
@@ -698,6 +707,22 @@ def main():
         poisson_sampling = True,
     )
     print(f'[Opacus] GradSampleModule ready  sigma={sigma:.6f}  C(clip)={args.max_grad_norm}')
+
+    # Re-pin after make_private: Opacus wraps the module in GradSampleModule
+    # and may shuffle buffers; also re-pin VAE/BioBERT to offload_device.
+    if model_parallel:
+        inner = ldm._module if hasattr(ldm, '_module') else ldm
+        inner.first_stage_model.to(offload_device)
+        inner.embedder.to(offload_device)
+        _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=True)
+        # Sanity check: q_sample buffers must live on `device`.
+        sa = inner.sqrt_alphas_cumprod
+        print(f'[pin_buffers] sqrt_alphas_cumprod.device = {sa.device} '
+              f'(expected {device})')
+        assert sa.device == device, (
+            f'sqrt_alphas_cumprod on {sa.device}, expected {device}. '
+            f'Check that ldm.to(device) ran before offload.'
+        )
 
     # ── LR Scheduler ──────────────────────────────────────────────────────────
     scheduler = (
