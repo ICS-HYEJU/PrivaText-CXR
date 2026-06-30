@@ -1,20 +1,29 @@
 """
-Data/mimic_cxr.py  ?  MIMIC-CXR Map-Style Dataset
+Data/mimic_cxr.py  -  MIMIC-CXR Map-Style Dataset
 ---------------------------------------------------
 Map-style dataset compatible with DP-SGD (Opacus UniformWithReplacementSampler).
 Each sample returns (image_tensor, report_str).
 
-Loads from pre-built split directories produced by prepare_split_dirs():
-    <prebuilt_split_dir>/
-    ¦§¦¡¦¡ train/
-    ¦¢   ¦§¦¡¦¡ p10/
-    ¦¢   ¦¢   ¦¦¦¡¦¡ p10000032/
-    ¦¢   ¦¢       ¦§¦¡¦¡ s50414267/
-    ¦¢   ¦¢       ¦¢   ¦¦¦¡¦¡ <dicom_id>.dcm
-    ¦¢   ¦¢       ¦¦¦¡¦¡ s50414267.txt
-    ¦¢   ¦§¦¡¦¡ p11/ ... p19/
-    ¦§¦¡¦¡ validate/
-    ¦¦¦¡¦¡ test/
+Reads directly from the original MIMIC-CXR PhysioNet directory using the
+official split CSV (mimic-cxr-2.0.0-split.csv).  No pre-built split
+directories required.
+
+Expected layout:
+    <root_path>/
+    ├── files/
+    │   ├── p10/
+    │   │   └── p10000032/
+    │   │       ├── s50414267/
+    │   │       │   └── <dicom_id>.dcm
+    │   │       └── s50414267.txt
+    │   └── p11/ ... p19/
+    └── mimic-cxr-2.0.0-split.csv
+
+The CSV has columns: dicom_id, subject_id, study_id, split
+  split values: 'train', 'validate', 'test'
+
+DICOM files that do not yet exist on disk are silently skipped so the
+dataset works with a partial download (e.g. only p10 + p11 downloaded).
 
 External usage (training scripts):
     from Data.mimic_cxr import dataset_loader
@@ -27,6 +36,7 @@ import sys
 import argparse
 
 import numpy as np
+import pandas as pd
 import pydicom
 from PIL import Image
 
@@ -48,12 +58,16 @@ except ImportError:
 # =============================================================================
 def parse_args():
     parser = argparse.ArgumentParser(description="MIMIC-CXR Dataset")
-    parser.add_argument("--device_id",          type=int, default=1)
+    parser.add_argument("--device_id", type=int, default=1)
 
     # Paths
-    parser.add_argument("--prebuilt_split_dir", type=str,
-                        default='/storage/hjchoi/mimic/split',
-                        help="root of pre-built split dirs (train/validate/test)")
+    parser.add_argument("--root_path", type=str,
+                        default='/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0',
+                        help="Root of original MIMIC-CXR PhysioNet download "
+                             "(contains files/ and mimic-cxr-2.0.0-split.csv)")
+    parser.add_argument("--split_csv", type=str,
+                        default='mimic-cxr-2.0.0-split.csv',
+                        help="Split CSV filename (relative to root_path, or absolute path)")
 
     # Dataset
     parser.add_argument("--split",       type=str, default="train",
@@ -80,12 +94,13 @@ class MIMICCXRDataset(Dataset):
     """
     MIMIC-CXR Map-Style Dataset.
 
-    Scans <prebuilt_split_dir>/<split>/ at init to build an idx-mapped sample
-    list (lightweight path strings only).  Each __getitem__ call loads one
-    DICOM file on demand.
+    Reads the official split CSV to build an idx-mapped sample list at init
+    (lightweight path strings only).  Each __getitem__ call loads one DICOM
+    file on demand.  DICOM files not present on disk are silently skipped,
+    so the dataset works with a partial download.
 
     Args:
-        args : Namespace ? requires prebuilt_split_dir, split, image_size,
+        args : Namespace - requires root_path, split_csv, split, image_size,
                            max_length
     """
     def __init__(self, args):
@@ -95,10 +110,23 @@ class MIMICCXRDataset(Dataset):
         self.image_size = args.image_size
         self.max_length = getattr(args, "max_length", 512)
 
-        self.scan_root = os.path.join(args.prebuilt_split_dir, self.split)
-        if not os.path.isdir(self.scan_root):
+        self.root_path = args.root_path
+        self.files_dir = os.path.join(self.root_path, "files")
+
+        # Resolve split CSV path (absolute or relative to root_path)
+        split_csv = getattr(args, "split_csv", "mimic-cxr-2.0.0-split.csv")
+        if os.path.isabs(split_csv):
+            self.split_csv = split_csv
+        else:
+            self.split_csv = os.path.join(self.root_path, split_csv)
+
+        if not os.path.isfile(self.split_csv):
             raise FileNotFoundError(
-                f"[MIMICCXRDataset] split dir not found: {self.scan_root}"
+                f"[MIMICCXRDataset] split CSV not found: {self.split_csv}"
+            )
+        if not os.path.isdir(self.files_dir):
+            raise FileNotFoundError(
+                f"[MIMICCXRDataset] files/ directory not found: {self.files_dir}"
             )
 
         self.transform = transforms.Compose([
@@ -121,7 +149,7 @@ class MIMICCXRDataset(Dataset):
         """
         Returns:
             image  : Tensor [1, H, W]  normalised to [-1, 1]
-            report : str  ? "FINDINGS: <...> IMPRESSION: <...>"
+            report : str  - "FINDINGS: <...> IMPRESSION: <...>"
         """
         meta = self.samples[idx]
 
@@ -140,37 +168,43 @@ class MIMICCXRDataset(Dataset):
 
     def _build_index(self) -> list:
         """
-        Walk scan_root and collect (dcm_path, report_path) for every .dcm file.
-        Structure: <scan_root>/p1X/pXXXXXXXX/sYYYYYYYY/*.dcm
+        Read the split CSV, construct DICOM and report paths, and keep only
+        rows whose DICOM file exists on disk.
         """
-        samples = []
+        df = pd.read_csv(self.split_csv)
 
-        for prefix in sorted(os.listdir(self.scan_root)):
-            prefix_dir = os.path.join(self.scan_root, prefix)
-            if not os.path.isdir(prefix_dir) or not prefix.startswith("p"):
+        if self.split:
+            df = df[df["split"] == self.split].reset_index(drop=True)
+
+        samples = []
+        missing = 0
+
+        for _, row in df.iterrows():
+            subject_id = int(row["subject_id"])
+            study_id   = int(row["study_id"])
+            dicom_id   = str(row["dicom_id"]).strip()
+
+            pid_str    = f"p{subject_id}"
+            prefix     = pid_str[:3]            # e.g. "p10"
+
+            patient_dir = os.path.join(self.files_dir, prefix, pid_str)
+            study_dir   = os.path.join(patient_dir, f"s{study_id}")
+            dcm_path    = os.path.join(study_dir, f"{dicom_id}.dcm")
+            report_path = os.path.join(patient_dir, f"s{study_id}.txt")
+
+            if not os.path.exists(dcm_path):
+                missing += 1
                 continue
 
-            for patient_id in sorted(os.listdir(prefix_dir)):
-                patient_dir = os.path.join(prefix_dir, patient_id)
-                if not os.path.isdir(patient_dir):
-                    continue
+            samples.append({
+                "dcm_path"   : dcm_path,
+                "report_path": report_path,
+                "study_id"   : f"s{study_id}",
+                "patient_id" : pid_str,
+            })
 
-                for study in sorted(os.listdir(patient_dir)):
-                    study_dir = os.path.join(patient_dir, study)
-                    if not os.path.isdir(study_dir) or not study.startswith("s"):
-                        continue
-
-                    report_path = os.path.join(patient_dir, f"{study}.txt")
-
-                    for fname in sorted(os.listdir(study_dir)):
-                        if not fname.endswith(".dcm"):
-                            continue
-                        samples.append({
-                            "dcm_path"   : os.path.join(study_dir, fname),
-                            "report_path": report_path,
-                            "study_id"   : study,
-                            "patient_id" : patient_id,
-                        })
+        if missing:
+            print(f"[MIMICCXRDataset] {missing} DICOM files not yet downloaded, skipped.")
 
         return samples
 
@@ -236,7 +270,7 @@ class MIMICCXRDataset(Dataset):
 
 
 # =============================================================================
-# dataset_loader  ?  DataLoader with BioBERT collate (used by training scripts)
+# dataset_loader  -  DataLoader with BioBERT collate (used by training scripts)
 # =============================================================================
 
 def dataset_loader(

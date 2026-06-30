@@ -1,17 +1,23 @@
 """
-Diffusion/LDM_dp_finetune.py  ?  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
+LDM_dp_finetune.py  -  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
 =========================================================================
 Fine-tunes only the cross-attention (SpatialTransformer) blocks of a
-pre-trained LatentDiffusion model under (¥å, ¥ä)-differential privacy using
-Opacus DP-SGD.
+pre-trained LatentDiffusion model under (epsilon, delta)-differential privacy
+using Opacus DP-SGD.
 
-Expected directory layout (produced by Data/mimic_cxr.py prepare_split_dirs):
+Reads directly from the original MIMIC-CXR PhysioNet directory using the
+official split CSV (mimic-cxr-2.0.0-split.csv).  No pre-built split
+directories are required.
+
+Expected directory layout:
     <root_path>/
-    ¦§¦¡¦¡ train/
-    ¦¢   ¦¦¦¡¦¡ p10/ ¦¦¦¡¦¡ p10000032/ ¦¦¦¡¦¡ s50414267/ ¦¦¦¡¦¡ <id>.dcm
-    ¦¢                            ¦¦¦¡¦¡ s50414267.txt
-    ¦§¦¡¦¡ validate/
-    ¦¦¦¡¦¡ test/
+    ├── files/
+    │   ├── p10/ ... p19/
+    │   │   └── p<subject_id>/
+    │   │       ├── s<study_id>/
+    │   │       │   └── <dicom_id>.dcm
+    │   │       └── s<study_id>.txt
+    └── mimic-cxr-2.0.0-split.csv
 
 Key design notes:
   1. BioBERT lives INSIDE LatentDiffusionDP (not in collate_fn) so Opacus
@@ -83,15 +89,17 @@ except ImportError:
 # =============================================================================
 
 def _make_dataset(root_path: str, split: str,
+                  split_csv: str = 'mimic-cxr-2.0.0-split.csv',
                   image_size: int = 256,
                   max_length: int = 512) -> MIMICCXRDataset:
     """
     Construct a MIMICCXRDataset for the given split.
 
     Args:
-        root_path  : root containing train/ validate/ test/ subdirectories
-                     e.g. /storage/hjchoi/mimic/split
+        root_path  : root of original MIMIC-CXR PhysioNet download
+                     (contains files/ and mimic-cxr-2.0.0-split.csv)
         split      : one of 'train', 'validate', 'test'
+        split_csv  : CSV filename relative to root_path (or absolute path)
         image_size : resize target
         max_length : max report character length
     """
@@ -100,10 +108,11 @@ def _make_dataset(root_path: str, split: str,
         raise ValueError(f"split must be one of {valid_splits}, got '{split}'")
 
     ds_args = argparse.Namespace(
-        prebuilt_split_dir = root_path,
-        split              = split,
-        image_size         = image_size,
-        max_length         = max_length,
+        root_path  = root_path,
+        split_csv  = split_csv,
+        split      = split,
+        image_size = image_size,
+        max_length = max_length,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -122,9 +131,12 @@ def parse_args():
     parser.add_argument('--device_id', default='0',
                         help='GPU id (e.g. "0", "1")')
 
-    # DATA (pre-split MIMIC-CXR) -----------------------------------------------
-    parser.add_argument('--root_path', default='/storage/hjchoi/mimic/split',
-                        help='Root containing train/ validate/ test/ subdirectories')
+    # DATA (original MIMIC-CXR) ------------------------------------------------
+    parser.add_argument('--root_path', default='/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0',
+                        help='Root of original MIMIC-CXR PhysioNet download '
+                             '(contains files/ and mimic-cxr-2.0.0-split.csv)')
+    parser.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv',
+                        help='Split CSV filename (relative to root_path, or absolute path)')
     parser.add_argument('--split',     default='train',
                         choices=['train', 'validate', 'test'],
                         help='Which split to use as training data')
@@ -457,21 +469,23 @@ def main():
     device = torch.device(
         f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu'
     )
-    print(f'Device : {device}')
-    print(f'Split root : {args.root_path}')
+    print(f'Device    : {device}')
+    print(f'Root path : {args.root_path}')
+    print(f'Split CSV : {args.split_csv}')
 
     # ¦¡¦¡ Datasets ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     train_dataset = _make_dataset(
         root_path  = args.root_path,
         split      = args.split,
+        split_csv  = args.split_csv,
         image_size = args.image_size,
         max_length = args.max_length,
     )
     n_train = len(train_dataset)
     if n_train == 0:
         raise RuntimeError(
-            f"No samples found in {os.path.join(args.root_path, args.split)}. "
-            "Run Data/mimic_cxr.py --make_split_dir first."
+            f"No samples found for split='{args.split}' in {args.root_path}. "
+            "Check --root_path and --split_csv are correct."
         )
 
     val_dataset = None
@@ -480,6 +494,7 @@ def main():
             val_dataset = _make_dataset(
                 root_path  = args.root_path,
                 split      = 'validate',
+                split_csv  = args.split_csv,
                 image_size = args.image_size,
                 max_length = args.max_length,
             )
