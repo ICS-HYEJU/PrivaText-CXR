@@ -1,47 +1,6 @@
 """
 Diffusion/LDM_dp_finetune.py  —  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
 =========================================================================
-Fine-tunes only the cross-attention (SpatialTransformer) blocks of a
-pre-trained LatentDiffusion model under (ε, δ)-differential privacy using
-Opacus DP-SGD.
-
-Expected directory layout (produced by Data/mimic_cxr.py prepare_split_dirs):
-    <root_path>/
-    ├── train/
-    │   └── p10/ └── p10000032/ └── s50414267/ └── <id>.dcm
-    │                            └── s50414267.txt
-    ├── validate/
-    └── test/
-
-Key design notes:
-  1. BioBERT lives INSIDE LatentDiffusionDP (not in collate_fn) so Opacus
-     computes per-sample grads for its projection layer.
-  2. Loader yields raw strings; embedding happens inside training_step_dp.
-  3. Only SpatialTransformer blocks (+ optionally BioBERT proj) are trained;
-     VAE is fully frozen.
-  4. Gradient checkpointing is disabled (incompatible with Opacus hooks).
-  5. scale_factor initialised BEFORE make_private() to avoid buffer issues.
-  6. Checkpoint save/load uses model._module.state_dict() (GradSampleModule).
-  7. Gradient accumulation via VirtualBatch chunk splitting:
-       logical_batch → n_chunks = ceil(B / physical_batch) physical chunks
-     Each chunk accumulates per-sample grads; one optimizer.step() per logical batch.
-  8. Model parallelism (--offload_device_id):
-       frozen VAE + BioBERT → offload GPU
-       trainable UNet       → main GPU (Opacus lives here)
-
-Usage:
-    python Diffusion/LDM_dp_finetune.py \\
-        --pretrained_ckpt ./checkpoints/ldm_epoch0100.pt \\
-        --root_path /storage/hjchoi/mimic/split \\
-        --split train \\
-        --target_epsilon 10.0 \\
-        --target_delta 1e-5 \\
-        --max_grad_norm 1.0 \\
-        --logical_batch 256 \\
-        --physical_batch 8 \\
-        --epochs 30 \\
-        --lr 1e-4 \\
-        --save_dir ./checkpoints_dp
 """
 
 import os
@@ -57,8 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_this_dir  = os.path.dirname(os.path.abspath(__file__))       # Diffusion/
-_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))  # PrivaText-CXR/
+_this_dir  = os.path.dirname(os.path.abspath(__file__))
+_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))
 
 for _d in [_proj_root, _this_dir]:
     if _d not in sys.path:
@@ -69,7 +28,7 @@ from Model.Diffusion.UNetmodel import UNetModel
 from Model.VAE.Autoencoder     import VAE
 from Model.attention_module_dp import disable_checkpointing
 
-from Data.mimic_cxr import MIMICCXRDataset                    # Data/mimic_cxr.py
+from Data.mimic_cxr import MIMICCXRDataset
 from privacy.privacy_analysis import (
     compute_noise_multiplier,
     print_privacy_summary,
@@ -88,16 +47,6 @@ except ImportError:
 def _make_dataset(root_path: str, split: str,
                   image_size: int = 256,
                   max_length: int = 512) -> MIMICCXRDataset:
-    """
-    Construct a MIMICCXRDataset for the given split.
-
-    Args:
-        root_path  : root containing train/ validate/ test/ subdirectories
-                     e.g. /storage/hjchoi/mimic/split
-        split      : one of 'train', 'validate', 'test'
-        image_size : resize target
-        max_length : max report character length
-    """
     valid_splits = ('train', 'validate', 'test')
     if split not in valid_splits:
         raise ValueError(f"split must be one of {valid_splits}, got '{split}'")
@@ -121,33 +70,24 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # DEVICE -------------------------------------------------------------------
     parser.add_argument('--device_id', default='1',
-                        help='Main GPU id for UNet + Opacus (e.g. "0", "1")')
+                        help='Main GPU id for UNet + Opacus')
     parser.add_argument('--offload_device_id', default=None,
                         help='GPU id for frozen VAE + BioBERT. '
-                             'None = same as --device_id (single-GPU mode). '
-                             'Set to a different GPU to enable model parallelism '
-                             '(e.g. --device_id 1 --offload_device_id 0).')
+                             'None = same as --device_id (single-GPU). '
+                             'Different GPU = model parallelism.')
 
-    # DATA (pre-split MIMIC-CXR) -----------------------------------------------
-    parser.add_argument('--root_path', default='/storage/hjchoi/mimic/split',
-                        help='Root containing train/ validate/ test/ subdirectories')
+    parser.add_argument('--root_path', default='/storage/hjchoi/mimic/split')
     parser.add_argument('--split',     default='train',
-                        choices=['train', 'validate', 'test'],
-                        help='Which split to use as training data')
+                        choices=['train', 'validate', 'test'])
     parser.add_argument('--do_validation', default=True,
-                        type=lambda x: x.lower() != 'false',
-                        help='Run validation loop after each epoch')
-    parser.add_argument('--val_batches', default=-1, type=int,
-                        help='Max validation batches per epoch (-1 = all)')
+                        type=lambda x: x.lower() != 'false')
+    parser.add_argument('--val_batches', default=-1, type=int)
     parser.add_argument('--image_size',  default=256,  type=int)
-    parser.add_argument('--max_length',  default=512,  type=int,
-                        help='Report text character limit')
+    parser.add_argument('--max_length',  default=512,  type=int)
     parser.add_argument('--num_workers', default=0,    type=int)
     parser.add_argument('--pin_memory',  default=False)
 
-    # VAE: Encoder / Decoder ---------------------------------------------------
     parser.add_argument('--vae_img_size',         default=256,           type=int)
     parser.add_argument('--vae_in_ch',            default=1,             type=int)
     parser.add_argument('--vae_ch',               default=128,           type=int)
@@ -164,13 +104,10 @@ def parse_args():
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--vae_out_ch',           default=1,             type=int)
     parser.add_argument('--vae_ckpt',
-                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/2026-03-31_10-58-39/vae_ep0070.pt',
-                        help='Path to pretrained VAE checkpoint (.pt / .pth)')
+                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/2026-03-31_10-58-39/vae_ep0070.pt')
     parser.add_argument('--verbose', default=False)
 
-    # UNet ---------------------------------------------------------------------
-    parser.add_argument('--unet_image_size',         default=16,         type=int,
-                        help='Latent spatial size after VAE downsampling')
+    parser.add_argument('--unet_image_size',         default=16,         type=int)
     parser.add_argument('--unet_in_ch',              default=1,          type=int)
     parser.add_argument('--unet_out_ch',             default=1,          type=int)
     parser.add_argument('--unet_ch',                 default=128,        type=int)
@@ -200,66 +137,37 @@ def parse_args():
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--conv_dims',   default=2, type=int, choices=[1, 2, 3])
 
-    # Diffusion / LDM ----------------------------------------------------------
     parser.add_argument('--timesteps',     default=1000,  type=int)
     parser.add_argument('--beta_schedule', default='linear')
     parser.add_argument('--scale_factor',  default=1.0,   type=float)
-    parser.add_argument('--scale_by_std',  default=False, action='store_true',
-                        help='Auto-compute scale_factor from first-batch latent std')
+    parser.add_argument('--scale_by_std',  default=False, action='store_true')
     parser.add_argument('--use_ema',       default=False,
-                        type=lambda x: x.lower() != 'false',
-                        help='EMA disabled by default for DP fine-tuning')
+                        type=lambda x: x.lower() != 'false')
 
-    # Pretrained LDM checkpoint ------------------------------------------------
     parser.add_argument('--pretrained_ckpt',
-                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/ldm/ldm_epoch0100.pt',
-                        help='Pretrained LDM checkpoint to fine-tune from')
+                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/ldm/ldm_epoch0100.pt')
 
-    # BioBERT ------------------------------------------------------------------
-    parser.add_argument('--biobert_path', default='/storage/hjchoi',
-                        help='HuggingFace model ID or local path for BioBERT')
+    parser.add_argument('--biobert_path', default='/storage/hjchoi')
 
-    # DP-SGD -------------------------------------------------------------------
-    parser.add_argument('--use_dp', default=True,
-                        help='Enable DP-SGD. Set --use_dp false for non-DP baseline.')
-    parser.add_argument('--target_epsilon',   default=10.0,  type=float,
-                        help='Target eps privacy budget')
-    parser.add_argument('--target_delta',     default=1e-5,  type=float,
-                        help='Target delta')
-    parser.add_argument('--max_grad_norm',    default=0.001,   type=float,
-                        help='Per-sample gradient clipping norm C')
-    parser.add_argument('--noise_multiplier', default=None,  type=float,
-                        help='Override auto-computed σ (skips compute_noise_multiplier)')
-    parser.add_argument('--logical_batch',    default=256,   type=int,
-                        help='Logical batch size for privacy accounting')
-    parser.add_argument('--physical_batch',   default=1,     type=int,
-                        help='Physical batch size that fits in GPU memory')
-    parser.add_argument('--ablation_blocks',  default=-1,    type=int,
-                        help='-1 = all SpatialTransformer blocks; '
-                             'N = only last N blocks (DP-LDM ablation study)')
-    parser.add_argument('--finetune_biobert', default=False,
-                        help='Unfreeze(True)/freeze(False) BioBERT projection layer under DP')
+    parser.add_argument('--use_dp', default=True)
+    parser.add_argument('--target_epsilon',   default=10.0,  type=float)
+    parser.add_argument('--target_delta',     default=1e-5,  type=float)
+    parser.add_argument('--max_grad_norm',    default=0.001, type=float)
+    parser.add_argument('--noise_multiplier', default=None,  type=float)
+    parser.add_argument('--logical_batch',    default=256,   type=int)
+    parser.add_argument('--physical_batch',   default=1,     type=int)
+    parser.add_argument('--ablation_blocks',  default=-1,    type=int)
+    parser.add_argument('--finetune_biobert', default=False)
 
-    # Training -----------------------------------------------------------------
     parser.add_argument('--epochs',       default=10,    type=int)
-    parser.add_argument('--lr',           default=2e-5,  type=float,
-                        help='Peak learning rate. DP-SGD typically needs 2x-5x lower '
-                             'than non-private training (e.g. non-DP: 1e-4 → DP: 2e-5~5e-5)')
-    parser.add_argument('--warmup_steps', default=500,   type=int,
-                        help='Linear warmup steps for LR scheduler (0 = disabled)')
+    parser.add_argument('--lr',           default=2e-5,  type=float)
+    parser.add_argument('--warmup_steps', default=500,   type=int)
     parser.add_argument('--scheduler_type', default='linear_warmup',
-                        choices=['cosine_warmup', 'linear_warmup', 'none'],
-                        help='LR scheduler: cosine_warmup = warmup + cosine decay, '
-                             'linear_warmup = warmup + linear decay, '
-                             'none = constant LR')
-    # Save ----------------------------------------------------------------------
+                        choices=['cosine_warmup', 'linear_warmup', 'none'])
     parser.add_argument('--save_dir',    default='./finetune_dp')
-    parser.add_argument('--save_every',  default=5,     type=int,
-                        help='Save DP checkpoint every N epochs')
-    parser.add_argument('--log_every',   default=50,    type=int,
-                        help='Print training loss every N logical steps')
-    parser.add_argument('--resume_ckpt', default=None,
-                        help='DP checkpoint to resume from (saved by this script)')
+    parser.add_argument('--save_every',  default=5,     type=int)
+    parser.add_argument('--log_every',   default=50,    type=int)
+    parser.add_argument('--resume_ckpt', default=None)
 
     return parser.parse_args()
 
@@ -311,7 +219,7 @@ def build_unet(args) -> UNetModel:
         resblock_updown        = args.resblock_updown,
         num_classes            = args.num_classes,
         n_embed                = args.n_embed,
-        use_checkpoint         = False,     # must be False for Opacus
+        use_checkpoint         = False,
         use_fp16               = args.use_fp16,
         write_json             = args.write_json,
     )
@@ -344,11 +252,10 @@ def _load_vae_ckpt(vae: VAE, ckpt_path: str, device):
 
 
 # =============================================================================
-# DataLoaders  (raw strings — NO pre-embedding, BioBERT runs inside model)
+# DataLoaders
 # =============================================================================
 
 def _raw_collate_fn(samples):
-    """Collate into {'image': Tensor[B,1,H,W], 'reports': list[str]}."""
     images, reports = zip(*samples)
     return {
         'image'  : torch.stack(images),
@@ -356,15 +263,7 @@ def _raw_collate_fn(samples):
     }
 
 
-def build_dp_loader(dataset: Dataset, logical_batch: int,
-                    num_workers: int = 0, pin_memory: bool = False) -> DataLoader:
-    """
-    Training DataLoader passed to Opacus make_private().
-
-    batch_size = logical_batch (e.g. 256) so Opacus Poisson-samples at
-    q = logical_batch / N.  This must match the q used in compute_noise_multiplier.
-    Physical splitting into smaller GPU-sized chunks is done in the training loop.
-    """
+def build_dp_loader(dataset, logical_batch, num_workers=0, pin_memory=False):
     return DataLoader(
         dataset,
         batch_size  = logical_batch,
@@ -376,9 +275,7 @@ def build_dp_loader(dataset: Dataset, logical_batch: int,
     )
 
 
-def build_val_loader(dataset: Dataset, batch_size: int,
-                     num_workers: int = 0) -> DataLoader:
-    """Validation DataLoader (no DP, shuffle=False, no drop_last)."""
+def build_val_loader(dataset, batch_size, num_workers=0):
     return DataLoader(
         dataset,
         batch_size  = batch_size,
@@ -395,7 +292,7 @@ def build_val_loader(dataset: Dataset, batch_size: int,
 # =============================================================================
 
 @torch.no_grad()
-def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> float:
+def evaluate(ldm, val_loader, device, max_batches=-1):
     inner = ldm._module if hasattr(ldm, '_module') else ldm
     inner.eval()
 
@@ -412,7 +309,7 @@ def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> floa
 
 
 # =============================================================================
-# Checkpoint helpers  (GradSampleModule-aware)
+# Checkpoint helpers
 # =============================================================================
 
 def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
@@ -445,22 +342,19 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
     return ckpt.get('epoch', 0), ckpt.get('global_step', 0)
 
 
-# =============================================================================
-# LR Scheduler
-# =============================================================================
-
 def _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=False):
     """
-    After offloading VAE/BioBERT to offload_device, ensure that all LDM-level
-    buffers (DDPM schedule tensors: sqrt_alphas_cumprod, betas, etc.) remain on
-    the main device.  VAE and BioBERT buffers are intentionally excluded.
+    Ensure LDM-level buffers (sqrt_alphas_cumprod, betas, …) stay on the main
+    device while VAE/BioBERT buffers remain on offload_device.
+    Recognises Opacus's '_module.' prefix when the model is GradSampleModule-wrapped.
     """
-    offload_prefixes = ('first_stage_model.', 'embedder.',
-                        '_module.first_stage_model.', '_module.embedder.')
-    moved, kept = [], []
+    offload_prefixes = (
+        'first_stage_model.', 'embedder.',
+        '_module.first_stage_model.', '_module.embedder.',
+    )
+    moved = []
     for name, buf in ldm.named_buffers():
         if any(name.startswith(p) for p in offload_prefixes):
-            kept.append((name, buf.device))
             continue
         if buf.device != device:
             buf.data = buf.data.to(device)
@@ -471,8 +365,12 @@ def _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=False):
             print(f'              - {n}')
 
 
-def build_scheduler(optimizer, warmup_steps: int, total_steps: int,
-                    scheduler_type: str = 'cosine_warmup'):
+# =============================================================================
+# LR Scheduler
+# =============================================================================
+
+def build_scheduler(optimizer, warmup_steps, total_steps,
+                    scheduler_type='cosine_warmup'):
     from torch.optim.lr_scheduler import LambdaLR
 
     def _cosine(step):
@@ -500,12 +398,8 @@ def build_scheduler(optimizer, warmup_steps: int, total_steps: int,
 def main():
     args = parse_args()
 
-    # ── Device ────────────────────────────────────────────────────────────────
+    # ── Devices ───────────────────────────────────────────────────────────────
     device = torch.device(f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu')
-
-    # offload_device: where frozen VAE + BioBERT live.
-    # When --offload_device_id is set, frozen models go to that GPU, freeing
-    # the main GPU for the UNet + Opacus per-sample gradient buffers.
     if args.offload_device_id is not None and torch.cuda.is_available():
         offload_device = torch.device(f'cuda:{args.offload_device_id}')
     else:
@@ -546,7 +440,7 @@ def main():
             print(f'[Validation] WARNING: {e}  — validation disabled')
             val_dataset = None
 
-    # ── BioBERT Embedder ──────────────────────────────────────────────────────
+    # ── BioBERT Embedder → offload_device ─────────────────────────────────────
     assert BioBERTEmbedder is not None, (
         'BioBERTEmbedder could not be imported. '
         'Check Modules/BioBERT_embedder.py is accessible.'
@@ -557,7 +451,7 @@ def main():
     ).to(offload_device)
     print(f'[BioBERT] loaded: {args.biobert_path}  → {offload_device}')
 
-    # ── VAE (always frozen) ───────────────────────────────────────────────────
+    # ── VAE → offload_device (always frozen) ──────────────────────────────────
     vae = build_vae(args).to(offload_device)
     if args.vae_ckpt:
         print(f'[VAE] ckpt loading: {args.vae_ckpt}')
@@ -569,13 +463,11 @@ def main():
         p.requires_grad = False
     print(f'[VAE] frozen  → {offload_device}')
 
-    # ── UNet ──────────────────────────────────────────────────────────────────
+    # ── UNet → main device ────────────────────────────────────────────────────
     unet = build_unet(args).to(device)
     print(f'[UNet] params: {sum(p.numel() for p in unet.parameters()):,}  → {device}')
 
     # ── LatentDiffusionDP ─────────────────────────────────────────────────────
-    # Build with device=device (UNet's GPU). VAE and BioBERT are already on
-    # offload_device and must NOT be moved by the subsequent .to(device) call.
     ldm = LatentDiffusionDP(
         unet              = unet,
         first_stage_model = vae,
@@ -594,23 +486,17 @@ def main():
         device            = device,
         use_dp            = args.use_dp,
     )
-    # Move LDM to device. This also moves VAE/BioBERT submodules if they share
-    # the same device; if they are on offload_device, move them back after.
     ldm = ldm.to(device)
     if model_parallel:
         ldm.first_stage_model.to(offload_device)
         ldm.embedder.to(offload_device)
-        # DDPM schedule buffers (sqrt_alphas_cumprod, betas, …) must stay on
-        # the main device after the above .to() calls.
         _pin_ldm_buffers_to_device(ldm, device, offload_device)
 
-    # Tell get_input_dp which device the frozen submodels live on.
     ldm.offload_device = offload_device
 
     if args.pretrained_ckpt:
         print(f'[LDM_dp] loading pretrained: {args.pretrained_ckpt}')
         ldm.init_from_ckpt(args.pretrained_ckpt)
-        # Re-pin after checkpoint load: load_state_dict may silently move tensors.
         if model_parallel:
             ldm.first_stage_model.to(offload_device)
             ldm.embedder.to(offload_device)
@@ -641,7 +527,6 @@ def main():
           f'sample_rate=1/{logical_steps_per_epoch}={sample_rate:.6f}  '
           f'physical_batch={args.physical_batch}  chunks/logical≈{approx_chunks}')
 
-    # ── scale_factor init BEFORE make_private ─────────────────────────────────
     if args.scale_by_std:
         print('[LDM_dp] computing scale_factor from first batch ...')
         first_raw = next(iter(base_loader))
@@ -651,18 +536,13 @@ def main():
         }
         ldm.init_scale_factor(first_chunk, is_first_batch=True)
 
-    # ── Selective parameter unfreeze ──────────────────────────────────────────
     attn_params = ldm.configure_dp_params(
         ablation_blocks  = args.ablation_blocks,
         finetune_biobert = args.finetune_biobert,
     )
     if not attn_params:
-        raise RuntimeError(
-            'configure_dp_params returned empty param list. '
-            'Check UNet has SpatialTransformer blocks and --use_spatial_transformer=True.'
-        )
+        raise RuntimeError('configure_dp_params returned empty param list.')
 
-    # ── Noise multiplier ──────────────────────────────────────────────────────
     if args.noise_multiplier is not None:
         sigma = args.noise_multiplier
         print(f'[DP] using provided noise_multiplier σ={sigma:.6f}')
@@ -683,7 +563,6 @@ def main():
         target_delta     = args.target_delta,
     )
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(attn_params, lr=args.lr)
 
     # ── Opacus ────────────────────────────────────────────────────────────────
@@ -708,30 +587,28 @@ def main():
     )
     print(f'[Opacus] GradSampleModule ready  sigma={sigma:.6f}  C(clip)={args.max_grad_norm}')
 
-    # Re-pin after make_private: Opacus wraps the module in GradSampleModule
-    # and may shuffle buffers; also re-pin VAE/BioBERT to offload_device.
+    # ── Re-pin after Opacus wrapping: GradSampleModule can shuffle buffers ───
     if model_parallel:
         inner = ldm._module if hasattr(ldm, '_module') else ldm
         inner.first_stage_model.to(offload_device)
         inner.embedder.to(offload_device)
+        # offload_device attribute is on the inner module; re-set after wrapping.
+        inner.offload_device = offload_device
         _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=True)
-        # Sanity check: q_sample buffers must live on `device`.
         sa = inner.sqrt_alphas_cumprod
         print(f'[pin_buffers] sqrt_alphas_cumprod.device = {sa.device} '
               f'(expected {device})')
         assert sa.device == device, (
             f'sqrt_alphas_cumprod on {sa.device}, expected {device}. '
-            f'Check that ldm.to(device) ran before offload.'
+            f'Buffer pinning failed.'
         )
 
-    # ── LR Scheduler ──────────────────────────────────────────────────────────
     scheduler = (
         build_scheduler(optimizer, args.warmup_steps, total_logical_steps,
                         args.scheduler_type)
         if args.warmup_steps > 0 and args.scheduler_type != 'none' else None
     )
 
-    # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 0
     global_step = 0
     if args.resume_ckpt:
@@ -757,8 +634,8 @@ def main():
         t0           = time.time()
 
         for logical_batch in dp_loader:
-            images  = logical_batch['image'].to(device)   # [B, 1, H, W]
-            reports = logical_batch['reports']             # list[str], len = B
+            images  = logical_batch['image'].to(device)
+            reports = logical_batch['reports']
 
             B        = images.shape[0]
             n_chunks = max(1, math.ceil(B / args.physical_batch))
@@ -767,7 +644,6 @@ def main():
             step_loss      = 0.0
             last_loss_dict = {}
 
-            # ── VirtualBatch: split logical batch into physical chunks ─────────
             for i in range(n_chunks):
                 start = i * args.physical_batch
                 end   = min(start + args.physical_batch, B)
@@ -780,7 +656,6 @@ def main():
                 step_loss     += loss.item() / n_chunks
                 last_loss_dict = loss_dict
 
-            # ── One DP step: clip accumulated per-sample grads, add noise ──────
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -795,7 +670,6 @@ def main():
                 print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
                       f'{info}  ε={eps_now:.4f}')
 
-        # ── Epoch summary ─────────────────────────────────────────────────────
         elapsed   = time.time() - t0
         eps_now   = privacy_engine.get_epsilon(args.target_delta)
         mean_loss = float(np.mean(epoch_losses)) if epoch_losses else float('nan')
@@ -827,7 +701,6 @@ def main():
                 target_delta   = args.target_delta,
             )
 
-    # ── Final checkpoint ──────────────────────────────────────────────────────
     final_path = os.path.join(args.save_dir, 'ldm_dp_final.pt')
     save_dp_checkpoint(
         save_path      = final_path,

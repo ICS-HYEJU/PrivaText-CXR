@@ -1,5 +1,5 @@
 """
-Diffusion/LDM_dp.py  ?  LatentDiffusionDP for DP-SGD Fine-Tuning
+Diffusion/LDM_dp.py  —  LatentDiffusionDP for DP-SGD Fine-Tuning
 =================================================================
 Extends LatentDiffusion (LDM.py) with DP-specific additions only:
 
@@ -26,7 +26,13 @@ Extends LatentDiffusion (LDM.py) with DP-specific additions only:
    Broader checkpoint key unwrapping than the parent version
    ('state_dict', 'model', 'model_state_dict') to handle varied ckpt formats.
 
-All other methods (encode_first_stage, p_losses, training_step, forward, ¡¦)
+5. Model parallelism (offload_device attribute)
+   ----------------------------------------------
+   When `self.offload_device` is set to a different GPU than `self.device`,
+   `get_input_dp` runs VAE encoding + BioBERT on the offload device and
+   ships z, c back to the main device for the UNet forward pass.
+
+All other methods (encode_first_stage, p_losses, training_step, forward, …)
 are inherited unchanged from LatentDiffusion.
 """
 
@@ -37,15 +43,15 @@ import inspect
 import torch
 import torch.nn as nn
 
-# ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+# ── Path setup ────────────────────────────────────────────────────────────────
 _this_dir  = os.path.dirname(os.path.abspath(__file__))
 _model_dir = os.path.join(_this_dir, '..', 'Model')
 for _d in [_model_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-from Model.Diffusion.LDM              import LatentDiffusion                 # noqa: E402
-from Model.attention_module_dp import SpatialTransformer              # noqa: E402  isinstance check
+from Model.Diffusion.LDM       import LatentDiffusion          # noqa: E402
+from Model.attention_module_dp import SpatialTransformer       # noqa: E402  isinstance check
 
 
 # =============================================================================
@@ -128,25 +134,6 @@ class LatentDiffusionDP(LatentDiffusion):
         ablation_blocks : int  = -1,
         finetune_biobert: bool = True,
     ) -> list:
-        """
-        Freeze everything, then selectively unfreeze for DP training.
-
-        Step 1 ? Freeze all UNet parameters.
-        Step 2 ? Unfreeze SpatialTransformer blocks (cross-attention layers).
-                 ablation_blocks=-1  : all blocks
-                 ablation_blocks=N   : only blocks with index >= N-1
-                 (mirrors DP-LDM ablation study logic)
-        Step 3 ? Optionally unfreeze BioBERT proj (linear layer).
-        Step 4 ? Return attn_params list to pass to AdamW.
-
-        Args:
-            ablation_blocks  : -1 = train all SpatialTransformer blocks;
-                                N = train only blocks[N-1:]  (last N blocks)
-            finetune_biobert : True = unfreeze self.embedder.proj (linear layer)
-
-        Returns:
-            list[nn.Parameter] ? parameters to give to the optimizer
-        """
         attn_params = []
 
         # 1. Freeze everything
@@ -158,7 +145,7 @@ class LatentDiffusionDP(LatentDiffusion):
         # 2. Selectively unfreeze SpatialTransformer blocks in UNet
         spatial_modules = [
             m for m in self.model.modules()
-            if isinstance(m, SpatialTransformer)
+            if type(m).__name__ == 'SpatialTransformer'
         ]
         for i, m in enumerate(spatial_modules):
             m.requires_grad_(True)
@@ -194,24 +181,22 @@ class LatentDiffusionDP(LatentDiffusion):
 
         batch format:
             {
-                'image'  : Tensor [B, 1, H, W]  ? grayscale CXR
-                'reports': list[str]             ? raw report text per sample
+                'image'  : Tensor [B, 1, H, W]
+                'reports': list[str]
             }
 
         Returns:
-            z : Tensor [B, z_ch, h, w]       ? scaled latent (no grad)
-            c : Tensor [B, seq_len, out_dim] ? BioBERT context
+            z, c — both on self.device (UNet GPU).
         """
         # offload_device: GPU where frozen VAE + BioBERT live.
         # Equals self.device in single-GPU mode; differs in model-parallel mode.
         offload_dev = getattr(self, 'offload_device', self.device)
 
         # Latent: frozen VAE on offload_device, no gradient.
-        # z is moved to self.device (UNet GPU) before returning.
+        # z must end up on self.device (UNet GPU) for the diffusion forward pass.
         x = self._get_raw_image(batch).to(offload_dev)
-        with torch.no_grad():
-            posterior = self.first_stage_model.encode(x)
-            z = self.get_first_stage_encoding(posterior)   # scale_factor applied
+        posterior = self.encode_first_stage(x)
+        z = self.scale_factor * posterior.sample().detach()
         z = z.to(self.device)
 
         # Context: BioBERT on offload_device; c is moved to self.device.
