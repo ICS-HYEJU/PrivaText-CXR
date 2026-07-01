@@ -194,25 +194,37 @@ class LatentDiffusionDP(LatentDiffusion):
 
         batch format:
             {
-                'image'  : Tensor [B, 1, H, W]  ? grayscale CXR
-                'reports': list[str]             ? raw report text per sample
+                'image'  : Tensor [B, 1, H, W]
+                'reports': list[str]
             }
 
+        Model parallelism: if self.offload_device != self.device,
+        - images are sent to offload_device for VAE encoding
+        - z is moved back to self.device for UNet forward pass
+        - c is moved back to self.device after BioBERT embedding
+
         Returns:
-            z : Tensor [B, z_ch, h, w]       ? scaled latent (no grad)
-            c : Tensor [B, seq_len, out_dim] ? BioBERT context
+            z, c  - both on self.device (UNet GPU).
         """
-        # Latent: frozen VAE, no gradient
-        x = self._get_raw_image(batch).to(self.device)
+        # offload_device: GPU where frozen VAE + BioBERT live.
+        # Equals self.device in single-GPU mode; differs in model-parallel mode.
+        offload_dev = getattr(self, 'offload_device', self.device)
+
+        # Latent: frozen VAE on offload_device, no gradient.
+        # z must end up on self.device (UNet GPU) for the diffusion forward pass.
+        x = batch[self.first_stage_key].to(offload_dev)
         with torch.no_grad():
             posterior = self.first_stage_model.encode(x)
-            z = self.get_first_stage_encoding(posterior)   # scale_factor applied
+            z = self.scale_factor * posterior.sample()
+        z = z.detach().to(self.device)
 
-        # Context: gradient flows through proj when unfrozen
+        # Context: BioBERT on offload_device; c is moved to self.device.
+        # Gradient flows through proj layer when finetune_biobert=True.
         assert self.embedder is not None, (
             "embedder is None. Pass a BioBERTEmbedder to LatentDiffusionDP.__init__."
         )
-        c = self.embedder(batch['reports'])    # list[str] ¡æ [B, seq_len, output_dim]
+        c = self.embedder(batch['reports'])    # list[str] -> [B, seq_len, output_dim]
+        c = c.to(self.device)
 
         return z, c
 
