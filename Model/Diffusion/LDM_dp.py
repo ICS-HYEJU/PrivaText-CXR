@@ -158,7 +158,7 @@ class LatentDiffusionDP(LatentDiffusion):
         # 2. Selectively unfreeze SpatialTransformer blocks in UNet
         spatial_modules = [
             m for m in self.model.modules()
-            if isinstance(m, SpatialTransformer)
+            if type(m).__name__ == 'SpatialTransformer'
         ]
         for i, m in enumerate(spatial_modules):
             m.requires_grad_(True)
