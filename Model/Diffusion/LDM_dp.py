@@ -184,6 +184,63 @@ class LatentDiffusionDP(LatentDiffusion):
         return attn_params
 
     # =========================================================================
+    # DP-specific: LoRA parameter configuration
+    # =========================================================================
+
+    def configure_lora_params(
+        self,
+        rank            : int   = 4,
+        alpha           : float = 4.0,
+        dropout         : float = 0.0,
+        finetune_biobert: bool  = True,
+        targets         = None,
+    ) -> list:
+        """
+        Freeze everything, inject LoRA into cross-attention Linear layers, and
+        return ONLY the LoRA (A/B) parameters (+ optionally BioBERT proj) for
+        the optimizer.  This is the LoRA counterpart of configure_dp_params.
+
+        Args:
+            rank             : LoRA rank r
+            alpha            : LoRA scaling numerator (scale = alpha / rank)
+            dropout          : LoRA-branch dropout
+            finetune_biobert : also train self.embedder.proj (full, small layer)
+            targets          : cross-attention attr names to adapt
+                               (default to_q/to_k/to_v/to_out)
+
+        Returns:
+            list[nn.Parameter] – LoRA params (+ BioBERT proj) for AdamW
+        """
+        from Model.lora import (inject_lora_cross_attention, lora_parameters,
+                                DEFAULT_TARGETS)
+        targets = targets or DEFAULT_TARGETS
+
+        # 1. Freeze everything
+        self.first_stage_model.requires_grad_(False)
+        self.model.requires_grad_(False)
+        if self.embedder is not None:
+            self.embedder.requires_grad_(False)
+
+        # 2. Inject LoRA into UNet cross-attention; only A/B are trainable
+        inject_lora_cross_attention(self.model, rank=rank, alpha=alpha,
+                                    dropout=dropout, targets=targets)
+        lora_params = lora_parameters(self.model)
+
+        # 3. BioBERT projection (optional, full-trainable small layer)
+        if finetune_biobert and self.embedder is not None:
+            self.embedder.proj.requires_grad_(True)
+            lora_params.extend(list(self.embedder.proj.parameters()))
+            print(f'[configure_lora_params] BioBERT proj unfrozen '
+                  f'({sum(p.numel() for p in self.embedder.proj.parameters()):,} params)')
+
+        n_trainable = sum(p.numel() for p in lora_params)
+        n_total     = sum(p.numel() for p in self.parameters())
+        print(f'[configure_lora_params] rank={rank}  alpha={alpha}  '
+              f'trainable: {n_trainable:,} / {n_total:,} '
+              f'({100 * n_trainable / max(n_total, 1):.3f}%)')
+        return lora_params
+
+    # =========================================================================
     # DP-specific: training input / step
     # =========================================================================
 
