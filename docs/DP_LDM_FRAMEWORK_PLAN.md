@@ -76,6 +76,23 @@ D_test   : 평가 — 공식 split CSV의 'test'/'validate' 사용 (train과 이
 - 산출 manifest key = `patient_id`(예: `"p10000032"`) → `MIMICCXRDataset(patient_whitelist=...)`
   로 그대로 필터.
 
+**실제 사용 (학습 스크립트에 배선 완료):**
+```bash
+# 1) p10의 앞 300명만 D_search로 분할하는 manifest 생성
+python Data/make_dp_splits.py \
+    --split_csv /storage/.../mimic-cxr-2.0.0-split.csv \
+    --search_prefixes p10 --search_count 300 --out ./dp_splits.json
+
+# 2) 학습이 그 manifest를 읽어 D_search(=p10 300명)만 사용
+#    sample_rate/epsilon 회계도 이 부분집합 크기 기준으로 자동 계산됨
+python LDM_dp_finetune.py --use_lora true \
+    --dp_split_json ./dp_splits.json --dp_split_group search \
+    --pretrained_ckpt pretrained_ldm.pt --root_path /storage/.../2.1.0 ...
+
+# 최종 학습은 --dp_split_group train (p10 나머지 + p11~p19)
+```
+> `--dp_split_json`을 주지 않으면 train split **전체**를 사용(기존 동작).
+
 ---
 
 ## 3. 구현 로드맵

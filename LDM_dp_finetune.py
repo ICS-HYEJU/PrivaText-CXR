@@ -94,31 +94,57 @@ except ImportError:
 # Dataset helper
 # =============================================================================
 
+def _load_patient_whitelist(dp_split_json, group):
+    """
+    Load the patient list for a group ('search'/'train') from a dp_splits.json
+    manifest produced by Data/make_dp_splits.py.  Returns None when no manifest
+    is given (→ use the whole split).
+    """
+    if not dp_split_json:
+        return None
+    import json
+    with open(dp_split_json, 'r', encoding='utf-8') as f:
+        manifest = json.load(f)
+    assignment = manifest.get('assignment', manifest)
+    patients = [p for p, g in assignment.items() if g == group]
+    if not patients:
+        raise ValueError(
+            f"dp_split '{dp_split_json}' has no patients for group='{group}'. "
+            f"Available groups: {sorted(set(assignment.values()))}")
+    print(f"[dp_split] group='{group}'  patients={len(patients)}  "
+          f"(from {dp_split_json})")
+    return patients
+
+
 def _make_dataset(root_path: str, split: str,
                   split_csv: str = 'mimic-cxr-2.0.0-split.csv',
                   image_size: int = 256,
-                  max_length: int = 512) -> MIMICCXRDataset:
+                  max_length: int = 512,
+                  patient_whitelist=None) -> MIMICCXRDataset:
     """
     Construct a MIMICCXRDataset for the given split.
 
     Args:
-        root_path  : root of original MIMIC-CXR PhysioNet download
-                     (contains files/ and mimic-cxr-2.0.0-split.csv)
-        split      : one of 'train', 'validate', 'test'
-        split_csv  : CSV filename relative to root_path (or absolute path)
-        image_size : resize target
-        max_length : max report character length
+        root_path         : root of original MIMIC-CXR PhysioNet download
+                            (contains files/ and mimic-cxr-2.0.0-split.csv)
+        split             : one of 'train', 'validate', 'test'
+        split_csv         : CSV filename relative to root_path (or absolute path)
+        image_size        : resize target
+        max_length        : max report character length
+        patient_whitelist : optional list of patient_ids (e.g. only p10 subset
+                            for D_search); None = use the whole split
     """
     valid_splits = ('train', 'validate', 'test')
     if split not in valid_splits:
         raise ValueError(f"split must be one of {valid_splits}, got '{split}'")
 
     ds_args = argparse.Namespace(
-        root_path  = root_path,
-        split_csv  = split_csv,
-        split      = split,
-        image_size = image_size,
-        max_length = max_length,
+        root_path         = root_path,
+        split_csv         = split_csv,
+        split             = split,
+        image_size        = image_size,
+        max_length        = max_length,
+        patient_whitelist = patient_whitelist,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -150,6 +176,14 @@ def parse_args():
                         help='Split CSV filename (relative to root_path, or absolute path)')
     parser.add_argument('--split',     default='train',
                         choices=['train', 'validate', 'test'])
+    parser.add_argument('--dp_split_json', default=None,
+                        help='dp_splits.json from Data/make_dp_splits.py. When '
+                             'set, only patients assigned to --dp_split_group '
+                             'are used (e.g. the p10 subset for D_search). This '
+                             'isolates the DP privacy budget across search/train.')
+    parser.add_argument('--dp_split_group', default='search',
+                        choices=['search', 'train'],
+                        help='Which group of --dp_split_json to train on')
     parser.add_argument('--do_validation', default=True,
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--val_batches', default=-1, type=int)
@@ -542,12 +576,17 @@ def main():
     print(f'Split CSV : {args.split_csv}')
 
     # ── Datasets ──────────────────────────────────────────────────────────────
+    # DP budget isolation: restrict to the patient subset (e.g. p10 part) for
+    # D_search / D_train when a dp_splits.json manifest is provided.
+    train_whitelist = _load_patient_whitelist(args.dp_split_json,
+                                              args.dp_split_group)
     train_dataset = _make_dataset(
-        root_path  = args.root_path,
-        split      = args.split,
-        split_csv  = args.split_csv,
-        image_size = args.image_size,
-        max_length = args.max_length,
+        root_path         = args.root_path,
+        split             = args.split,
+        split_csv         = args.split_csv,
+        image_size        = args.image_size,
+        max_length        = args.max_length,
+        patient_whitelist = train_whitelist,
     )
     n_train = len(train_dataset)
     print(f'[Train] training samples: {n_train}')
