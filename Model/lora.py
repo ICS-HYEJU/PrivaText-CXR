@@ -76,6 +76,14 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B.weight)
 
+        # Place the adapters on the SAME device/dtype as the frozen base layer.
+        # The base UNet is already on its device when LoRA is injected; newly
+        # created Linear layers default to CPU/float32 and would otherwise cause
+        # a device mismatch (especially under model parallelism, where each base
+        # layer may live on a different GPU).
+        self.lora_A.to(base.weight.device, base.weight.dtype)
+        self.lora_B.to(base.weight.device, base.weight.dtype)
+
         self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
@@ -89,6 +97,7 @@ class LoRALinear(nn.Module):
         """
         merged = nn.Linear(self.base.in_features, self.base.out_features,
                            bias=self.base.bias is not None)
+        merged.to(self.base.weight.device, self.base.weight.dtype)
         delta = self.scaling * (self.lora_B.weight @ self.lora_A.weight)
         merged.weight.copy_(self.base.weight + delta)
         if self.base.bias is not None:
