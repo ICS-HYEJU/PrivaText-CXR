@@ -217,6 +217,18 @@ def load_descriptions(spec: str) -> list:
         if not lines:
             raise ValueError(f'No non-empty lines in {spec}')
         return lines
+
+    # Guard: a path-looking spec that is NOT a file is almost certainly a
+    # mistake (wrong path / cwd).  Fail loudly instead of silently using the
+    # path string itself as the conditioning text.
+    looks_like_path = spec.lower().endswith(('.txt', '.csv')) or (os.sep in spec) \
+        or (os.altsep and os.altsep in spec)
+    if looks_like_path:
+        raise FileNotFoundError(
+            f"--descriptions '{spec}' looks like a file path but does not "
+            f"exist (cwd={os.getcwd()}). Provide a valid .txt file (one "
+            f"description per line) or an inline description string.")
+
     return [spec]
 
 
