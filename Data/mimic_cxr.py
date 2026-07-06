@@ -135,8 +135,21 @@ class MIMICCXRDataset(Dataset):
             transforms.Normalize(mean=[0.5], std=[0.5]),
         ])
 
+        # Optional patient-level filter for DP budget-isolated splits
+        # (D_search / D_train / D_test).  When set, only samples whose
+        # patient_id (e.g. "p10000032") is in this set are kept.  Patient-level
+        # filtering guarantees the image-level disjointness required by
+        # parallel composition.  See docs/DP_LDM_FRAMEWORK_PLAN.md §2.
+        wl = getattr(args, "patient_whitelist", None)
+        self.patient_whitelist = set(wl) if wl is not None else None
+
         self.samples = self._build_index()
-        print(f"[MIMICCXRDataset] split='{self.split}'  total={len(self.samples)}")
+        if self.patient_whitelist is not None:
+            self.samples = [s for s in self.samples
+                            if s["patient_id"] in self.patient_whitelist]
+        print(f"[MIMICCXRDataset] split='{self.split}'  total={len(self.samples)}"
+              + (f"  (patient_whitelist={len(self.patient_whitelist)} patients)"
+                 if self.patient_whitelist is not None else ""))
 
     # -------------------------------------------------------------------------
     # Map-style interface
