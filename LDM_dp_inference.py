@@ -172,8 +172,22 @@ def build_unet(args) -> UNetModel:
     return UNetModel(cfg)
 
 
+def _torch_load(ckpt_path, device):
+    """
+    torch.load wrapper. PyTorch >=2.6 defaults weights_only=True, which rejects
+    checkpoints containing non-tensor objects (args dict, numpy scalars such as
+    epsilon_spent). These checkpoints are produced by our own training script,
+    so loading with weights_only=False is safe here.
+    """
+    try:
+        return torch.load(ckpt_path, map_location=device, weights_only=False)
+    except TypeError:
+        # Older PyTorch without the weights_only kwarg
+        return torch.load(ckpt_path, map_location=device)
+
+
 def _load_vae_ckpt(vae, ckpt_path, device):
-    raw = torch.load(ckpt_path, map_location=device)
+    raw = _torch_load(ckpt_path, device)
     for key in ('state_dict', 'model', 'model_state_dict', 'net', 'weights'):
         if isinstance(raw, dict) and key in raw:
             raw = raw[key]
@@ -183,7 +197,7 @@ def _load_vae_ckpt(vae, ckpt_path, device):
 
 
 def _load_dp_ckpt(model, ckpt_path, device):
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = _torch_load(ckpt_path, device)
     sd = ckpt.get('model', ckpt) if isinstance(ckpt, dict) else ckpt
     missing, unexpected = model.load_state_dict(sd, strict=False)
     print(f'[dp ckpt] {ckpt_path}  missing={len(missing)}  '
