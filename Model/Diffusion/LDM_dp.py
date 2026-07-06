@@ -224,6 +224,12 @@ class LatentDiffusionDP(LatentDiffusion):
         # 2. Inject LoRA into UNet cross-attention; only A/B are trainable
         inject_lora_cross_attention(self.model, rank=rank, alpha=alpha,
                                     dropout=dropout, targets=targets)
+        # Belt-and-suspenders: LoRALinear already places adapters on their base
+        # layer's device, but ensure the whole UNet (incl. new adapters) shares
+        # one device.  self.model (DiffusionWrapper+UNet) lives on the main
+        # device even under model parallelism (only VAE/BioBERT are offloaded).
+        _unet_device = next(self.model.parameters()).device
+        self.model.to(_unet_device)
         lora_params = lora_parameters(self.model)
 
         # 3. BioBERT projection (optional, full-trainable small layer)
