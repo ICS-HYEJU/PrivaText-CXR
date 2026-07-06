@@ -72,9 +72,9 @@ def compute_noise_multiplier(
         epsilon_tolerance = epsilon_tol,
     )
 
-    print(f'[privacy_analysis] ¥å={target_epsilon}  ¥ä={target_delta}  '
+    print(f'[privacy_analysis] eps={target_epsilon}  delta={target_delta}  '
           f'q={sample_rate:.6f}  epochs={epochs}  steps={steps}  '
-          f'¡æ ¥ò={sigma:.6f}')
+          f'sigma={sigma:.6f}')
     return sigma
 
 
@@ -113,7 +113,7 @@ def print_privacy_summary(
         f"  sample_rate (q)   : {sample_rate:.6f}\n"
         f"  epochs            : {epochs}\n"
         f"  total steps       : {steps}\n"
-        f"  target ¥å          : {target_epsilon}\n"
-        f"  target ¥ä          : {target_delta}\n"
+        f"  target eps        : {target_epsilon}\n"
+        f"  target delta      : {target_delta}\n"
         f"{'='*60}\n"
     )

@@ -111,12 +111,12 @@ class BasicTransformerBlock(nn.Module):
     Self-attention (attn1) + Cross-attention (attn2) + FFN.
 
     DP change vs attention_module.py:
-        checkpoint default changed False ¡æ disables CheckpointFunction which
+        checkpoint default changed False -> disables CheckpointFunction which
         is incompatible with Opacus per-sample gradient hooks.
     """
 
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None,
-                 gated_ff=True, checkpoint=False):          # ¡ç False (was True)
+                 gated_ff=True, checkpoint=False):          #  False (was True)
         super().__init__()
         self.attn1 = CrossAttention(
             query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout
@@ -129,12 +129,12 @@ class BasicTransformerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.norm3 = nn.LayerNorm(dim)
-        self.checkpoint = checkpoint
+        self.checkpoint = checkpoint # bool type
 
     def forward(self, x, context=None):
         if self.checkpoint:
-            # gradient checkpointing path ? NOT compatible with Opacus
-            return checkpoint(self._forward, (x, context), self.parameters(), True)
+            # gradient checkpointing path -- NOT compatible with Opacus
+            return checkpoint(self._forward, (x, context), self.parameters(), True) # call util_network.checkpoint()
         return self._forward(x, context)       # direct call for DP-SGD
 
     def _forward(self, x, context=None):
@@ -209,8 +209,8 @@ def disable_checkpointing(model: nn.Module) -> int:
     for module in model.modules():
         if type(module).__name__ == 'BasicTransformerBlock':
             if getattr(module, 'checkpoint', False):
-                module.checkpoint = False
+                module.checkpoint = False # --> BasicTransformerBlock.checkpoint = False -> don't call ckpt utils
                 count += 1
     print(f'[disable_checkpointing] patched {count} BasicTransformerBlock(s) '
-          f'(checkpoint ¡æ False)')
+          f'(checkpoint -> False)')
     return count

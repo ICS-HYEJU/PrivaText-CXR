@@ -1,9 +1,31 @@
 """
+Diffusion/ddpm.py  ?  Standalone DDPM (pure PyTorch, no pytorch_lightning)
+============================================================================
+
 Dependencies replaced:
-    ldm.modules.diffusionmodules.util ->  make_beta_schedule / extract_into_tensor / noise_like  (this file)
-    ldm.modules.ema.LitEma            ->  EMA  (this file)
-    ldm.util.exists / default         ->  Model/util_network.py
-    instantiate_from_config           ->  unet: nn.Module passed directly
+    ldm.modules.diffusionmodules.util  ¡æ  make_beta_schedule / extract_into_tensor / noise_like  (this file)
+    ldm.modules.ema.LitEma             ¡æ  EMA  (this file)
+    ldm.util.exists / default          ¡æ  Model/util_network.py
+    instantiate_from_config            ¡æ  unet: nn.Module passed directly
+
+Usage:
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Model'))
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Swin_origin_Model'))
+
+    from LDM import UNetModel
+    from Diffusion.ddpm import DDPM
+
+    unet  = UNetModel(image_size=16, in_channels=4, model_channels=128, ...)
+    model = DDPM(unet=unet, timesteps=1000, channels=4, image_size=16).to(device)
+
+    optimizer = model.build_optimizer()
+    for batch in loader:
+        loss, loss_dict = model.training_step(batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        model.update_ema()
 """
 
 import gc
@@ -20,8 +42,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torchvision.utils import make_grid
 from tqdm import tqdm
-import opacus
-# odel utilities from the existing codebase
+
+# ¦¡¦¡ Model utilities from the existing codebase ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 _model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Model')
 if _model_dir not in sys.path:
     sys.path.insert(0, _model_dir)
@@ -29,10 +51,10 @@ if _model_dir not in sys.path:
 from Model.util_network import exists, default  # noqa: E402
 
 
-# =======================================================================================
+# ??????????????????????????????????????????????????????????????????????????????
 # Diffusion schedule utilities
-# (replace modules.diffusionmodules.util.py -- def make_beta_schedule)
-# =======================================================================================
+# (replaces ldm.modules.diffusionmodules.util)
+# ??????????????????????????????????????????????????????????????????????????????
 
 def make_beta_schedule(schedule: str, n_timestep: int,
                        linear_start: float = 1e-4,
@@ -77,10 +99,11 @@ def noise_like(shape: tuple, device: torch.device, repeat: bool = False) -> torc
         )
     return torch.randn(shape, device=device)
 
-# ==============================================================================
+
+# ??????????????????????????????????????????????????????????????????????????????
 # Exponential Moving Average
 # (replaces ldm.modules.ema.LitEma)
-# ==============================================================================
+# ??????????????????????????????????????????????????????????????????????????????
 
 class EMA:
     """
@@ -96,14 +119,14 @@ class EMA:
     """
 
     def __init__(self, model: nn.Module, decay: float = 0.9999):
-        self.decay = decay
-        self._shadow = {n: p.data.detach().cpu().clone()
-                        for n, p in model.named_parameters() if p.requires_grad}
-        self._backup = {}
+        self.decay   = decay
+        self._shadow  = {n: p.data.detach().cpu().clone()
+                         for n, p in model.named_parameters() if p.requires_grad}
+        self._backup  = {}
 
     @torch.no_grad()
     def update(self, model: nn.Module):
-        """shadow = decay????shadow + (1?decay)????param"""
+        """shadow = decay¡¤shadow + (1?decay)¡¤param"""
         for name, param in model.named_parameters():
             if param.requires_grad:
                 self._shadow[name].mul_(self.decay).add_(
@@ -143,20 +166,20 @@ class EMA:
                 print(f"[EMA] {label}: restored training weights")
 
 
-# =============================================================================
+# ??????????????????????????????????????????????????????????????????????????????
 # DiffusionWrapper
-# =============================================================================
+# ??????????????????????????????????????????????????????????????????????????????
 
 class DiffusionWrapper(nn.Module):
     """
     Thin wrapper around the UNet that dispatches conditioning inputs.
 
     conditioning_key:
-        None        -- unconditional  (x, t)
-        'concat'    -- channel-wise concatenation  (x || c_concat, t)
-        'crossattn' -- cross-attention context     (x, t, context=c_crossattn)
-        'hybrid'    -- concat + crossattn
-        'adm'       -- class embedding (y=c_crossattn[0])
+        None        ? unconditional  (x, t)
+        'concat'    ? channel-wise concatenation  (x ? c_concat, t)
+        'crossattn' ? cross-attention context     (x, t, context=c_crossattn)
+        'hybrid'    ? concat + crossattn
+        'adm'       ? class embedding (y=c_crossattn[0])
     """
 
     VALID_KEYS = {None, 'concat', 'crossattn', 'hybrid', 'adm'}
@@ -165,7 +188,7 @@ class DiffusionWrapper(nn.Module):
         super().__init__()
         assert conditioning_key in self.VALID_KEYS, \
             f"conditioning_key must be one of {self.VALID_KEYS}, got '{conditioning_key}'"
-        self.diffusion_model = unet
+        self.diffusion_model  = unet
         self.conditioning_key = conditioning_key
 
     def forward(self, x: torch.Tensor, t: torch.Tensor,
@@ -194,22 +217,22 @@ class DiffusionWrapper(nn.Module):
         raise NotImplementedError(key)
 
 
-# ------------------------------------------------------------------------------
+# ??????????????????????????????????????????????????????????????????????????????
 # DDPM
-# ------------------------------------------------------------------------------
+# ??????????????????????????????????????????????????????????????????????????????
 
 class DDPM(nn.Module):
     """
     Classic DDPM with Gaussian diffusion, in image space.
 
     Args:
-        unet:               Denoising UNet (nn.Module).  Passed directly -- no config dict needed.
-        conditioning_key:   Forwarded to DiffusionWrapper (None, 'concat', 'crossattn', ... ).
+        unet:               Denoising UNet (nn.Module).  Passed directly ? no config dict needed.
+        conditioning_key:   Forwarded to DiffusionWrapper (None, 'concat', 'crossattn', ¡¦).
         timesteps:          Total diffusion steps T.
         beta_schedule:      "linear" | "cosine" | "sqrt_linear" | "sqrt".
         loss_type:          "l1" | "l2".
-        parameterization:   "eps" -> model predicts noise ε.
-                            "x0"  -> model predicts clean image x_0.
+        parameterization:   "eps"  ¡æ model predicts noise ¥å.
+                            "x0"   ¡æ model predicts clean image x?.
         use_ema / ema_decay: Whether to maintain EMA shadow weights.
         lr:                 Default learning-rate used by build_optimizer().
     """
@@ -240,37 +263,37 @@ class DDPM(nn.Module):
                  learn_logvar: bool = False,
                  logvar_init: float = 0.,
                  lr: float = 1e-4,
+                 use_dp: bool = False,
                  ):
         super().__init__()
         assert parameterization in ("eps", "x0"), \
             'Only "eps" and "x0" parameterization are supported'
 
-        self.parameterization = parameterization
-        self.first_stage_key = first_stage_key
-        self.image_size = image_size
-        self.channels = channels
-        self.clip_denoised = clip_denoised
-        self.log_every_t = log_every_t
-        self.loss_type = loss_type
-        self.lr = lr
-        self.v_posterior = v_posterior
-        self.original_elbo_weight = original_elbo_weight
-        self.l_simple_weight = l_simple_weight
+        self.parameterization      = parameterization
+        self.first_stage_key       = first_stage_key
+        self.image_size            = image_size
+        self.channels              = channels
+        self.clip_denoised         = clip_denoised
+        self.log_every_t           = log_every_t
+        self.loss_type             = loss_type
+        self.lr                    = lr
+        self.v_posterior           = v_posterior
+        self.original_elbo_weight  = original_elbo_weight
+        self.l_simple_weight       = l_simple_weight
 
         # UNet wrapped for conditioning dispatch
         self.model = DiffusionWrapper(unet, conditioning_key)
-        n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        n_params   = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print(f"[DDPM] {self.parameterization}-prediction  |  UNet params: {n_params:,}")
-        if args.use_dp:
-            self.privacy_engine = opacus.PrivacyEngine()
+
         # EMA
         self.use_ema = use_ema
         if self.use_ema:
             self.ema = EMA(self.model, decay=ema_decay)
-            print(f"[DDPM] EMA enabled  (decay={ema_decay}), Decay must be between 0 and 1")
+            print(f"[DDPM] EMA enabled  (decay={ema_decay})")
 
         # Noise schedule buffers
-        self._register_schedule(
+        self.register_schedule(
             given_betas=given_betas, beta_schedule=beta_schedule,
             timesteps=timesteps, linear_start=linear_start,
             linear_end=linear_end, cosine_s=cosine_s,
@@ -285,59 +308,72 @@ class DDPM(nn.Module):
         if ckpt_path is not None:
             self.load_from_ckpt(ckpt_path, ignore_keys)
 
-    # Noise schedule
-    def _register_schedule(self, given_betas=None, beta_schedule="linear",
-                           timesteps=1000, linear_start=1e-4,
-                           linear_end=2e-2, cosine_s=8e-3):
+        # DP-SGD support flag (PrivacyEngine is managed externally in LDM_dp_finetune.py)
+        self.use_dp = use_dp
+
+    # ¦¡¦¡ Device property ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
+    @property
+    def device(self) -> torch.device:
+        """Device: returns explicitly set value, or falls back to noise-schedule buffer."""
+        return getattr(self, '_device', None) or self.betas.device
+
+    @device.setter
+    def device(self, value):
+        """Allow subclasses (e.g. LatentDiffusion) to store device explicitly."""
+        self._device = value
+
+    # ¦¡¦¡ Noise schedule ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
+    def register_schedule(self, given_betas=None, beta_schedule="linear",
+                          timesteps=1000, linear_start=1e-4,
+                          linear_end=2e-2, cosine_s=8e-3):
         betas = given_betas if given_betas is not None else make_beta_schedule(
             beta_schedule, timesteps,
             linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s,
         )
-        alphas = 1.0 - betas
-        alphas_cumprod = np.cumprod(alphas, axis=0)
+        alphas              = 1.0 - betas
+        alphas_cumprod      = np.cumprod(alphas, axis=0)
         alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])
 
-        self.num_timesteps = int(betas.shape[0])
-        self.linear_start = linear_start
-        self.linear_end = linear_end
+        self.num_timesteps  = int(betas.shape[0])
+        self.linear_start   = linear_start
+        self.linear_end     = linear_end
 
         reg = partial(self.register_buffer)
-        t = partial(torch.tensor, dtype=torch.float32)
+        t   = partial(torch.tensor, dtype=torch.float32)
 
-        reg('betas', t(betas))
-        reg('alphas_cumprod', t(alphas_cumprod))
-        reg('alphas_cumprod_prev', t(alphas_cumprod_prev))
+        reg('betas',                          t(betas))
+        reg('alphas_cumprod',                 t(alphas_cumprod))
+        reg('alphas_cumprod_prev',            t(alphas_cumprod_prev))
+        reg('sqrt_alphas_cumprod',            t(np.sqrt(alphas_cumprod)))
+        reg('sqrt_one_minus_alphas_cumprod',  t(np.sqrt(1.0 - alphas_cumprod)))
+        reg('log_one_minus_alphas_cumprod',   t(np.log(1.0 - alphas_cumprod)))
+        reg('sqrt_recip_alphas_cumprod',      t(np.sqrt(1.0 / alphas_cumprod)))
+        reg('sqrt_recipm1_alphas_cumprod',    t(np.sqrt(1.0 / alphas_cumprod - 1)))
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        reg('sqrt_alphas_cumprod', t(np.sqrt(alphas_cumprod)))
-        reg('sqrt_one_minus_alphas_cumprod', t(np.sqrt(1.0 - alphas_cumprod)))
-        reg('log_one_minus_alphas_cumprod', t(np.log(1.0 - alphas_cumprod)))
-        reg('sqrt_recip_alphas_cumprod', t(np.sqrt(1.0 / alphas_cumprod)))
-        reg('sqrt_recipm1_alphas_cumprod', t(np.sqrt(1.0 / alphas_cumprod - 1)))
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = (
-                (1 - self.v_posterior) * betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-                + self.v_posterior * betas
+            (1 - self.v_posterior) * betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+            + self.v_posterior * betas
         )
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
-        reg('posterior_variance', t(posterior_variance))
+        reg('posterior_variance',             t(posterior_variance))
         reg('posterior_log_variance_clipped', t(np.log(np.maximum(posterior_variance, 1e-20))))
-        reg('posterior_mean_coef1', t(betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)))
-        reg('posterior_mean_coef2', t((1.0 - alphas_cumprod_prev) * np.sqrt(alphas) / (1.0 - alphas_cumprod)))
+        reg('posterior_mean_coef1',           t(betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)))
+        reg('posterior_mean_coef2',           t((1.0 - alphas_cumprod_prev) * np.sqrt(alphas) / (1.0 - alphas_cumprod)))
 
         if self.parameterization == "eps":
             lvlb = self.betas ** 2 / (
-                    2 * self.posterior_variance * t(alphas) * (1 - self.alphas_cumprod)
+                2 * self.posterior_variance * t(alphas) * (1 - self.alphas_cumprod)
             )
-        else: # x0
+        else:
             lvlb = 0.5 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2.0 * 1 - torch.Tensor(alphas_cumprod))
 
         lvlb[0] = lvlb[1]
         self.register_buffer('lvlb_weights', lvlb, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
 
-    #  EMA helpers
+    # ¦¡¦¡ EMA helpers ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
     def update_ema(self):
         """Call after every optimizer.step() to update the EMA shadow weights."""
         if self.use_ema:
@@ -352,7 +388,7 @@ class DDPM(nn.Module):
         else:
             yield
 
-    # Checkpoint
+    # ¦¡¦¡ Checkpoint ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 
     def load_from_ckpt(self, path: str, ignore_keys: list = []):
         sd = torch.load(path, map_location="cpu")
@@ -364,34 +400,35 @@ class DDPM(nn.Module):
         missing, unexpected = self.load_state_dict(sd, strict=False)
         print(f"[DDPM] Loaded ckpt '{path}'  missing={len(missing)}  unexpected={len(unexpected)}")
 
-    # Diffusion forward process
+    # ¦¡¦¡ Diffusion forward process ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
     def q_mean_variance(self, x_start, t):
-        mean = extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
-        variance = extract_into_tensor(1.0 - self.alphas_cumprod, t, x_start.shape)
+        mean         = extract_into_tensor(self.sqrt_alphas_cumprod,         t, x_start.shape) * x_start
+        variance     = extract_into_tensor(1.0 - self.alphas_cumprod,        t, x_start.shape)
         log_variance = extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
 
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         return (
-                extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
-                + extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
+            extract_into_tensor(self.sqrt_alphas_cumprod,             t, x_start.shape) * x_start
+            + extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    # Diffusion reverse process
+    # ¦¡¦¡ Diffusion reverse process ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
-                extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t
-                - extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+            extract_into_tensor(self.sqrt_recip_alphas_cumprod,   t, x_t.shape) * x_t
+            - extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
     def q_posterior(self, x_start, x_t, t):
         mean = (
-                extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
-                + extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+            extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
+            + extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
-        var = extract_into_tensor(self.posterior_variance, t, x_t.shape)
+        var     = extract_into_tensor(self.posterior_variance,             t, x_t.shape)
         log_var = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
         return mean, var, log_var
 
@@ -399,16 +436,15 @@ class DDPM(nn.Module):
         model_out = self.model(x, t)
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
-        else: # 'x_0'
+        else:
             x_recon = model_out
         if clip_denoised:
             x_recon.clamp_(-1.0, 1.0)
         mean, var, log_var = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return mean, var, log_var
 
-    # ----------------------------------------------------------------------------
-    # Loss
-    # ----------------------------------------------------------------------------
+    # ¦¡¦¡ Loss ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
     def get_loss(self, pred, target, mean=True):
         if self.loss_type == 'l1':
             loss = (target - pred).abs()
@@ -418,22 +454,22 @@ class DDPM(nn.Module):
         raise NotImplementedError(f"Unknown loss type: {self.loss_type}")
 
     def p_losses(self, x_start, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
+        noise   = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start, t, noise=noise)
-        out = self.model(x_noisy, t)
+        out     = self.model(x_noisy, t)
 
         target = noise if self.parameterization == "eps" else x_start
-        loss = self.get_loss(out, target, mean=False).mean(dim=[1, 2, 3])
+        loss   = self.get_loss(out, target, mean=False).mean(dim=[1, 2, 3])
 
         prefix = 'train' if self.training else 'val'
         loss_simple = loss.mean() * self.l_simple_weight
-        loss_vlb = (self.lvlb_weights[t] * loss).mean()
-        loss_total = loss_simple + self.original_elbo_weight * loss_vlb
+        loss_vlb    = (self.lvlb_weights[t] * loss).mean()
+        loss_total  = loss_simple + self.original_elbo_weight * loss_vlb
 
         loss_dict = {
             f'{prefix}/loss_simple': loss.mean(),
-            f'{prefix}/loss_vlb': loss_vlb,
-            f'{prefix}/loss': loss_total,
+            f'{prefix}/loss_vlb':    loss_vlb,
+            f'{prefix}/loss':        loss_total,
         }
         gc.collect()
         return loss_total, loss_dict
@@ -442,22 +478,21 @@ class DDPM(nn.Module):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=x.device).long()
         return self.p_losses(x, t, *args, **kwargs)
 
-    # ==============================================================================
-    #  Sampling
-    # ==============================================================================
+    # ¦¡¦¡ Sampling ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
-        b = x.shape[0]
+        b      = x.shape[0]
         mean, _, log_var = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
-        noise = noise_like(x.shape, x.device, repeat_noise)
-        mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+        noise  = noise_like(x.shape, x.device, repeat_noise)
+        mask   = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return mean + mask * (0.5 * log_var).exp() * noise
 
     @torch.no_grad()
     def p_sample_loop(self, shape, return_intermediates=False):
         device = self.betas.device
-        b = shape[0]
-        img = torch.randn(shape, device=device)
+        b      = shape[0]
+        img    = torch.randn(shape, device=device)
         intermediates = [img]
         for i in tqdm(reversed(range(self.num_timesteps)), desc='Sampling', total=self.num_timesteps):
             t_batch = torch.full((b,), i, device=device, dtype=torch.long)
@@ -473,9 +508,8 @@ class DDPM(nn.Module):
             return_intermediates=return_intermediates,
         )
 
-    # ================================================================================
-    # Training / validation steps
-    # ================================================================================
+    # ¦¡¦¡ Training / validation steps ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
     def get_input(self, batch, k):
         x = batch[k]
         if x.ndim == 3:
@@ -500,8 +534,8 @@ class DDPM(nn.Module):
     @torch.no_grad()
     def validation_step(self, batch):
         """Returns (loss_dict, loss_dict_ema)."""
-        x = self.get_input(batch, self.first_stage_key)
-        _, loss_dict = self(x)
+        x              = self.get_input(batch, self.first_stage_key)
+        _, loss_dict   = self(x)
 
         with self.ema_scope():
             _, loss_dict_ema = self(x)
@@ -509,37 +543,36 @@ class DDPM(nn.Module):
 
         return loss_dict, loss_dict_ema
 
-    # Optimizer
+    # ¦¡¦¡ Optimizer ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 
     def build_optimizer(self, lr: float = None):
         """Create and return an AdamW optimizer for this model."""
-        lr = lr or self.lr
+        lr     = lr or self.lr
         params = list(self.model.parameters())
         if self.learn_logvar:
             params += [self.logvar]
         return torch.optim.AdamW(params, lr=lr)
 
-    # ===========================================================================
-    # Image logging
-    # ===========================================================================
+    # ¦¡¦¡ Image logging ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+
     def _rows_from_list(self, samples):
         grid = rearrange(torch.stack(samples), 'n b c h w -> (b n) c h w')
         return make_grid(grid, nrow=len(samples))
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=2, sample=True, return_keys=None):
-        device = self.betas.device
-        log = {}
-        x = self.get_input(batch, self.first_stage_key).to(device)
+        device   = self.betas.device
+        log      = {}
+        x        = self.get_input(batch, self.first_stage_key).to(device)
         N, n_row = min(x.shape[0], N), min(x.shape[0], n_row)
-        x = x[:N]
+        x        = x[:N]
         log["inputs"] = x
 
         # Noising row
         diffusion_row = []
         for t in range(self.num_timesteps):
             if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
-                t_b = torch.full((n_row,), t, device=device, dtype=torch.long)
+                t_b   = torch.full((n_row,), t, device=device, dtype=torch.long)
                 noisy = self.q_sample(x[:n_row], t_b, noise=torch.randn_like(x[:n_row]))
                 diffusion_row.append(noisy)
         log["diffusion_row"] = self._rows_from_list(diffusion_row)
@@ -547,7 +580,7 @@ class DDPM(nn.Module):
         if sample:
             with self.ema_scope("log_images"):
                 samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
-            log["samples"] = samples
+            log["samples"]     = samples
             log["denoise_row"] = self._rows_from_list(denoise_row)
 
         if return_keys:

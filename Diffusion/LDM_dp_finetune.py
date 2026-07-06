@@ -665,6 +665,7 @@ def main():
     print('=' * 60)
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
+        print("Training epoch %d" % epoch)
         ldm.train()
         epoch_losses  = []
         phys_step_idx = 0

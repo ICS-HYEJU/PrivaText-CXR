@@ -175,7 +175,7 @@ def parse_args():
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--vae_out_ch',           default=1,             type=int)
     parser.add_argument('--vae_ckpt',
-                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/2026-03-31_10-58-39/vae_ep0070.pt')
+                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/vae_ep0070.pt')
     parser.add_argument('--verbose', default=False)
 
     # UNet ---------------------------------------------------------------------

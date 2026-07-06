@@ -118,7 +118,7 @@ class LatentDiffusion(DDPM):
             self.register_buffer('scale_factor', torch.tensor(scale_factor))
 
         # Freeze first-stage model
-        self.first_stage_model = first_stage_model.eval()
+        self.first_stage_model = first_stage_model.eval() # VAE
         self.first_stage_model.train = disabled_train
         for p in self.first_stage_model.parameters():
             p.requires_grad = False
