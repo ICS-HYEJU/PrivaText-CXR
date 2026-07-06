@@ -95,6 +95,13 @@ class MIMICCXRDataset(Dataset):
         self.image_size = args.image_size
         self.max_length = getattr(args, "max_length", 512)
 
+        # Optional patient-level filter for DP budget-isolated splits
+        # (D_search / D_train / D_test).  When set, only samples whose
+        # patient_id is in this set are kept.  A patient-level whitelist
+        # guarantees image-level disjointness required by parallel composition.
+        wl = getattr(args, "patient_whitelist", None)
+        self.patient_whitelist = set(wl) if wl is not None else None
+
         self.scan_root = os.path.join(args.prebuilt_split_dir, self.split)
         if not os.path.isdir(self.scan_root):
             raise FileNotFoundError(
@@ -108,7 +115,12 @@ class MIMICCXRDataset(Dataset):
         ])
 
         self.samples = self._build_index()
-        print(f"[MIMICCXRDataset] split='{self.split}'  total={len(self.samples)}")
+        if self.patient_whitelist is not None:
+            self.samples = [s for s in self.samples
+                            if s["patient_id"] in self.patient_whitelist]
+        print(f"[MIMICCXRDataset] split='{self.split}'  total={len(self.samples)}"
+              + (f"  (patient_whitelist={len(self.patient_whitelist)} patients)"
+                 if self.patient_whitelist is not None else ""))
 
     # -------------------------------------------------------------------------
     # Map-style interface
@@ -280,7 +292,13 @@ def dataset_loader(
     def collate_fn(batch):
         images, reports = zip(*batch)
         images  = torch.stack(images)
-        context = embedder(list(reports))
+        # MIMIC reports are long clinical text → must use mode='description'
+        # (mean-pooling, full max_length).  Without it, encoders that default
+        # to mode='label' truncate to 32 tokens and keep only the CLS vector.
+        try:
+            context = embedder(list(reports), mode='description')
+        except TypeError:
+            context = embedder(list(reports))
         return images, context
 
     loader = DataLoader(
