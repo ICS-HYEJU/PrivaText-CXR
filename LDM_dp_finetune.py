@@ -235,6 +235,19 @@ def parse_args():
     parser.add_argument('--ablation_blocks',  default=-1,    type=int)
     parser.add_argument('--finetune_biobert', default=False)
 
+    # LoRA (adapt-lora) --------------------------------------------------------
+    parser.add_argument('--use_lora', default=False,
+                        type=lambda x: str(x).lower() != 'false',
+                        help='Train LoRA adapters on cross-attention instead of '
+                             'full SpatialTransformer blocks')
+    parser.add_argument('--lora_rank',    default=4,   type=int)
+    parser.add_argument('--lora_alpha',   default=4.0, type=float)
+    parser.add_argument('--lora_dropout', default=0.0, type=float)
+    parser.add_argument('--eps_milestones', default=[1, 3, 5, 10],
+                        nargs='+', type=float,
+                        help='Save a LoRA adapter file each time epsilon crosses '
+                             'one of these budgets (LoRA mode only)')
+
     # Training -----------------------------------------------------------------
     parser.add_argument('--epochs',       default=10,    type=int)
     parser.add_argument('--lr',           default=2e-5,  type=float)
@@ -442,6 +455,29 @@ def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
     print(f'  [ckpt] saved -> {save_path}  (eps_spent={eps_spent:.4f})')
 
 
+def save_lora_checkpoint(save_path, model, privacy_engine, epoch, global_step,
+                         args, target_delta):
+    """
+    Save ONLY the LoRA adapters (small file), tagged with the privacy budget
+    spent so far.  `model` is the Opacus GradSampleModule; the inner module is
+    model._module.
+    """
+    from Model.lora import lora_state_dict
+    inner     = model._module if hasattr(model, '_module') else model
+    eps_spent = privacy_engine.get_epsilon(target_delta) if privacy_engine else None
+    torch.save({
+        'epoch'         : epoch,
+        'global_step'   : global_step,
+        'lora'          : lora_state_dict(inner),
+        'lora_rank'     : args.lora_rank,
+        'lora_alpha'    : args.lora_alpha,
+        'epsilon_spent' : eps_spent,
+        'args'          : vars(args),
+    }, save_path)
+    eps_str = f'{eps_spent:.4f}' if eps_spent is not None else 'N/A'
+    print(f'  [lora] saved -> {save_path}  (eps_spent={eps_str})')
+
+
 def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
     ckpt   = torch.load(load_path, map_location=device)
     sd     = ckpt.get('model', ckpt)
@@ -632,12 +668,22 @@ def main():
         }
         ldm.init_scale_factor(first_chunk, is_first_batch=True)
 
-    attn_params = ldm.configure_dp_params(
-        ablation_blocks  = args.ablation_blocks,
-        finetune_biobert = args.finetune_biobert,
-    )
-    if not attn_params:
-        raise RuntimeError('configure_dp_params returned empty param list.')
+    if args.use_lora:
+        attn_params = ldm.configure_lora_params(
+            rank             = args.lora_rank,
+            alpha            = args.lora_alpha,
+            dropout          = args.lora_dropout,
+            finetune_biobert = args.finetune_biobert,
+        )
+        if not attn_params:
+            raise RuntimeError('configure_lora_params returned empty param list.')
+    else:
+        attn_params = ldm.configure_dp_params(
+            ablation_blocks  = args.ablation_blocks,
+            finetune_biobert = args.finetune_biobert,
+        )
+        if not attn_params:
+            raise RuntimeError('configure_dp_params returned empty param list.')
 
     if args.noise_multiplier is not None:
         sigma = args.noise_multiplier
@@ -724,6 +770,9 @@ def main():
           f'chunks/step~{approx_chunks}  sigma={sigma:.4f}')
     print('=' * 60)
 
+    # LoRA: track which epsilon milestones have been saved (LoRA mode only)
+    saved_milestones = set()
+
     for epoch in range(start_epoch, start_epoch + args.epochs):
         ldm.train()
         epoch_losses = []
@@ -792,6 +841,23 @@ def main():
         if eps_now > args.target_epsilon * 1.05:
             print(f'[WARNING] eps_spent={eps_now:.4f} exceeds target '
                   f'eps={args.target_epsilon}. Consider early stopping.')
+
+        # LoRA: save a small adapter file each time we cross a budget milestone
+        if args.use_lora:
+            for m in sorted(args.eps_milestones):
+                if m not in saved_milestones and eps_now >= m:
+                    saved_milestones.add(m)
+                    lora_path = os.path.join(
+                        args.save_dir, f'ldm_lora_eps{m:g}.pt')
+                    save_lora_checkpoint(
+                        save_path      = lora_path,
+                        model          = ldm,
+                        privacy_engine = privacy_engine,
+                        epoch          = epoch + 1,
+                        global_step    = global_step,
+                        args           = args,
+                        target_delta   = args.target_delta,
+                    )
 
         if (epoch + 1) % args.save_every == 0:
             ckpt_path = os.path.join(args.save_dir, f'ldm_dp_epoch{epoch+1:04d}.pt')

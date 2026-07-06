@@ -85,12 +85,32 @@ D_test   : 평가 — 공식 split CSV의 'test'/'validate' 사용 (train과 이
 | S0 | pretrain (NIH) | — | X | **완료 (weight 보유)** |
 | S2 | 데이터 분할 유틸 (`make_dp_splits.py` + `patient_whitelist`) | — | X | **완료** |
 | S3 | **end-to-end inference (기존 DP ckpt로 검증)** | ✗ | X | **완료 (실행 검증 대기)** |
-| S4 | LoRA 주입 구현 (`Model/lora.py`) | — | X | TODO |
-| S5 | D_search에서 DP-LoRA 하이퍼파라미터 탐색 | ✓ | D_search | TODO |
-| S6 | D_train에서 최종 DP-LoRA 1회 | ✓ | D_train | TODO |
-| S7 | budget별 LoRA 로드 inference framework | ✓ | X | TODO |
+| S4 | LoRA 주입 구현 (`Model/lora.py` + `configure_lora_params`) | — | X | **완료** |
+| S7 | budget별 LoRA 로드 inference (`--lora_ckpt`) | ✓ | X | **완료 (배선)** |
+| S5 | D_search에서 DP-LoRA 하이퍼파라미터 탐색 (실행) | ✓ | D_search | 실행 대기 |
+| S6 | D_train에서 최종 DP-LoRA 1회 (실행) | ✓ | D_train | 실행 대기 |
+| S8 | best-of-N selection (공개 분류기, post-processing) | — | X | 계획 |
 
-> **진행 순서(사용자 결정)**: S3(end-to-end 검증)를 먼저 완성해 결과물 확인 후 LoRA(S4~S7)로 확장.
+> **진행 순서(사용자 결정)**: S3(end-to-end 검증) → LoRA(S4~S7) 코드 배선 완료. S5/S6는
+> GPU 머신에서 실행하는 단계. **브랜치 분리**: `claude/mimic-cxr-dataset-6oMiO`(LoRA 전
+> baseline) / `claude/adapt-lora`(LoRA 적용).
+
+### LoRA 사용법 (adapt-lora 브랜치)
+
+```bash
+# 학습: 전체 attention 대신 LoRA 어댑터만 DP-SGD 학습.
+# epsilon이 --eps_milestones(기본 1 3 5 10) 를 넘을 때마다 작은 어댑터 파일 저장.
+python LDM_dp_finetune.py --use_lora true --lora_rank 4 --lora_alpha 4 \
+    --pretrained_ckpt ./pretrained_ldm.pt --root_path ... --save_dir ./finetune_dp
+#   → ./finetune_dp/ldm_lora_eps1.pt, ldm_lora_eps3.pt, ...
+
+# 추론: pretrained base(--dp_ckpt) + 특정 budget LoRA(--lora_ckpt) merge 후 생성.
+python LDM_dp_inference.py \
+    --dp_ckpt ./pretrained_ldm.pt \
+    --lora_ckpt ./finetune_dp/ldm_lora_eps5.pt \
+    --vae_ckpt ./checkpoints/vae/vae_ep0070.pt \
+    --descriptions ./prompts_example.txt --n_samples 4 --output_dir ./generated_eps5
+```
 
 ---
 
@@ -159,7 +179,7 @@ LDM_dp_inference.py                : --budget → 해당 LoRA 로드 → base와
 | VAE | `Model/VAE/Autoencoder.py` (+ Encoder/Decoder) | `VAE(cfg)`, `decode(z)` |
 | UNet | `Model/Diffusion/UNetmodel.py` | `UNetModel` (파일명 소문자 m) |
 | **end-to-end inference** | `LDM_dp_inference.py` (루트) | **신규 (S3)** |
-| LoRA | **없음** | 신규 구현 필요 (S4~) |
+| LoRA | `Model/lora.py` (adapt-lora 브랜치) | `LoRALinear`, 주입/save/load/merge |
 
 ---
 

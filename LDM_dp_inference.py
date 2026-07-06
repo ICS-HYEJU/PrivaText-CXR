@@ -63,9 +63,16 @@ def parse_args():
 
     # Checkpoints / conditioning
     p.add_argument('--dp_ckpt', required=True,
-                   help='DP-finetuned checkpoint (saved by LDM_dp_finetune.py)')
+                   help='Base weights: a full DP-finetuned checkpoint, OR (in '
+                        'LoRA mode) the pretrained LDM checkpoint to attach a '
+                        'LoRA adapter onto.')
+    p.add_argument('--lora_ckpt', default=None,
+                   help='LoRA adapter file (ldm_lora_eps*.pt) saved by '
+                        'LDM_dp_finetune.py --use_lora. When set, the adapter '
+                        'is injected onto --dp_ckpt and merged before sampling '
+                        '(budget-swap inference).')
     p.add_argument('--vae_ckpt', default=None,
-                   help='VAE checkpoint. Optional if the DP ckpt already '
+                   help='VAE checkpoint. Optional if the base ckpt already '
                         'contains first_stage_model weights.')
     p.add_argument('--biobert_path', default='/storage/hjchoi')
 
@@ -327,7 +334,23 @@ def main():
     # ── Load weights ──────────────────────────────────────────────────────────
     if args.vae_ckpt:
         _load_vae_ckpt(vae, args.vae_ckpt, device)
-    _load_dp_ckpt(ldm, args.dp_ckpt, device)   # UNet attn + BioBERT proj + buffers
+    _load_dp_ckpt(ldm, args.dp_ckpt, device)   # base: UNet + BioBERT proj + buffers
+
+    # ── LoRA budget-swap: inject adapter onto the base, then merge ────────────
+    if args.lora_ckpt:
+        from Model.lora import (inject_lora_cross_attention,
+                                load_lora_state_dict, merge_lora)
+        lora = _torch_load(args.lora_ckpt, device)
+        rank  = lora.get('lora_rank', 4)
+        alpha = lora.get('lora_alpha', float(rank))
+        inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha)
+        missing, unexpected = load_lora_state_dict(ldm, lora['lora'], strict=False)
+        n_loaded = len(lora['lora'])
+        print(f'[lora] adapter {args.lora_ckpt}  loaded={n_loaded}  '
+              f'unexpected={len(unexpected)}  '
+              f'eps_at_save={lora.get("epsilon_spent", "N/A")}')
+        merge_lora(ldm)                        # fold ΔW into base for sampling
+        ldm.to(device)
 
     ldm.eval()
 
