@@ -529,6 +529,61 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
 
 
 # =============================================================================
+# Loss logging / plotting
+# =============================================================================
+
+def _write_loss_csvs(save_dir, step_hist, step_loss_hist,
+                     epoch_rows):
+    """Write per-step and per-epoch loss CSVs (overwritten each call)."""
+    import csv
+    with open(os.path.join(save_dir, 'loss_steps.csv'), 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['global_step', 'train_loss'])
+        w.writerows(zip(step_hist, step_loss_hist))
+    with open(os.path.join(save_dir, 'loss_epochs.csv'), 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['epoch', 'global_step', 'train_loss', 'val_loss', 'epsilon'])
+        w.writerows(epoch_rows)
+
+
+def save_loss_plot(save_dir, step_hist, step_loss_hist, epoch_rows):
+    """
+    Save loss_curve.png overlaying per-step train loss with per-epoch means
+    (and val loss when available).  Silently skips if matplotlib is absent.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print('[plot] matplotlib not available – skipped loss_curve.png')
+        return None
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    if step_hist:
+        ax.plot(step_hist, step_loss_hist, lw=0.7, alpha=0.5,
+                color='tab:blue', label='train (per step)')
+    if epoch_rows:
+        e_steps = [r[1] for r in epoch_rows]
+        e_train = [r[2] for r in epoch_rows]
+        e_val   = [r[3] for r in epoch_rows]
+        ax.plot(e_steps, e_train, 'o-', color='tab:blue', lw=1.6,
+                label='train (epoch mean)')
+        if any(v == v for v in e_val):        # any non-NaN
+            ax.plot(e_steps, e_val, 's--', color='tab:orange', lw=1.6,
+                    label='val (epoch)')
+    ax.set_xlabel('global step')
+    ax.set_ylabel('loss')
+    ax.grid(alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    path = os.path.join(save_dir, 'loss_curve.png')
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+# =============================================================================
 # LR Scheduler
 # =============================================================================
 
@@ -812,6 +867,10 @@ def main():
     # LoRA: track which epsilon milestones have been saved (LoRA mode only)
     saved_milestones = set()
 
+    # Loss history for CSV logging + loss_curve.png
+    step_hist, step_loss_hist = [], []
+    epoch_rows = []   # (epoch, global_step, train_loss, val_loss, epsilon)
+
     for epoch in range(start_epoch, start_epoch + args.epochs):
         ldm.train()
         epoch_losses = []
@@ -856,6 +915,9 @@ def main():
                     epoch_losses.append(step_loss)
                     global_step += 1
 
+                    step_hist.append(global_step)
+                    step_loss_hist.append(step_loss)
+
                     if global_step % args.log_every == 0:
                         info    = '  '.join(f'{k}={v.item():.4f}'
                                             for k, v in last_loss_dict.items())
@@ -867,7 +929,8 @@ def main():
         eps_now   = privacy_engine.get_epsilon(args.target_delta)
         mean_loss = float(np.mean(epoch_losses)) if epoch_losses else float('nan')
 
-        val_str = ''
+        val_str  = ''
+        val_loss = float('nan')
         if val_loader is not None:
             val_loss = evaluate(ldm, val_loader, device, args.val_batches)
             val_str  = f'  val_loss={val_loss:.4f}'
@@ -876,6 +939,14 @@ def main():
               f'loss={mean_loss:.4f}{val_str}  '
               f'eps={eps_now:.4f}  delta={args.target_delta}  '
               f'time={elapsed:.1f}s')
+
+        # Record epoch summary, dump CSVs, and refresh loss_curve.png
+        epoch_rows.append((epoch + 1, global_step, mean_loss, val_loss, eps_now))
+        _write_loss_csvs(args.save_dir, step_hist, step_loss_hist, epoch_rows)
+        plot_path = save_loss_plot(args.save_dir, step_hist, step_loss_hist,
+                                   epoch_rows)
+        if plot_path:
+            print(f'  [plot] loss curve -> {plot_path}')
 
         if eps_now > args.target_epsilon * 1.05:
             print(f'[WARNING] eps_spent={eps_now:.4f} exceeds target '
