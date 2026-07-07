@@ -340,15 +340,45 @@ def main():
     if args.lora_ckpt:
         from Model.lora import (inject_lora_cross_attention,
                                 load_lora_state_dict, merge_lora)
-        lora = _torch_load(args.lora_ckpt, device)
-        rank  = lora.get('lora_rank', 4)
-        alpha = lora.get('lora_alpha', float(rank))
-        inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha)
-        missing, unexpected = load_lora_state_dict(ldm, lora['lora'], strict=False)
-        n_loaded = len(lora['lora'])
-        print(f'[lora] adapter {args.lora_ckpt}  loaded={n_loaded}  '
-              f'unexpected={len(unexpected)}  '
-              f'eps_at_save={lora.get("epsilon_spent", "N/A")}')
+        blob = _torch_load(args.lora_ckpt, device)
+
+        if isinstance(blob, dict) and 'lora' in blob:
+            # (a) dedicated adapter file (ldm_lora_eps*.pt): base = --dp_ckpt
+            rank  = blob.get('lora_rank', 4)
+            alpha = blob.get('lora_alpha', float(rank))
+            inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha)
+            _, unexpected = load_lora_state_dict(ldm, blob['lora'], strict=False)
+            print(f'[lora] adapter {args.lora_ckpt}  loaded={len(blob["lora"])}  '
+                  f'unexpected={len(unexpected)}  '
+                  f'eps_at_save={blob.get("epsilon_spent", "N/A")}')
+
+        elif isinstance(blob, dict) and 'model' in blob:
+            # (b) full checkpoint from a LoRA run: 'model' holds base+LoRA keys.
+            #     Inject with the run's rank/alpha, then load the whole state
+            #     (this also supplies the base, so --dp_ckpt is just a fallback).
+            a = blob.get('args', {}) or {}
+            model_sd  = blob['model']
+            lora_keys = [k for k in model_sd
+                         if '.lora_A.' in k or '.lora_B.' in k]
+            if not lora_keys:
+                raise ValueError(
+                    f"--lora_ckpt '{args.lora_ckpt}' contains no LoRA params — "
+                    "it looks like a full-attention (non-LoRA) checkpoint. "
+                    "Load it via --dp_ckpt WITHOUT --lora_ckpt instead.")
+            rank  = a.get('lora_rank', 4)
+            alpha = a.get('lora_alpha', float(rank))
+            inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha)
+            missing, unexpected = ldm.load_state_dict(model_sd, strict=False)
+            print(f'[lora] full ckpt {args.lora_ckpt}  (base+LoRA)  '
+                  f'lora_keys={len(lora_keys)}  missing={len(missing)}  '
+                  f'unexpected={len(unexpected)}  '
+                  f'eps_at_save={blob.get("epsilon_spent", "N/A")}')
+        else:
+            raise KeyError(
+                f"--lora_ckpt '{args.lora_ckpt}' has neither a 'lora' nor a "
+                "'model' key. Expected a LoRA adapter (ldm_lora_eps*.pt) or a "
+                "full DP checkpoint (ldm_dp_*.pt).")
+
         merge_lora(ldm)                        # fold ΔW into base for sampling
         ldm.to(device)
 
