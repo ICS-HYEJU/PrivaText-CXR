@@ -53,12 +53,12 @@ from Modules.BioBERT_embedder  import BioBERTEmbedder
 # Argument Parser  (model args mirror LDM_dp_finetune.py – keep in sync!)
 # =============================================================================
 
-def parse_args():
-    p = argparse.ArgumentParser(
-        description='End-to-end generation from a DP-finetuned LDM',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
+def add_model_args(p):
+    """
+    Add the model-construction + checkpoint args shared by inference and eval.
+    Keep in sync with LDM_dp_finetune.py so a checkpoint loads into the same
+    architecture it was trained with.
+    """
     p.add_argument('--device_id', default='0')
 
     # Checkpoints / conditioning
@@ -75,18 +75,6 @@ def parse_args():
                    help='VAE checkpoint. Optional if the base ckpt already '
                         'contains first_stage_model weights.')
     p.add_argument('--biobert_path', default='/storage/hjchoi')
-
-    # Descriptions / sampling
-    p.add_argument('--descriptions', required=True,
-                   help='.txt file (one description per line) OR inline string')
-    p.add_argument('--n_samples', default=1, type=int,
-                   help='Independent samples per description')
-    p.add_argument('--sample_timesteps', default=None, type=int,
-                   help='Override number of DDPM sampling steps (default: all)')
-    p.add_argument('--seed', default=0, type=int)
-
-    # Output
-    p.add_argument('--output_dir', default='./generated')
     p.add_argument('--max_length', default=512, type=int)
 
     # ── VAE args (must match training) ────────────────────────────────────────
@@ -139,7 +127,25 @@ def parse_args():
     p.add_argument('--timesteps',     default=1000, type=int)
     p.add_argument('--beta_schedule', default='linear')
     p.add_argument('--scale_factor',  default=1.0,  type=float)
+    return p
 
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description='End-to-end generation from a DP-finetuned LDM',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    add_model_args(p)
+
+    # Descriptions / sampling / output (inference-specific)
+    p.add_argument('--descriptions', required=True,
+                   help='.txt file (one description per line) OR inline string')
+    p.add_argument('--n_samples', default=1, type=int,
+                   help='Independent samples per description')
+    p.add_argument('--sample_timesteps', default=None, type=int,
+                   help='Override number of DDPM sampling steps (default: all)')
+    p.add_argument('--seed', default=0, type=int)
+    p.add_argument('--output_dir', default='./generated')
     return p.parse_args()
 
 
@@ -304,19 +310,12 @@ def save_outputs(images, descriptions, sample_idx, output_dir):
 # Main
 # =============================================================================
 
-def main():
-    args = parse_args()
-    torch.manual_seed(args.seed)
-
-    device = torch.device(
-        f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu')
-    print(f'Device: {device}')
-
-    descriptions = load_descriptions(args.descriptions)
-    print(f'[input] {len(descriptions)} description(s), '
-          f'{args.n_samples} sample(s) each')
-
-    # ── Build modules ─────────────────────────────────────────────────────────
+def build_and_load_ldm(args, device):
+    """
+    Build the LatentDiffusionDP (embedder + VAE + UNet), load the VAE, the base
+    (--dp_ckpt) and any LoRA adapter (--lora_ckpt), and return (ldm, embedder)
+    ready for sampling.  Shared by LDM_dp_inference.py and LDM_dp_eval.py.
+    """
     embedder = BioBERTEmbedder(model_path=args.biobert_path,
                                max_length=args.max_length).to(device)
     vae  = build_vae(args).to(device)
@@ -383,6 +382,22 @@ def main():
         ldm.to(device)
 
     ldm.eval()
+    return ldm, embedder
+
+
+def main():
+    args = parse_args()
+    torch.manual_seed(args.seed)
+
+    device = torch.device(
+        f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu')
+    print(f'Device: {device}')
+
+    descriptions = load_descriptions(args.descriptions)
+    print(f'[input] {len(descriptions)} description(s), '
+          f'{args.n_samples} sample(s) each')
+
+    ldm, embedder = build_and_load_ldm(args, device)
 
     # ── Generate ──────────────────────────────────────────────────────────────
     all_images, all_caps, all_idx = [], [], []
