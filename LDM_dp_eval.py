@@ -99,6 +99,12 @@ def parse_args():
     p.add_argument('--compute_fid', default=False,
                    type=lambda x: str(x).lower() != 'false',
                    help='Also compute set-level FID (real set vs generated set)')
+    p.add_argument('--eval_model', default='xrv',
+                   choices=['inception', 'xrv'],
+                   help="FID feature extractor: 'inception' (torchvision "
+                        "InceptionV3, 2048-dim, natural-image stats) or 'xrv' "
+                        "(torchxrayvision DenseNet-121, 1024-dim, CXR-domain "
+                        "stats). 'xrv' is more meaningful for chest X-rays.")
 
     # Output
     p.add_argument('--output_dir', default='./eval_out')
@@ -274,22 +280,24 @@ def main():
 
     if args.compute_fid and len(fid_real) >= 2:
         try:
-            from Eval_metric.fid import InceptionV3Features, compute_fid, to_float_rgb
-            inception = InceptionV3Features().to(device).eval()
+            from Eval_metric.fid import build_feature_extractor, compute_fid
+            # Selected backbone handles its own resize/normalization internally:
+            #   inception -> 299x299 RGB [0,1];  xrv -> 224x224 [-1024,1024].
+            feat_model, preprocess = build_feature_extractor(args.eval_model, device)
 
             def _feats(img_list):
                 feats = []
                 with torch.no_grad():
                     for im in img_list:
-                        x = to_float_rgb(im.to(device))          # [1,3,H,W] in [0,1]
-                        x = F.interpolate(x, size=(299, 299), mode='bilinear',
-                                          align_corners=False)   # InceptionV3 input
-                        feats.append(inception(x).cpu().numpy())
+                        x = preprocess(im.to(device))   # [1,1,H,W] in [-1,1] -> input
+                        feats.append(feat_model(x).cpu().numpy())
                 return np.concatenate(feats, axis=0)
 
             fid = compute_fid(_feats(fid_real), _feats(fid_gen))
             summary['fid'] = float(fid)
-            print(f'  {"fid":12s}: {fid:.4f}  (real-set vs generated-set)')
+            summary['fid_backbone'] = args.eval_model
+            print(f'  {"fid":12s}: {fid:.4f}  (real-set vs generated-set, '
+                  f'backbone={args.eval_model})')
         except Exception as e:
             print(f'  [fid] skipped ({e})')
 

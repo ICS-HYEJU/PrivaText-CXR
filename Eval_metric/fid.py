@@ -365,6 +365,49 @@ class InceptionV3Features(nn.Module):
         return feats.view(feats.shape[0], -1)   # [B, 2048]
 
 
+class XRVDenseNetFeatures(nn.Module):
+    """
+    Extract 1024-dim features from a torchxrayvision DenseNet-121
+    pretrained on chest X-ray datasets.
+
+    Input  : [B, 1, H, W]  float32 in [-1024, 1024]  (XRV normalization)
+    Output : [B, 1024]
+
+    Dependencies:
+        pip install torchxrayvision
+    """
+
+    def __init__(self, weights: str = 'densenet121-res224-all'):
+        super().__init__()
+        try:
+            import torchxrayvision as xrv
+        except ImportError:
+            raise ImportError(
+                'torchxrayvision is required for XRV DenseNet-121 FID.\n'
+                '  pip install torchxrayvision'
+            )
+        self.model = xrv.models.DenseNet(weights=weights)
+        self.model.eval()
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x : [B, 1, H, W]  float32 in [-1024, 1024]
+        Returns:
+            [B, 1024]
+        """
+        # XRV DenseNet-121 was trained on 224x224 inputs
+        if x.shape[-2] != 224 or x.shape[-1] != 224:
+            x = F.interpolate(x, size=(224, 224),
+                              mode='bilinear', align_corners=False)
+        feats = self.model.features(x)              # [B, 1024, 7, 7]
+        feats = F.relu(feats, inplace=True)
+        feats = F.adaptive_avg_pool2d(feats, (1, 1))  # [B, 1024, 1, 1]
+        return feats.view(feats.shape[0], -1)       # [B, 1024]
+
+
 def _compute_stats(features: np.ndarray):
     """Mean vector and covariance matrix of feature array [N, D]."""
     mu    = np.mean(features, axis=0)           # [D]
@@ -427,6 +470,39 @@ def to_float_rgb(x: torch.Tensor) -> torch.Tensor:
     return x.repeat(1, 3, 1, 1)         # 1ch ¡æ 3ch
 
 
+def to_xrv_input(x: torch.Tensor) -> torch.Tensor:
+    """
+    [B, 1, H, W] float in [-1, 1]  ->  [B, 1, H, W] float in [-1024, 1024]
+    XRV models expect single-channel input in [-1024, 1024]
+    (xrv.datasets.normalize convention).
+    """
+    return x.clamp(-1., 1.) * 1024.
+
+
+def build_feature_extractor(eval_model: str, device):
+    """
+    Select the FID feature extractor by name.
+
+    Args:
+        eval_model : 'inception' (torchvision InceptionV3, 2048-dim) |
+                     'xrv'       (torchxrayvision DenseNet-121, 1024-dim)
+        device     : 'cuda' | 'cpu'
+    Returns:
+        (feature_extractor: nn.Module, preprocess: callable)
+        preprocess maps [B, 1, H, W] in [-1, 1] to the extractor's input.
+    """
+    if eval_model == 'inception':
+        print('[InceptionV3] loading pretrained weights ...')
+        return InceptionV3Features().to(device).eval(), to_float_rgb
+    elif eval_model == 'xrv':
+        print('[XRV DenseNet-121] loading pretrained weights ...')
+        return XRVDenseNetFeatures().to(device).eval(), to_xrv_input
+    else:
+        raise ValueError(
+            f"Unknown eval_model '{eval_model}' (choices: 'inception', 'xrv')"
+        )
+
+
 def build_vae(image_size: int) -> VAE:
     """Construct AutoencoderKL with the same config used during training."""
     vae_args = argparse.Namespace(
@@ -473,14 +549,18 @@ def load_vae(ckpt_path: str, device: str, image_size: int) -> VAE:
 # =============================================================================
 
 @torch.no_grad()
-def evaluate(vae, inception, test_loader, device, save_dir=None):
+def evaluate(vae, feat_model, preprocess, test_loader, device, save_dir=None):
     """
-    Run VAE reconstruction and collect InceptionV3 features for FID.
+    Run VAE reconstruction and collect feature-extractor features for FID.
+
+    Args:
+        feat_model : feature extractor (InceptionV3Features | XRVDenseNetFeatures)
+        preprocess : maps [B, 1, H, W] in [-1, 1] to the extractor's input
 
     Returns:
         avg_mse    : float
-        feats_real : np.ndarray [N, 2048]
-        feats_recon: np.ndarray [N, 2048]
+        feats_real : np.ndarray [N, D]
+        feats_recon: np.ndarray [N, D]
     """
     if save_dir:
         os.makedirs(os.path.join(save_dir, 'real'),  exist_ok=True)
@@ -505,11 +585,11 @@ def evaluate(vae, inception, test_loader, device, save_dir=None):
         n_batches += 1
 
         # ¦¡¦¡ InceptionV3 features  (float RGB [0,1]) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-        real_rgb  = to_float_rgb(imgs)          # [B, 3, 256, 256]
-        recon_rgb = to_float_rgb(recon)         # [B, 3, 256, 256]
+        real_in  = preprocess(imgs)
+        recon_in = preprocess(recon)
 
-        all_real .append(inception(real_rgb) .cpu().numpy())
-        all_recon.append(inception(recon_rgb).cpu().numpy())
+        all_real .append(feat_model(real_in) .cpu().numpy())
+        all_recon.append(feat_model(recon_in).cpu().numpy())
 
         # ¦¡¦¡ Optional: save images ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
         if save_dir:
@@ -540,6 +620,11 @@ def parse_args():
                         help='Trained VAE checkpoint (.pth)')
     parser.add_argument('--root_path', default='/storage/hjchoi/archive/DATA',
                         help='Root directory of CXR image files')
+    parser.add_argument('--eval_model',  default='xrv',
+                        choices=['inception', 'xrv'],
+                        help="FID feature extractor: 'inception' "
+                             "(torchvision InceptionV3, 2048-dim) or 'xrv' "
+                             "(torchxrayvision DenseNet-121, 1024-dim)")
     parser.add_argument('--image_size',  default=256,  type=int)
     parser.add_argument('--batch_size',  default=16,   type=int)
     parser.add_argument('--num_workers', default=4,    type=int)
@@ -582,9 +667,8 @@ def main():
     for p in vae.parameters():
         p.requires_grad = False
 
-    # ¦¡¦¡ InceptionV3 feature extractor ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-    print('[InceptionV3] loading pretrained weights ...')
-    inception = InceptionV3Features().to(device)
+    # ¦¡¦¡ FID feature extractor (selected by --eval_model) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    feat_model, preprocess = build_feature_extractor(args.eval_model, device)
 
     # ¦¡¦¡ Output directory: output_dir / <ckpt_stem> / ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     ckpt_stem = os.path.splitext(os.path.basename(args.ckpt_path))[0]
@@ -594,7 +678,7 @@ def main():
 
     # ¦¡¦¡ Run evaluation ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     avg_mse, feats_real, feats_recon = evaluate(
-        vae, inception, test_loader, device, save_dir
+        vae, feat_model, preprocess, test_loader, device, save_dir
     )
 
     # ¦¡¦¡ FID ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
@@ -605,6 +689,7 @@ def main():
     print()
     print('=' * 45)
     print(f'  Checkpoint      : {ckpt_stem}')
+    print(f'  Eval model      : {args.eval_model}')
     print(f'  Test samples    : {len(test_dataset)}')
     print(f'  Avg MSE (recon) : {avg_mse:.6f}')
     print(f'  FID score       : {fid_score:.4f}')
