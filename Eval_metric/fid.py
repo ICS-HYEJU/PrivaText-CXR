@@ -297,9 +297,12 @@ from tqdm import tqdm
 
 # ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 _this_dir  = os.path.dirname(os.path.abspath(__file__))
-_model_dir = os.path.normpath(os.path.join(_this_dir, '..', 'Model'))
-_data_dir  = os.path.normpath(os.path.join(_this_dir, '..', 'Data'))
-for _d in [_model_dir, _data_dir, _this_dir]:
+_root_dir  = os.path.normpath(os.path.join(_this_dir, '..'))   # project root
+_model_dir = os.path.join(_root_dir, 'Model')
+_data_dir  = os.path.join(_root_dir, 'Data')
+# project root must be on sys.path so `Model` / `Data` import as packages
+# (needed when running this file directly, e.g. `python Eval_metric/fid.py`)
+for _d in [_root_dir, _model_dir, _data_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
