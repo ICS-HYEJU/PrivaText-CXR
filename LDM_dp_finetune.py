@@ -475,6 +475,14 @@ def evaluate(ldm, val_loader, device, max_batches=-1):
 # Checkpoint helpers
 # =============================================================================
 
+def _fmt_hms(seconds: float) -> str:
+    """Seconds -> 'HhMMmSSs' (e.g. 3h42m10s)."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s   = divmod(rem, 60)
+    return f'{h}h{m:02d}m{s:02d}s'
+
+
 def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
                        epoch, global_step, args, target_delta):
     eps_spent = privacy_engine.get_epsilon(target_delta)
@@ -871,6 +879,7 @@ def main():
     step_hist, step_loss_hist = [], []
     epoch_rows = []   # (epoch, global_step, train_loss, val_loss, epsilon)
 
+    train_start = time.time()
     for epoch in range(start_epoch, start_epoch + args.epochs):
         ldm.train()
         epoch_losses = []
@@ -935,10 +944,16 @@ def main():
             val_loss = evaluate(ldm, val_loader, device, args.val_batches)
             val_str  = f'  val_loss={val_loss:.4f}'
 
+        # Wall-clock so far and ETA over the remaining epochs (avg epoch time).
+        done_epochs   = epoch - start_epoch + 1
+        total_elapsed = time.time() - train_start
+        remaining     = args.epochs - done_epochs
+        eta_sec       = (total_elapsed / done_epochs) * remaining
         print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '
               f'loss={mean_loss:.4f}{val_str}  '
               f'eps={eps_now:.4f}  delta={args.target_delta}  '
-              f'time={elapsed:.1f}s')
+              f'time={elapsed:.1f}s  '
+              f'elapsed={_fmt_hms(total_elapsed)}  eta={_fmt_hms(eta_sec)}')
 
         # Record epoch summary, dump CSVs, and refresh loss_curve.png
         epoch_rows.append((epoch + 1, global_step, mean_loss, val_loss, eps_now))
@@ -994,7 +1009,10 @@ def main():
         target_delta   = args.target_delta,
     )
     eps_final = privacy_engine.get_epsilon(args.target_delta)
-    print(f'\nTraining complete.  Final eps={eps_final:.4f}  delta={args.target_delta}')
+    total_train = time.time() - train_start
+    print(f'\nTraining complete.  Final eps={eps_final:.4f}  '
+          f'delta={args.target_delta}  '
+          f'total_time={_fmt_hms(total_train)} ({total_train:.1f}s)')
 
 
 if __name__ == '__main__':
