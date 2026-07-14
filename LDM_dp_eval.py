@@ -85,6 +85,22 @@ def parse_args():
     p.add_argument('--max_eval', default=100, type=int,
                    help='Max (image, report) pairs to evaluate (-1 = all)')
 
+    # Conditioning prompt source
+    p.add_argument('--prompt_mode', default='report',
+                   choices=['report', 'full', 'label'],
+                   help="Text used to condition generation: 'report'=FINDINGS+"
+                        "IMPRESSION truncated to max_length chars (default); "
+                        "'full'=entire report .txt (BioBERT still caps at "
+                        "max_length tokens); 'label'=classifiable CheXpert "
+                        "pathology names (e.g. 'Pleural Effusion, Cardiomegaly').")
+    p.add_argument('--chexpert_csv', default='mimic-cxr-2.0.0-chexpert.csv',
+                   help="CheXpert label CSV (relative to --root_path or "
+                        "absolute); used only when --prompt_mode label.")
+    p.add_argument('--label_set', nargs='+', default=None,
+                   help='CheXpert columns for label mode (default: Pleural '
+                        'Effusion, Cardiomegaly, Edema, Pneumothorax, Lung '
+                        'Opacity, No Finding).')
+
     # Sampling
     p.add_argument('--n_samples', default=1, type=int,
                    help='Samples generated per description; per-pair metric is '
@@ -139,6 +155,9 @@ def build_eval_dataset(args):
         max_length        = args.max_length,
         patient_whitelist = _load_patient_whitelist(args.dp_split_json,
                                                     args.dp_split_group),
+        prompt_mode       = args.prompt_mode,
+        chexpert_csv      = args.chexpert_csv,
+        label_set         = args.label_set,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -267,7 +286,8 @@ def main():
     print('\n' + '=' * 52)
     print(f'Evaluation summary  (n={len(rows)}, held-out split={args.eval_split})')
     print('=' * 52)
-    summary = {'n': len(rows), 'eval_split': args.eval_split}
+    summary = {'n': len(rows), 'eval_split': args.eval_split,
+               'prompt_mode': args.prompt_mode}
     for key in fieldnames:
         if key in ('index', 'description'):
             continue

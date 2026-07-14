@@ -75,6 +75,16 @@ def parse_args():
     parser.add_argument("--image_size",  type=int, default=256)
     parser.add_argument("--max_length",  type=int, default=512)
 
+    # Prompt / conditioning source
+    parser.add_argument("--prompt_mode", type=str, default="report",
+                        choices=["report", "full", "label"],
+                        help="'report'=FINDINGS+IMPRESSION (truncated), "
+                             "'full'=entire .txt, 'label'=CheXpert pathologies")
+    parser.add_argument("--chexpert_csv", type=str,
+                        default="mimic-cxr-2.0.0-chexpert.csv",
+                        help="CheXpert label CSV (relative to root_path or "
+                             "absolute); used only when prompt_mode='label'")
+
     # DataLoader
     parser.add_argument("--batch_size",  type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -84,6 +94,23 @@ def parse_args():
     parser.add_argument("--biobert_path", type=str, default="/storage/hjchoi")
 
     return parser.parse_args()
+
+
+# =============================================================================
+# Prompt / label configuration
+# =============================================================================
+
+# Default set of CheXpert pathology columns used when prompt_mode='label'.
+# These are the classifiable findings requested for alignment evaluation.
+# Column names must match mimic-cxr-2.0.0-chexpert.csv exactly.
+DEFAULT_LABEL_SET = [
+    "Pleural Effusion",
+    "Cardiomegaly",
+    "Edema",
+    "Pneumothorax",
+    "Lung Opacity",
+    "No Finding",
+]
 
 
 # =============================================================================
@@ -143,11 +170,25 @@ class MIMICCXRDataset(Dataset):
         wl = getattr(args, "patient_whitelist", None)
         self.patient_whitelist = set(wl) if wl is not None else None
 
+        # ── Prompt mode ───────────────────────────────────────────────────────
+        # 'report' : FINDINGS + IMPRESSION sections, truncated to max_length
+        #            characters (default, matches training conditioning).
+        # 'full'   : entire report .txt (whitespace-collapsed). NOTE: BioBERT
+        #            still caps at max_length TOKENS at tokenization time.
+        # 'label'  : classifiable pathology names from the CheXpert CSV
+        #            (e.g. "Pleural Effusion, Cardiomegaly"), for alignment eval.
+        self.prompt_mode = getattr(args, "prompt_mode", "report")
+        self.label_set = list(getattr(args, "label_set", None) or DEFAULT_LABEL_SET)
+        self.study_labels = None
+        if self.prompt_mode == "label":
+            self.study_labels = self._load_chexpert_labels(args)
+
         self.samples = self._build_index()
         if self.patient_whitelist is not None:
             self.samples = [s for s in self.samples
                             if s["patient_id"] in self.patient_whitelist]
         print(f"[MIMICCXRDataset] split='{self.split}'  total={len(self.samples)}"
+              + f"  prompt_mode='{self.prompt_mode}'"
               + (f"  (patient_whitelist={len(self.patient_whitelist)} patients)"
                  if self.patient_whitelist is not None else ""))
 
@@ -172,7 +213,7 @@ class MIMICCXRDataset(Dataset):
             print(f"[MIMICCXRDataset] load error idx={idx}: {e}")
             image = self._blank_image()
 
-        report = self._load_report(meta["report_path"])
+        report = self._get_prompt(meta)
         return image, report
 
     # -------------------------------------------------------------------------
@@ -210,10 +251,12 @@ class MIMICCXRDataset(Dataset):
                 continue
 
             samples.append({
-                "dcm_path"   : dcm_path,
-                "report_path": report_path,
-                "study_id"   : f"s{study_id}",
-                "patient_id" : pid_str,
+                "dcm_path"    : dcm_path,
+                "report_path" : report_path,
+                "study_id"    : f"s{study_id}",
+                "patient_id"  : pid_str,
+                "subject_id"  : subject_id,   # numeric, for CheXpert join
+                "study_id_num": study_id,      # numeric, for CheXpert join
             })
 
         if missing:
@@ -242,6 +285,45 @@ class MIMICCXRDataset(Dataset):
 
     def _blank_image(self) -> torch.Tensor:
         return torch.zeros(1, self.image_size, self.image_size)
+
+    def _get_prompt(self, meta: dict) -> str:
+        """
+        Build the conditioning text for one sample according to prompt_mode:
+            'label'  -> classifiable pathology names from CheXpert CSV
+            'full'   -> entire report .txt (whitespace-collapsed)
+            'report' -> FINDINGS + IMPRESSION, char-truncated (default)
+        """
+        if self.prompt_mode == "label":
+            return self._label_prompt(meta)
+        if self.prompt_mode == "full":
+            return self._load_full_report(meta["report_path"])
+        return self._load_report(meta["report_path"])
+
+    def _label_prompt(self, meta: dict) -> str:
+        """
+        Comma-joined positive CheXpert findings for this study.
+        Falls back to 'No Finding' when nothing (other than No Finding) is
+        positive or the study is absent from the label CSV.
+        """
+        key = (meta["subject_id"], meta["study_id_num"])
+        positives = self.study_labels.get(key, [])
+        findings = [p for p in positives if p != "No Finding"]
+        if findings:
+            return ", ".join(findings)
+        return "No Finding"
+
+    def _load_full_report(self, report_path: str) -> str:
+        """Entire report text with whitespace/newlines collapsed to spaces.
+
+        No character truncation here; the BioBERT tokenizer still caps the
+        sequence at max_length TOKENS, so extremely long reports are bounded
+        at embedding time rather than silently cut mid-sentence.
+        """
+        if not os.path.exists(report_path):
+            return ""
+        with open(report_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        return " ".join(raw.split())
 
     def _load_report(self, report_path: str) -> str:
         if not os.path.exists(report_path):
@@ -280,6 +362,44 @@ class MIMICCXRDataset(Dataset):
                 parts.append(f"{key.upper()}: {sections[key]}")
 
         return " ".join(parts).strip()
+
+    # -------------------------------------------------------------------------
+    # CheXpert labels (prompt_mode='label')
+    # -------------------------------------------------------------------------
+
+    def _load_chexpert_labels(self, args) -> dict:
+        """
+        Read mimic-cxr-2.0.0-chexpert.csv and return
+            {(subject_id, study_id) -> [positive label names in self.label_set]}
+
+        Only value == 1.0 counts as positive; uncertain (-1.0), negative (0.0)
+        and blank are treated as absent.
+        """
+        csv = getattr(args, "chexpert_csv", "mimic-cxr-2.0.0-chexpert.csv")
+        path = csv if os.path.isabs(csv) else os.path.join(self.root_path, csv)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"[MIMICCXRDataset] prompt_mode='label' needs the CheXpert label "
+                f"CSV but it was not found: {path}\n"
+                f"  Download mimic-cxr-2.0.0-chexpert.csv into {self.root_path} "
+                f"or pass --chexpert_csv <path>."
+            )
+
+        df = pd.read_csv(path)
+        cols = [c for c in self.label_set if c in df.columns]
+        missing_cols = [c for c in self.label_set if c not in df.columns]
+        if missing_cols:
+            print(f"[MIMICCXRDataset] WARNING: label columns not in CheXpert CSV, "
+                  f"ignored: {missing_cols}")
+
+        labels = {}
+        for _, row in df.iterrows():
+            key = (int(row["subject_id"]), int(row["study_id"]))
+            labels[key] = [c for c in cols if row[c] == 1.0]
+
+        print(f"[MIMICCXRDataset] CheXpert labels loaded: {len(labels)} studies  "
+              f"label_set={cols}")
+        return labels
 
 
 # =============================================================================
