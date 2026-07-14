@@ -377,12 +377,18 @@ class MIMICCXRDataset(Dataset):
         """
         csv = getattr(args, "chexpert_csv", "mimic-cxr-2.0.0-chexpert.csv")
         path = csv if os.path.isabs(csv) else os.path.join(self.root_path, csv)
+        # Tolerate a .gz / non-.gz mismatch: whichever actually exists is used
+        # (pandas.read_csv reads both transparently).
+        if not os.path.isfile(path):
+            alt = path[:-3] if path.endswith(".gz") else path + ".gz"
+            if os.path.isfile(alt):
+                path = alt
         if not os.path.isfile(path):
             raise FileNotFoundError(
                 f"[MIMICCXRDataset] prompt_mode='label' needs the CheXpert label "
                 f"CSV but it was not found: {path}\n"
-                f"  Download mimic-cxr-2.0.0-chexpert.csv into {self.root_path} "
-                f"or pass --chexpert_csv <path>."
+                f"  Download mimic-cxr-2.0.0-chexpert.csv(.gz) into "
+                f"{self.root_path} or pass --chexpert_csv <path>."
             )
 
         df = pd.read_csv(path)
