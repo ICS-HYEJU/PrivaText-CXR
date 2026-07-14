@@ -297,9 +297,12 @@ from tqdm import tqdm
 
 # ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 _this_dir  = os.path.dirname(os.path.abspath(__file__))
-_model_dir = os.path.normpath(os.path.join(_this_dir, '..', 'Model'))
-_data_dir  = os.path.normpath(os.path.join(_this_dir, '..', 'Data'))
-for _d in [_model_dir, _data_dir, _this_dir]:
+_root_dir  = os.path.normpath(os.path.join(_this_dir, '..'))   # project root
+_model_dir = os.path.join(_root_dir, 'Model')
+_data_dir  = os.path.join(_root_dir, 'Data')
+# project root must be on sys.path so `Model` / `Data` import as packages
+# (needed when running this file directly, e.g. `python Eval_metric/fid.py`)
+for _d in [_root_dir, _model_dir, _data_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
@@ -616,11 +619,11 @@ def evaluate(vae, feat_model, preprocess, test_loader, device, save_dir=None):
 def parse_args():
     parser = argparse.ArgumentParser(description='VAE test-set evaluation + FID')
     parser.add_argument('--device_id', default=0)
-    parser.add_argument('--ckpt_path', default ='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/vae_ep0080.pt',
+    parser.add_argument('--ckpt_path', default ='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/vae_ep0100.pt',
                         help='Trained VAE checkpoint (.pth)')
     parser.add_argument('--root_path', default='/storage/hjchoi/archive/DATA',
                         help='Root directory of CXR image files')
-    parser.add_argument('--eval_model',  default='inception',
+    parser.add_argument('--eval_model',  default='xrv',
                         choices=['inception', 'xrv'],
                         help="FID feature extractor: 'inception' "
                              "(torchvision InceptionV3, 2048-dim) or 'xrv' "
