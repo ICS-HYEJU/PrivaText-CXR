@@ -61,7 +61,13 @@ def dump_ckpt_info(ckpt_path, out_dir):
         print(f'[ckpt_info] skip (no ckpt at {ckpt_path})')
         return None
     import torch
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    # Our own checkpoints store non-tensor objects (args dict, numpy scalar
+    # epsilon_spent). PyTorch >=2.6 defaults weights_only=True and rejects them,
+    # so load with weights_only=False (trusted: produced by our training script).
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')   # older PyTorch
     info = {'ckpt_path': os.path.abspath(ckpt_path)}
     for k in ('epoch', 'global_step', 'epsilon_spent', 'lora_rank', 'lora_alpha'):
         if isinstance(ckpt, dict) and k in ckpt:
@@ -150,6 +156,8 @@ def parse_args():
     p.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
                    choices=['fds', 'tsne', 'fid'])
     p.add_argument('--reg', default=1e-6, type=float)
+    p.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
+                   help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
     p.add_argument('--perplexity', default=30.0, type=float)
     p.add_argument('--seed', default=0, type=int)
     p.add_argument('--ckpt', default=None, help='ckpt to record args from (#3)')
@@ -183,7 +191,8 @@ def run(args):
 
     if 'fds' in args.metrics:
         from Eval_metric.fds import compute_fds
-        fds = compute_fds(feats_real, feats_gen, reg=args.reg)
+        fds = compute_fds(feats_real, feats_gen, reg=args.reg,
+                          cov=getattr(args, 'fds_cov', 'lw'))
         fds.update({'eval_model': args.eval_model,
                     'n_real': int(len(feats_real)), 'n_gen': int(len(feats_gen)),
                     'feature_dim': int(feats_real.shape[1])})

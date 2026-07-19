@@ -75,6 +75,8 @@ def parse_args():
     e.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
                    choices=['fds', 'tsne', 'fid'])
     e.add_argument('--reg', default=1e-6, type=float)
+    e.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
+                   help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
     e.add_argument('--perplexity', default=30.0, type=float)
     # real reference source (either --real_dir OR dataset mode)
     e.add_argument('--real_dir', default=None)
@@ -128,8 +130,8 @@ def build_eval_cfg(args, gen_dir):
         dp_split_json=args.dp_split_json, dp_split_group=args.dp_split_group,
         gen_dir=gen_dir, out_dir=args.out_dir, eval_model=args.eval_model,
         image_size=args.vae_img_size, device=device, batch_size=args.eval_batch_size,
-        metrics=args.metrics, reg=args.reg, perplexity=args.perplexity,
-        seed=args.seed, ckpt=ckpt)
+        metrics=args.metrics, reg=args.reg, fds_cov=args.fds_cov,
+        perplexity=args.perplexity, seed=args.seed, ckpt=ckpt)
 
 
 def main():
