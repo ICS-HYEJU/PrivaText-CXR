@@ -297,12 +297,9 @@ from tqdm import tqdm
 
 # ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 _this_dir  = os.path.dirname(os.path.abspath(__file__))
-_root_dir  = os.path.normpath(os.path.join(_this_dir, '..'))   # project root
-_model_dir = os.path.join(_root_dir, 'Model')
-_data_dir  = os.path.join(_root_dir, 'Data')
-# project root must be on sys.path so `Model` / `Data` import as packages
-# (needed when running this file directly, e.g. `python Eval_metric/fid.py`)
-for _d in [_root_dir, _model_dir, _data_dir, _this_dir]:
+_model_dir = os.path.normpath(os.path.join(_this_dir, '..', 'Model'))
+_data_dir  = os.path.normpath(os.path.join(_this_dir, '..', 'Data'))
+for _d in [_model_dir, _data_dir, _this_dir]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
@@ -401,7 +398,7 @@ class XRVDenseNetFeatures(nn.Module):
         Returns:
             [B, 1024]
         """
-        # XRV DenseNet-121 was trained on 224¡¿224 inputs
+        # XRV DenseNet-121 was trained on 224x224 inputs
         if x.shape[-2] != 224 or x.shape[-1] != 224:
             x = F.interpolate(x, size=(224, 224),
                               mode='bilinear', align_corners=False)
@@ -475,7 +472,7 @@ def to_float_rgb(x: torch.Tensor) -> torch.Tensor:
 
 def to_xrv_input(x: torch.Tensor) -> torch.Tensor:
     """
-    [B, 1, H, W] float in [-1, 1]  ¡æ  [B, 1, H, W] float in [-1024, 1024]
+    [B, 1, H, W] float in [-1, 1]  ->  [B, 1, H, W] float in [-1024, 1024]
     XRV models expect single-channel input in [-1024, 1024]
     (xrv.datasets.normalize convention).
     """
@@ -496,10 +493,10 @@ def build_feature_extractor(eval_model: str, device):
     """
     if eval_model == 'inception':
         print('[InceptionV3] loading pretrained weights ...')
-        return InceptionV3Features().to(device), to_float_rgb
+        return InceptionV3Features().to(device).eval(), to_float_rgb
     elif eval_model == 'xrv':
         print('[XRV DenseNet-121] loading pretrained weights ...')
-        return XRVDenseNetFeatures().to(device), to_xrv_input
+        return XRVDenseNetFeatures().to(device).eval(), to_xrv_input
     else:
         raise ValueError(
             f"Unknown eval_model '{eval_model}' (choices: 'inception', 'xrv')"
@@ -587,7 +584,7 @@ def evaluate(vae, feat_model, preprocess, test_loader, device, save_dir=None):
         mse_total += F.mse_loss(recon, imgs).item()
         n_batches += 1
 
-        # ¦¡¦¡ FID features  (preprocess per eval_model) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # ¦¡¦¡ InceptionV3 features  (float RGB [0,1]) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
         real_in  = preprocess(imgs)
         recon_in = preprocess(recon)
 
@@ -605,8 +602,8 @@ def evaluate(vae, feat_model, preprocess, test_loader, device, save_dir=None):
                            os.path.join(save_dir, 'recon', fname))
                 img_idx += 1
 
-    feats_real  = np.concatenate(all_real,  axis=0)  # [N, D]
-    feats_recon = np.concatenate(all_recon, axis=0)  # [N, D]
+    feats_real  = np.concatenate(all_real,  axis=0)  # [N, 2048]
+    feats_recon = np.concatenate(all_recon, axis=0)  # [N, 2048]
     avg_mse     = mse_total / n_batches
 
     return avg_mse, feats_real, feats_recon
@@ -619,7 +616,7 @@ def evaluate(vae, feat_model, preprocess, test_loader, device, save_dir=None):
 def parse_args():
     parser = argparse.ArgumentParser(description='VAE test-set evaluation + FID')
     parser.add_argument('--device_id', default=0)
-    parser.add_argument('--ckpt_path', default ='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/vae_ep0100.pt',
+    parser.add_argument('--ckpt_path', default ='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/vae_ep0080.pt',
                         help='Trained VAE checkpoint (.pth)')
     parser.add_argument('--root_path', default='/storage/hjchoi/archive/DATA',
                         help='Root directory of CXR image files')
@@ -670,7 +667,7 @@ def main():
     for p in vae.parameters():
         p.requires_grad = False
 
-    # ¦¡¦¡ FID feature extractor (selected by --eval_model) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ¦¡¦¡ FID feature extractor (selected by --eval_model) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     feat_model, preprocess = build_feature_extractor(args.eval_model, device)
 
     # ¦¡¦¡ Output directory: output_dir / <ckpt_stem> / ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡

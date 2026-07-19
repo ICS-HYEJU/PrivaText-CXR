@@ -1,15 +1,15 @@
 """
-LDM_dp_eval.py  ?  Paired evaluation: generated vs held-out real images
+LDM_dp_eval.py  –  Paired evaluation: generated vs held-out real images
 =======================================================================
 Feeds descriptions from data NOT used in training (a held-out split, e.g. the
 official 'test'/'validate' split, or D_test from dp_splits.json) to the model,
 generates images, and measures how well each generated image matches its
 PAIRED real image.
 
-    (real_image, report)  ¦¡ report ¦¡?  LDM.sample  ¦¡?  generated_image
-                ¦¦¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡ metric(real, generated) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¥
+    (real_image, report)  ─ report ─►  LDM.sample  ─►  generated_image
+                └──────────── metric(real, generated) ────────────┘
 
-IMPORTANT ? generation is NOT reconstruction:
+IMPORTANT — generation is NOT reconstruction:
     A description ("bilateral pleural effusion ...") maps to MANY possible real
     images (different patients/pose/anatomy).  So pixel-aligned metrics
     (SSIM / PSNR) are expected to be LOW and are only a rough proxy.  For a
@@ -32,7 +32,7 @@ Usage (run from project root):
 
 To evaluate on the held-out D_test patients of a dp_splits.json instead of the
 official split, add:  --dp_split_json ./dp_splits.json --dp_split_group train
-(train-group patients NOT used for D_search) ? or just use --eval_split test.
+(train-group patients NOT used for D_search) — or just use --eval_split test.
 """
 
 import os
@@ -85,6 +85,22 @@ def parse_args():
     p.add_argument('--max_eval', default=100, type=int,
                    help='Max (image, report) pairs to evaluate (-1 = all)')
 
+    # Conditioning prompt source
+    p.add_argument('--prompt_mode', default='report',
+                   choices=['report', 'full', 'label'],
+                   help="Text used to condition generation: 'report'=FINDINGS+"
+                        "IMPRESSION truncated to max_length chars (default); "
+                        "'full'=entire report .txt (BioBERT still caps at "
+                        "max_length tokens); 'label'=classifiable CheXpert "
+                        "pathology names (e.g. 'Pleural Effusion, Cardiomegaly').")
+    p.add_argument('--chexpert_csv', default='mimic-cxr-2.0.0-chexpert.csv',
+                   help="CheXpert label CSV (relative to --root_path or "
+                        "absolute); used only when --prompt_mode label.")
+    p.add_argument('--label_set', nargs='+', default=None,
+                   help='CheXpert columns for label mode (default: Pleural '
+                        'Effusion, Cardiomegaly, Edema, Pneumothorax, Lung '
+                        'Opacity, No Finding).')
+
     # Sampling
     p.add_argument('--n_samples', default=1, type=int,
                    help='Samples generated per description; per-pair metric is '
@@ -99,6 +115,12 @@ def parse_args():
     p.add_argument('--compute_fid', default=False,
                    type=lambda x: str(x).lower() != 'false',
                    help='Also compute set-level FID (real set vs generated set)')
+    p.add_argument('--eval_model', default='xrv',
+                   choices=['inception', 'xrv'],
+                   help="FID feature extractor: 'inception' (torchvision "
+                        "InceptionV3, 2048-dim, natural-image stats) or 'xrv' "
+                        "(torchxrayvision DenseNet-121, 1024-dim, CXR-domain "
+                        "stats). 'xrv' is more meaningful for chest X-rays.")
 
     # Output
     p.add_argument('--output_dir', default='./eval_out')
@@ -133,6 +155,9 @@ def build_eval_dataset(args):
         max_length        = args.max_length,
         patient_whitelist = _load_patient_whitelist(args.dp_split_json,
                                                     args.dp_split_group),
+        prompt_mode       = args.prompt_mode,
+        chexpert_csv      = args.chexpert_csv,
+        label_set         = args.label_set,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -162,7 +187,7 @@ def _load_lpips(device):
             return d.view(-1)
         return _lpips
     except Exception as e:
-        print(f'[lpips] unavailable ({e}) ? skipping LPIPS')
+        print(f'[lpips] unavailable ({e}) – skipping LPIPS')
         return None
 
 
@@ -246,7 +271,7 @@ def main():
         if (i + 1) % 10 == 0 or i == n_eval - 1:
             print(f'  [{i+1}/{n_eval}] {report[:45]!r}')
 
-    # ¦¡¦¡ Per-pair CSV ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── Per-pair CSV ──────────────────────────────────────────────────────────
     fieldnames = ['index', 'description']
     for m in ('ssim', 'psnr', 'lpips'):
         if any(f'{m}_best' in r for r in rows):
@@ -257,11 +282,12 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
-    # ¦¡¦¡ Aggregate summary ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── Aggregate summary ─────────────────────────────────────────────────────
     print('\n' + '=' * 52)
     print(f'Evaluation summary  (n={len(rows)}, held-out split={args.eval_split})')
     print('=' * 52)
-    summary = {'n': len(rows), 'eval_split': args.eval_split}
+    summary = {'n': len(rows), 'eval_split': args.eval_split,
+               'prompt_mode': args.prompt_mode}
     for key in fieldnames:
         if key in ('index', 'description'):
             continue
@@ -270,26 +296,28 @@ def main():
         if len(vals):
             m, sd = float(vals.mean()), float(vals.std())
             summary[key] = m
-            print(f'  {key:12s}: {m:.4f} ¡¾ {sd:.4f}')
+            print(f'  {key:12s}: {m:.4f} ± {sd:.4f}')
 
     if args.compute_fid and len(fid_real) >= 2:
         try:
-            from Eval_metric.fid import InceptionV3Features, compute_fid, to_float_rgb
-            inception = InceptionV3Features().to(device).eval()
+            from Eval_metric.fid import build_feature_extractor, compute_fid
+            # Selected backbone handles its own resize/normalization internally:
+            #   inception -> 299x299 RGB [0,1];  xrv -> 224x224 [-1024,1024].
+            feat_model, preprocess = build_feature_extractor(args.eval_model, device)
 
             def _feats(img_list):
                 feats = []
                 with torch.no_grad():
                     for im in img_list:
-                        x = to_float_rgb(im.to(device))          # [1,3,H,W] in [0,1]
-                        x = F.interpolate(x, size=(299, 299), mode='bilinear',
-                                          align_corners=False)   # InceptionV3 input
-                        feats.append(inception(x).cpu().numpy())
+                        x = preprocess(im.to(device))   # [1,1,H,W] in [-1,1] -> input
+                        feats.append(feat_model(x).cpu().numpy())
                 return np.concatenate(feats, axis=0)
 
             fid = compute_fid(_feats(fid_real), _feats(fid_gen))
             summary['fid'] = float(fid)
-            print(f'  {"fid":12s}: {fid:.4f}  (real-set vs generated-set)')
+            summary['fid_backbone'] = args.eval_model
+            print(f'  {"fid":12s}: {fid:.4f}  (real-set vs generated-set, '
+                  f'backbone={args.eval_model})')
         except Exception as e:
             print(f'  [fid] skipped ({e})')
 

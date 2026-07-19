@@ -1,17 +1,23 @@
 """
-Diffusion/LDM_dp_finetune.py  ?  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
+LDM_dp_finetune.py  -  DP-SGD Fine-Tuning of LDM on MIMIC-CXR
 =========================================================================
 Fine-tunes only the cross-attention (SpatialTransformer) blocks of a
-pre-trained LatentDiffusion model under (¥å, ¥ä)-differential privacy using
-Opacus DP-SGD.
+pre-trained LatentDiffusion model under (epsilon, delta)-differential privacy
+using Opacus DP-SGD.
 
-Expected directory layout (produced by Data/mimic_cxr.py prepare_split_dirs):
+Reads directly from the original MIMIC-CXR PhysioNet directory using the
+official split CSV (mimic-cxr-2.0.0-split.csv).  No pre-built split
+directories are required.
+
+Expected directory layout:
     <root_path>/
-    ¦§¦¡¦¡ train/
-    ¦¢   ¦¦¦¡¦¡ p10/ ¦¦¦¡¦¡ p10000032/ ¦¦¦¡¦¡ s50414267/ ¦¦¦¡¦¡ <id>.dcm
-    ¦¢                            ¦¦¦¡¦¡ s50414267.txt
-    ¦§¦¡¦¡ validate/
-    ¦¦¦¡¦¡ test/
+    ├── files/
+    │   ├── p10/ ... p19/
+    │   │   └── p<subject_id>/
+    │   │       ├── s<study_id>/
+    │   │       │   └── <dicom_id>.dcm
+    │   │       └── s<study_id>.txt
+    └── mimic-cxr-2.0.0-split.csv
 
 Key design notes:
   1. BioBERT lives INSIDE LatentDiffusionDP (not in collate_fn) so Opacus
@@ -22,23 +28,29 @@ Key design notes:
   4. Gradient checkpointing is disabled (incompatible with Opacus hooks).
   5. scale_factor initialised BEFORE make_private() to avoid buffer issues.
   6. Checkpoint save/load uses model._module.state_dict() (GradSampleModule).
-  7. Gradient accumulation via VirtualBatch chunk splitting:
-       logical_batch ¡æ n_chunks = ceil(B / physical_batch) physical chunks
-     Each chunk accumulates per-sample grads; one optimizer.step() per logical batch.
+  7. Physical-batch splitting via Opacus BatchMemoryManager:
+       logical_batch -> N physical batches of size physical_batch
+     optimizer.step() is called after every physical forward/backward pass
+     (required for Poisson sampling compatibility).  The scheduler advances
+     only at logical-batch boundaries (when _is_last_step_skipped is False).
+  8. Model parallelism: VAE/BioBERT on --offload_device_id, UNet on --device_id.
+     Buffers are re-pinned after Opacus make_private() which can shuffle them.
 
 Usage:
-    python Diffusion/LDM_dp_finetune.py \\
-        --pretrained_ckpt ./checkpoints/ldm_epoch0100.pt \\
-        --root_path /storage/hjchoi/mimic/split \\
+    python LDM_dp_finetune.py \\
+        --pretrained_ckpt ./checkpoints/ldm/ldm_epoch0100.pt \\
+        --root_path /storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0 \\
         --split train \\
+        --device_id 0 \\
+        --offload_device_id 1 \\
         --target_epsilon 10.0 \\
         --target_delta 1e-5 \\
-        --max_grad_norm 1.0 \\
+        --max_grad_norm 0.001 \\
         --logical_batch 256 \\
-        --physical_batch 8 \\
-        --epochs 30 \\
-        --lr 1e-4 \\
-        --save_dir ./checkpoints_dp
+        --physical_batch 1 \\
+        --epochs 10 \\
+        --lr 2e-5 \\
+        --save_dir ./finetune_dp
 """
 
 import os
@@ -53,9 +65,9 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
-# ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-_this_dir  = os.path.dirname(os.path.abspath(__file__))       # Diffusion/
-_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))  # PrivaText-CXR/
+# ── Path setup ────────────────────────────────────────────────────────────────
+_this_dir  = os.path.dirname(os.path.abspath(__file__))
+_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))
 
 for _d in [_proj_root, _this_dir]:
     if _d not in sys.path:
@@ -66,7 +78,7 @@ from Model.Diffusion.UNetmodel import UNetModel
 from Model.VAE.Autoencoder     import VAE
 from Model.attention_module_dp import disable_checkpointing
 
-from Data.mimic_cxr import MIMICCXRDataset                    # Data/mimic_cxr.py
+from Data.mimic_cxr import MIMICCXRDataset
 from privacy.privacy_analysis import (
     compute_noise_multiplier,
     print_privacy_summary,
@@ -82,28 +94,57 @@ except ImportError:
 # Dataset helper
 # =============================================================================
 
+def _load_patient_whitelist(dp_split_json, group):
+    """
+    Load the patient list for a group ('search'/'train') from a dp_splits.json
+    manifest produced by Data/make_dp_splits.py.  Returns None when no manifest
+    is given (→ use the whole split).
+    """
+    if not dp_split_json:
+        return None
+    import json
+    with open(dp_split_json, 'r', encoding='utf-8') as f:
+        manifest = json.load(f)
+    assignment = manifest.get('assignment', manifest)
+    patients = [p for p, g in assignment.items() if g == group]
+    if not patients:
+        raise ValueError(
+            f"dp_split '{dp_split_json}' has no patients for group='{group}'. "
+            f"Available groups: {sorted(set(assignment.values()))}")
+    print(f"[dp_split] group='{group}'  patients={len(patients)}  "
+          f"(from {dp_split_json})")
+    return patients
+
+
 def _make_dataset(root_path: str, split: str,
+                  split_csv: str = 'mimic-cxr-2.0.0-split.csv',
                   image_size: int = 256,
-                  max_length: int = 512) -> MIMICCXRDataset:
+                  max_length: int = 512,
+                  patient_whitelist=None) -> MIMICCXRDataset:
     """
     Construct a MIMICCXRDataset for the given split.
 
     Args:
-        root_path  : root containing train/ validate/ test/ subdirectories
-                     e.g. /storage/hjchoi/mimic/split
-        split      : one of 'train', 'validate', 'test'
-        image_size : resize target
-        max_length : max report character length
+        root_path         : root of original MIMIC-CXR PhysioNet download
+                            (contains files/ and mimic-cxr-2.0.0-split.csv)
+        split             : one of 'train', 'validate', 'test'
+        split_csv         : CSV filename relative to root_path (or absolute path)
+        image_size        : resize target
+        max_length        : max report character length
+        patient_whitelist : optional list of patient_ids (e.g. only p10 subset
+                            for D_search); None = use the whole split
     """
     valid_splits = ('train', 'validate', 'test')
     if split not in valid_splits:
         raise ValueError(f"split must be one of {valid_splits}, got '{split}'")
 
     ds_args = argparse.Namespace(
-        prebuilt_split_dir = root_path,
-        split              = split,
-        image_size         = image_size,
-        max_length         = max_length,
+        root_path         = root_path,
+        split_csv         = split_csv,
+        split             = split,
+        image_size        = image_size,
+        max_length        = max_length,
+        patient_whitelist = patient_whitelist,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -114,33 +155,44 @@ def _make_dataset(root_path: str, split: str,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='DP-SGD Fine-Tuning of LDM on MIMIC-CXR (pre-split dirs)',
+        description='DP-SGD Fine-Tuning of LDM on MIMIC-CXR (original data + split CSV)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # DEVICE -------------------------------------------------------------------
-    parser.add_argument('--device_id', default='0',
-                        help='GPU id (e.g. "0", "1")')
+    parser.add_argument('--device_id', default='1',
+                        help='Main GPU id for UNet + Opacus')
+    parser.add_argument('--offload_device_id', default=None,
+                        help='GPU id for frozen VAE + BioBERT. '
+                             'None = same as --device_id (single-GPU). '
+                             'Different GPU = model parallelism.')
 
-    # DATA (pre-split MIMIC-CXR) -----------------------------------------------
-    parser.add_argument('--root_path', default='/storage/hjchoi/mimic/split',
-                        help='Root containing train/ validate/ test/ subdirectories')
+    # DATA (original MIMIC-CXR) ------------------------------------------------
+    parser.add_argument('--root_path',
+                        default='/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0',
+                        help='Root of original MIMIC-CXR PhysioNet download '
+                             '(contains files/ and mimic-cxr-2.0.0-split.csv)')
+    parser.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv',
+                        help='Split CSV filename (relative to root_path, or absolute path)')
     parser.add_argument('--split',     default='train',
-                        choices=['train', 'validate', 'test'],
-                        help='Which split to use as training data')
+                        choices=['train', 'validate', 'test'])
+    parser.add_argument('--dp_split_json', default=None,
+                        help='dp_splits.json from Data/make_dp_splits.py. When '
+                             'set, only patients assigned to --dp_split_group '
+                             'are used (e.g. the p10 subset for D_search). This '
+                             'isolates the DP privacy budget across search/train.')
+    parser.add_argument('--dp_split_group', default='search',
+                        choices=['search', 'train'],
+                        help='Which group of --dp_split_json to train on')
     parser.add_argument('--do_validation', default=True,
-                        type=lambda x: x.lower() != 'false',
-                        help='Run validation loop after each epoch')
-    parser.add_argument('--val_batches', default=-1, type=int,
-                        help='Max validation batches per epoch (-1 = all)')
-    parser.add_argument('--image_size',  default=256,  type=int)
-    parser.add_argument('--max_length',  default=512,  type=int,
-                        help='Report text character limit')
-    parser.add_argument('--num_workers', default=4,    type=int)
-    parser.add_argument('--pin_memory',  default=True,
                         type=lambda x: x.lower() != 'false')
+    parser.add_argument('--val_batches', default=-1, type=int)
+    parser.add_argument('--image_size',  default=256,  type=int)
+    parser.add_argument('--max_length',  default=512,  type=int)
+    parser.add_argument('--num_workers', default=0,    type=int)
+    parser.add_argument('--pin_memory',  default=False)
 
-    # VAE: Encoder / Decoder ---------------------------------------------------
+    # VAE ----------------------------------------------------------------------
     parser.add_argument('--vae_img_size',         default=256,           type=int)
     parser.add_argument('--vae_in_ch',            default=1,             type=int)
     parser.add_argument('--vae_ch',               default=128,           type=int)
@@ -156,13 +208,12 @@ def parse_args():
     parser.add_argument('--double_z',             default=True,
                         type=lambda x: x.lower() != 'false')
     parser.add_argument('--vae_out_ch',           default=1,             type=int)
-    parser.add_argument('--vae_ckpt',             default=None,
-                        help='Path to pretrained VAE checkpoint (.pt / .pth)')
+    parser.add_argument('--vae_ckpt',
+                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/vae/vae_ep0070.pt')
     parser.add_argument('--verbose', default=False)
 
     # UNet ---------------------------------------------------------------------
-    parser.add_argument('--unet_image_size',         default=16,         type=int,
-                        help='Latent spatial size after VAE downsampling')
+    parser.add_argument('--unet_image_size',         default=16,         type=int)
     parser.add_argument('--unet_in_ch',              default=1,          type=int)
     parser.add_argument('--unet_out_ch',             default=1,          type=int)
     parser.add_argument('--unet_ch',                 default=128,        type=int)
@@ -196,52 +247,51 @@ def parse_args():
     parser.add_argument('--timesteps',     default=1000,  type=int)
     parser.add_argument('--beta_schedule', default='linear')
     parser.add_argument('--scale_factor',  default=1.0,   type=float)
-    parser.add_argument('--scale_by_std',  default=False, action='store_true',
-                        help='Auto-compute scale_factor from first-batch latent std')
+    parser.add_argument('--scale_by_std',  default=False, action='store_true')
     parser.add_argument('--use_ema',       default=False,
-                        type=lambda x: x.lower() != 'false',
-                        help='EMA disabled by default for DP fine-tuning')
+                        type=lambda x: x.lower() != 'false')
 
-    # Pretrained LDM checkpoint ------------------------------------------------
-    parser.add_argument('--pretrained_ckpt', default=None,
-                        help='Pretrained LDM checkpoint to fine-tune from')
+    # Pretrained checkpoint ----------------------------------------------------
+    parser.add_argument('--pretrained_ckpt',
+                        default='/home/hjchoi/PycharmProjects/PrivaText-CXR/checkpoints/ldm/ldm_epoch0100.pt')
 
     # BioBERT ------------------------------------------------------------------
-    parser.add_argument('--biobert_path', default='/storage/hjchoi',
-                        help='HuggingFace model ID or local path for BioBERT')
+    parser.add_argument('--biobert_path', default='/storage/hjchoi')
 
     # DP-SGD -------------------------------------------------------------------
-    parser.add_argument('--target_epsilon',   default=10.0,  type=float,
-                        help='Target ¥å privacy budget')
-    parser.add_argument('--target_delta',     default=1e-5,  type=float,
-                        help='Target ¥ä (recommend 1/dataset_size)')
-    parser.add_argument('--max_grad_norm',    default=1.0,   type=float,
-                        help='Per-sample gradient clipping norm C')
-    parser.add_argument('--noise_multiplier', default=None,  type=float,
-                        help='Override auto-computed ¥ò (skips compute_noise_multiplier)')
-    parser.add_argument('--logical_batch',    default=256,   type=int,
-                        help='Logical batch size for privacy accounting')
-    parser.add_argument('--physical_batch',   default=8,     type=int,
-                        help='Physical batch size that fits in GPU memory')
-    parser.add_argument('--ablation_blocks',  default=-1,    type=int,
-                        help='-1 = all SpatialTransformer blocks; '
-                             'N = only last N blocks (DP-LDM ablation study)')
-    parser.add_argument('--finetune_biobert', default=True,
-                        type=lambda x: x.lower() != 'false',
-                        help='Unfreeze BioBERT projection layer under DP')
+    parser.add_argument('--use_dp', default=True)
+    parser.add_argument('--target_epsilon',   default=10.0,  type=float)
+    parser.add_argument('--target_delta',     default=1e-5,  type=float)
+    parser.add_argument('--max_grad_norm',    default=0.001, type=float)
+    parser.add_argument('--noise_multiplier', default=None,  type=float)
+    parser.add_argument('--logical_batch',    default=256,   type=int)
+    parser.add_argument('--physical_batch',   default=1,     type=int)
+    parser.add_argument('--ablation_blocks',  default=-1,    type=int)
+    parser.add_argument('--finetune_biobert', default=False)
+
+    # LoRA (adapt-lora) --------------------------------------------------------
+    parser.add_argument('--use_lora', default=False,
+                        type=lambda x: str(x).lower() != 'false',
+                        help='Train LoRA adapters on cross-attention instead of '
+                             'full SpatialTransformer blocks')
+    parser.add_argument('--lora_rank',    default=4,   type=int)
+    parser.add_argument('--lora_alpha',   default=4.0, type=float)
+    parser.add_argument('--lora_dropout', default=0.0, type=float)
+    parser.add_argument('--eps_milestones', default=[1, 3, 5, 10],
+                        nargs='+', type=float,
+                        help='Save a LoRA adapter file each time epsilon crosses '
+                             'one of these budgets (LoRA mode only)')
 
     # Training -----------------------------------------------------------------
-    parser.add_argument('--epochs',       default=30,    type=int)
-    parser.add_argument('--lr',           default=1e-4,  type=float)
-    parser.add_argument('--warmup_steps', default=500,   type=int,
-                        help='Linear warmup steps for LR scheduler (0 = disabled)')
+    parser.add_argument('--epochs',       default=10,    type=int)
+    parser.add_argument('--lr',           default=2e-5,  type=float)
+    parser.add_argument('--warmup_steps', default=500,   type=int)
+    parser.add_argument('--scheduler_type', default='linear_warmup',
+                        choices=['cosine_warmup', 'linear_warmup', 'none'])
     parser.add_argument('--save_dir',    default='./finetune_dp')
-    parser.add_argument('--save_every',  default=5,     type=int,
-                        help='Save DP checkpoint every N epochs')
-    parser.add_argument('--log_every',   default=50,    type=int,
-                        help='Print training loss every N logical steps')
-    parser.add_argument('--resume_ckpt', default=None,
-                        help='DP checkpoint to resume from (saved by this script)')
+    parser.add_argument('--save_every',  default=5,     type=int)
+    parser.add_argument('--log_every',   default=50,    type=int)
+    parser.add_argument('--resume_ckpt', default=None)
 
     return parser.parse_args()
 
@@ -293,7 +343,7 @@ def build_unet(args) -> UNetModel:
         resblock_updown        = args.resblock_updown,
         num_classes            = args.num_classes,
         n_embed                = args.n_embed,
-        use_checkpoint         = False,     # must be False for Opacus
+        use_checkpoint         = False,
         use_fp16               = args.use_fp16,
         write_json             = args.write_json,
     )
@@ -322,11 +372,38 @@ def _load_vae_ckpt(vae: VAE, ckpt_path: str, device):
     missing, unexpected = vae.load_state_dict(raw, strict=False)
     print(f'  [VAE ckpt] missing={len(missing)}  unexpected={len(unexpected)}')
     if len(missing) > len(model_keys) * 0.1:
-        print('  [WARNING] >10% VAE keys missing ? checkpoint may be incompatible')
+        print('  [WARNING] >10% VAE keys missing - checkpoint may be incompatible')
 
 
 # =============================================================================
-# DataLoaders  (raw strings ? NO pre-embedding, BioBERT runs inside model)
+# Buffer pinning (model parallelism)
+# =============================================================================
+
+def _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=False):
+    """
+    Ensure LDM-level buffers (sqrt_alphas_cumprod, betas, ...) stay on the
+    main device while VAE/BioBERT buffers remain on offload_device.
+    Recognises Opacus's '_module.' prefix when the model is GradSampleModule-wrapped.
+    """
+    offload_prefixes = (
+        'first_stage_model.', 'embedder.',
+        '_module.first_stage_model.', '_module.embedder.',
+    )
+    moved = []
+    for name, buf in ldm.named_buffers():
+        if any(name.startswith(p) for p in offload_prefixes):
+            continue
+        if buf.device != device:
+            buf.data = buf.data.to(device)
+            moved.append(name)
+    if verbose:
+        print(f'[pin_buffers] moved {len(moved)} buffer(s) -> {device}')
+        for n in moved[:5]:
+            print(f'              - {n}')
+
+
+# =============================================================================
+# DataLoaders
 # =============================================================================
 
 def _raw_collate_fn(samples):
@@ -338,18 +415,18 @@ def _raw_collate_fn(samples):
     }
 
 
-def build_dp_loader(dataset: Dataset, logical_batch: int,
-                    num_workers: int = 4, pin_memory: bool = True) -> DataLoader:
-    """
-    Training DataLoader passed to Opacus make_private().
+def _dp_raw_collate_fn(samples):
+    """Collate into (Tensor[B,1,H,W], list[str]) tuple.
 
-    batch_size = logical_batch (e.g. 256) so Opacus Poisson-samples at
-    q = logical_batch / N.  This must match the q used in compute_noise_multiplier.
-    Physical splitting into smaller GPU-sized chunks is done in the training loop.
-
-    Mirrors DP-LDM's VirtualBatchWrapper approach:
-        config batch_size=256 (accounting unit) + max_batch_size=3 (GPU unit)
+    Returns a tuple instead of a dict so that Opacus BatchMemoryManager can
+    split each element by index: tensor[start:end] for images and
+    list[start:end] for reports.
     """
+    images, reports = zip(*samples)
+    return torch.stack(images), list(reports)
+
+
+def build_dp_loader(dataset, logical_batch, num_workers=0, pin_memory=False):
     return DataLoader(
         dataset,
         batch_size  = logical_batch,
@@ -357,13 +434,11 @@ def build_dp_loader(dataset: Dataset, logical_batch: int,
         num_workers = num_workers,
         drop_last   = True,
         pin_memory  = pin_memory and torch.cuda.is_available(),
-        collate_fn  = _raw_collate_fn,
+        collate_fn  = _dp_raw_collate_fn,
     )
 
 
-def build_val_loader(dataset: Dataset, batch_size: int,
-                     num_workers: int = 4) -> DataLoader:
-    """Validation DataLoader (no DP, shuffle=False, no drop_last)."""
+def build_val_loader(dataset, batch_size, num_workers=0):
     return DataLoader(
         dataset,
         batch_size  = batch_size,
@@ -380,7 +455,7 @@ def build_val_loader(dataset: Dataset, batch_size: int,
 # =============================================================================
 
 @torch.no_grad()
-def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> float:
+def evaluate(ldm, val_loader, device, max_batches=-1):
     inner = ldm._module if hasattr(ldm, '_module') else ldm
     inner.eval()
 
@@ -397,8 +472,16 @@ def evaluate(ldm, val_loader: DataLoader, device, max_batches: int = -1) -> floa
 
 
 # =============================================================================
-# Checkpoint helpers  (GradSampleModule-aware)
+# Checkpoint helpers
 # =============================================================================
+
+def _fmt_hms(seconds: float) -> str:
+    """Seconds -> 'HhMMmSSs' (e.g. 3h42m10s)."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s   = divmod(rem, 60)
+    return f'{h}h{m:02d}m{s:02d}s'
+
 
 def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
                        epoch, global_step, args, target_delta):
@@ -411,7 +494,30 @@ def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
         'epsilon_spent' : eps_spent,
         'args'          : vars(args),
     }, save_path)
-    print(f'  [ckpt] saved ¡æ {save_path}  (¥å_spent={eps_spent:.4f})')
+    print(f'  [ckpt] saved -> {save_path}  (eps_spent={eps_spent:.4f})')
+
+
+def save_lora_checkpoint(save_path, model, privacy_engine, epoch, global_step,
+                         args, target_delta):
+    """
+    Save ONLY the LoRA adapters (small file), tagged with the privacy budget
+    spent so far.  `model` is the Opacus GradSampleModule; the inner module is
+    model._module.
+    """
+    from Model.lora import lora_state_dict
+    inner     = model._module if hasattr(model, '_module') else model
+    eps_spent = privacy_engine.get_epsilon(target_delta) if privacy_engine else None
+    torch.save({
+        'epoch'         : epoch,
+        'global_step'   : global_step,
+        'lora'          : lora_state_dict(inner),
+        'lora_rank'     : args.lora_rank,
+        'lora_alpha'    : args.lora_alpha,
+        'epsilon_spent' : eps_spent,
+        'args'          : vars(args),
+    }, save_path)
+    eps_str = f'{eps_spent:.4f}' if eps_spent is not None else 'N/A'
+    print(f'  [lora] saved -> {save_path}  (eps_spent={eps_str})')
 
 
 def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
@@ -420,7 +526,7 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
     target = model._module if hasattr(model, '_module') else model
     missing, unexpected = target.load_state_dict(sd, strict=False)
     print(f'[load_dp_checkpoint] missing={len(missing)}  unexpected={len(unexpected)}  '
-          f'¥å_spent_at_save={ckpt.get("epsilon_spent", "N/A")}')
+          f'eps_spent_at_save={ckpt.get("epsilon_spent", "N/A")}')
 
     if optimizer is not None and 'optimizer' in ckpt:
         opt_target = (optimizer.original_optimizer
@@ -431,19 +537,84 @@ def load_dp_checkpoint(load_path, model, optimizer=None, device='cpu'):
 
 
 # =============================================================================
+# Loss logging / plotting
+# =============================================================================
+
+def _write_loss_csvs(save_dir, step_hist, step_loss_hist,
+                     epoch_rows):
+    """Write per-step and per-epoch loss CSVs (overwritten each call)."""
+    import csv
+    with open(os.path.join(save_dir, 'loss_steps.csv'), 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['global_step', 'train_loss'])
+        w.writerows(zip(step_hist, step_loss_hist))
+    with open(os.path.join(save_dir, 'loss_epochs.csv'), 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['epoch', 'global_step', 'train_loss', 'val_loss', 'epsilon'])
+        w.writerows(epoch_rows)
+
+
+def save_loss_plot(save_dir, step_hist, step_loss_hist, epoch_rows):
+    """
+    Save loss_curve.png overlaying per-step train loss with per-epoch means
+    (and val loss when available).  Silently skips if matplotlib is absent.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print('[plot] matplotlib not available – skipped loss_curve.png')
+        return None
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    if step_hist:
+        ax.plot(step_hist, step_loss_hist, lw=0.7, alpha=0.5,
+                color='tab:blue', label='train (per step)')
+    if epoch_rows:
+        e_steps = [r[1] for r in epoch_rows]
+        e_train = [r[2] for r in epoch_rows]
+        e_val   = [r[3] for r in epoch_rows]
+        ax.plot(e_steps, e_train, 'o-', color='tab:blue', lw=1.6,
+                label='train (epoch mean)')
+        if any(v == v for v in e_val):        # any non-NaN
+            ax.plot(e_steps, e_val, 's--', color='tab:orange', lw=1.6,
+                    label='val (epoch)')
+    ax.set_xlabel('global step')
+    ax.set_ylabel('loss')
+    ax.grid(alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    path = os.path.join(save_dir, 'loss_curve.png')
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+# =============================================================================
 # LR Scheduler
 # =============================================================================
 
-def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
+def build_scheduler(optimizer, warmup_steps, total_steps,
+                    scheduler_type='cosine_warmup'):
     from torch.optim.lr_scheduler import LambdaLR
 
-    def lr_lambda(step):
+    def _cosine(step):
         if warmup_steps > 0 and step < warmup_steps:
             return float(step) / max(1, warmup_steps)
         progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
-    return LambdaLR(optimizer, lr_lambda)
+    def _linear(step):
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step) / max(1, warmup_steps)
+        progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 1.0 - progress)
+
+    fn = _cosine if scheduler_type == 'cosine_warmup' else _linear
+    print(f'[Scheduler] type={scheduler_type}  warmup_steps={warmup_steps}  '
+          f'total_steps={total_steps}')
+    return LambdaLR(optimizer, fn)
 
 
 # =============================================================================
@@ -453,25 +624,39 @@ def build_scheduler(optimizer, warmup_steps: int, total_steps: int):
 def main():
     args = parse_args()
 
-    # ¦¡¦¡ Device ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-    device = torch.device(
-        f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu'
-    )
-    print(f'Device : {device}')
-    print(f'Split root : {args.root_path}')
+    # ── Devices ───────────────────────────────────────────────────────────────
+    device = torch.device(f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu')
+    if args.offload_device_id is not None and torch.cuda.is_available():
+        offload_device = torch.device(f'cuda:{args.offload_device_id}')
+    else:
+        offload_device = device
 
-    # ¦¡¦¡ Datasets ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    model_parallel = (offload_device != device)
+    print(f'Device (UNet/Opacus)     : {device}')
+    if model_parallel:
+        print(f'Offload device (VAE/BioBERT) : {offload_device}  [model parallelism ON]')
+    print(f'Root path : {args.root_path}')
+    print(f'Split CSV : {args.split_csv}')
+
+    # ── Datasets ──────────────────────────────────────────────────────────────
+    # DP budget isolation: restrict to the patient subset (e.g. p10 part) for
+    # D_search / D_train when a dp_splits.json manifest is provided.
+    train_whitelist = _load_patient_whitelist(args.dp_split_json,
+                                              args.dp_split_group)
     train_dataset = _make_dataset(
-        root_path  = args.root_path,
-        split      = args.split,
-        image_size = args.image_size,
-        max_length = args.max_length,
+        root_path         = args.root_path,
+        split             = args.split,
+        split_csv         = args.split_csv,
+        image_size        = args.image_size,
+        max_length        = args.max_length,
+        patient_whitelist = train_whitelist,
     )
     n_train = len(train_dataset)
+    print(f'[Train] training samples: {n_train}')
     if n_train == 0:
         raise RuntimeError(
-            f"No samples found in {os.path.join(args.root_path, args.split)}. "
-            "Run Data/mimic_cxr.py --make_split_dir first."
+            f"No samples found for split='{args.split}' in {args.root_path}. "
+            "Check --root_path and --split_csv are correct."
         )
 
     val_dataset = None
@@ -480,17 +665,16 @@ def main():
             val_dataset = _make_dataset(
                 root_path  = args.root_path,
                 split      = 'validate',
+                split_csv  = args.split_csv,
                 image_size = args.image_size,
                 max_length = args.max_length,
             )
             print(f'[Validation] validate samples: {len(val_dataset)}')
         except FileNotFoundError as e:
-            print(f'[Validation] WARNING: {e}  ? validation disabled')
+            print(f'[Validation] WARNING: {e}  - validation disabled')
             val_dataset = None
 
-    print(f'[{args.split}] samples={n_train}')
-
-    # ¦¡¦¡ BioBERT Embedder ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── BioBERT Embedder -> offload_device ────────────────────────────────────
     assert BioBERTEmbedder is not None, (
         'BioBERTEmbedder could not be imported. '
         'Check Modules/BioBERT_embedder.py is accessible.'
@@ -498,25 +682,26 @@ def main():
     embedder = BioBERTEmbedder(
         model_path = args.biobert_path,
         max_length = args.max_length,
-    ).to(device)
-    print(f'[BioBERT] loaded: {args.biobert_path}')
+    ).to(offload_device)
+    print(f'[BioBERT] loaded: {args.biobert_path}  -> {offload_device}')
 
-    # ¦¡¦¡ VAE (always frozen) ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-    vae = build_vae(args).to(device)
+    # ── VAE -> offload_device (always frozen) ─────────────────────────────────
+    vae = build_vae(args).to(offload_device)
     if args.vae_ckpt:
-        print(f'[VAE] loading: {args.vae_ckpt}')
-        _load_vae_ckpt(vae, args.vae_ckpt, device)
+        print(f'[VAE] ckpt loading: {args.vae_ckpt}')
+        _load_vae_ckpt(vae, args.vae_ckpt, offload_device)
     else:
         print('[VAE] WARNING: no --vae_ckpt; using random weights')
     vae.eval()
     for p in vae.parameters():
         p.requires_grad = False
+    print(f'[VAE] frozen  -> {offload_device}')
 
-    # ¦¡¦¡ UNet ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── UNet -> main device ───────────────────────────────────────────────────
     unet = build_unet(args).to(device)
-    print(f'[UNet] params: {sum(p.numel() for p in unet.parameters()):,}')
+    print(f'[UNet] params: {sum(p.numel() for p in unet.parameters()):,}  -> {device}')
 
-    # ¦¡¦¡ LatentDiffusionDP ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── LatentDiffusionDP ─────────────────────────────────────────────────────
     ldm = LatentDiffusionDP(
         unet              = unet,
         first_stage_model = vae,
@@ -533,20 +718,30 @@ def main():
         use_ema           = args.use_ema,
         lr                = args.lr,
         device            = device,
-    ).to(device)
+        use_dp            = args.use_dp,
+    )
+    ldm = ldm.to(device)
+    if model_parallel:
+        ldm.first_stage_model.to(offload_device)
+        ldm.embedder.to(offload_device)
+        _pin_ldm_buffers_to_device(ldm, device, offload_device)
+
+    ldm.offload_device = offload_device
 
     if args.pretrained_ckpt:
         print(f'[LDM_dp] loading pretrained: {args.pretrained_ckpt}')
         ldm.init_from_ckpt(args.pretrained_ckpt)
+        if model_parallel:
+            ldm.first_stage_model.to(offload_device)
+            ldm.embedder.to(offload_device)
+            _pin_ldm_buffers_to_device(ldm, device, offload_device)
     else:
         print('[LDM_dp] WARNING: no --pretrained_ckpt; fine-tuning from scratch')
 
     n_patched = disable_checkpointing(ldm)
     print(f'[DP] gradient checkpointing disabled on {n_patched} block(s)')
 
-    # ¦¡¦¡ DataLoaders ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-    # base_loader uses logical_batch so Opacus accounts at q = logical_batch/N
-    # (same as DP-LDM config batch_size=256 passed to make_private)
+    # ── DataLoaders ───────────────────────────────────────────────────────────
     base_loader = build_dp_loader(
         train_dataset,
         logical_batch = args.logical_batch,
@@ -558,42 +753,43 @@ def main():
         if val_dataset is not None else None
     )
 
-    # DP-LDM ¹æ½Ä: sample_rate = 1 / len(dataloader) = logical_batch / N
-    # steps = int(1/sample_rate) = len(dataloader) per epoch
-    logical_steps_per_epoch = len(base_loader)                # = floor(N / logical_batch)
+    logical_steps_per_epoch = len(base_loader)
     total_logical_steps     = logical_steps_per_epoch * args.epochs
-    sample_rate             = 1.0 / logical_steps_per_epoch   # q ? logical_batch / N
+    sample_rate             = 1.0 / logical_steps_per_epoch
     approx_chunks           = math.ceil(args.logical_batch / args.physical_batch)
     print(f'[Loader] N={n_train}  logical_steps/epoch={logical_steps_per_epoch}  '
           f'sample_rate=1/{logical_steps_per_epoch}={sample_rate:.6f}  '
-          f'physical_batch={args.physical_batch}  chunks/logical?{approx_chunks}')
+          f'physical_batch={args.physical_batch}  chunks/logical~{approx_chunks}')
 
-    # ¦¡¦¡ scale_factor init BEFORE make_private ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     if args.scale_by_std:
         print('[LDM_dp] computing scale_factor from first batch ...')
-        first_raw = next(iter(base_loader))
-        # Use first physical chunk only (saves GPU memory)
+        first_images, first_reports = next(iter(base_loader))
         first_chunk = {
-            'image'  : first_raw['image'][:args.physical_batch].to(device),
-            'reports': first_raw['reports'][:args.physical_batch],
+            'image'  : first_images[:args.physical_batch].to(device),
+            'reports': first_reports[:args.physical_batch],
         }
         ldm.init_scale_factor(first_chunk, is_first_batch=True)
 
-    # ¦¡¦¡ Selective parameter unfreeze ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-    attn_params = ldm.configure_dp_params(
-        ablation_blocks  = args.ablation_blocks,
-        finetune_biobert = args.finetune_biobert,
-    )
-    if not attn_params:
-        raise RuntimeError(
-            'configure_dp_params returned empty param list. '
-            'Check UNet has SpatialTransformer blocks and --use_spatial_transformer=True.'
+    if args.use_lora:
+        attn_params = ldm.configure_lora_params(
+            rank             = args.lora_rank,
+            alpha            = args.lora_alpha,
+            dropout          = args.lora_dropout,
+            finetune_biobert = args.finetune_biobert,
         )
+        if not attn_params:
+            raise RuntimeError('configure_lora_params returned empty param list.')
+    else:
+        attn_params = ldm.configure_dp_params(
+            ablation_blocks  = args.ablation_blocks,
+            finetune_biobert = args.finetune_biobert,
+        )
+        if not attn_params:
+            raise RuntimeError('configure_dp_params returned empty param list.')
 
-    # ¦¡¦¡ Noise multiplier ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     if args.noise_multiplier is not None:
         sigma = args.noise_multiplier
-        print(f'[DP] using provided noise_multiplier ¥ò={sigma:.6f}')
+        print(f'[DP] using provided noise_multiplier sigma={sigma:.6f}')
     else:
         sigma = compute_noise_multiplier(
             target_epsilon = args.target_epsilon,
@@ -611,14 +807,19 @@ def main():
         target_delta     = args.target_delta,
     )
 
-    # ¦¡¦¡ Optimizer ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     optimizer = torch.optim.AdamW(attn_params, lr=args.lr)
 
-    # ¦¡¦¡ Opacus ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── Opacus ────────────────────────────────────────────────────────────────
     try:
         from opacus import PrivacyEngine
+        from opacus.grad_sample import GradSampleModule
+        from opacus.utils.batch_memory_manager import BatchMemoryManager
     except ImportError:
         raise ImportError('opacus is required. Install with: pip install opacus')
+
+    if isinstance(ldm, GradSampleModule):
+        print('[DP] WARNING: model already wrapped - unwrapping before make_private')
+        ldm = ldm._module
 
     privacy_engine = PrivacyEngine()
     ldm, optimizer, dp_loader = privacy_engine.make_private(
@@ -629,15 +830,29 @@ def main():
         max_grad_norm    = args.max_grad_norm,
         poisson_sampling = True,
     )
-    print(f'[Opacus] GradSampleModule ready  ¥ò={sigma:.6f}  C={args.max_grad_norm}')
+    print(f'[Opacus] GradSampleModule ready  sigma={sigma:.6f}  C(clip)={args.max_grad_norm}')
 
-    # ¦¡¦¡ LR Scheduler ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # ── Re-pin after Opacus wrapping (GradSampleModule can shuffle buffers) ──
+    if model_parallel:
+        inner = ldm._module if hasattr(ldm, '_module') else ldm
+        inner.first_stage_model.to(offload_device)
+        inner.embedder.to(offload_device)
+        inner.offload_device = offload_device
+        _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=True)
+        sa = inner.sqrt_alphas_cumprod
+        print(f'[pin_buffers] sqrt_alphas_cumprod.device = {sa.device} '
+              f'(expected {device})')
+        assert sa.device == device, (
+            f'sqrt_alphas_cumprod on {sa.device}, expected {device}. '
+            f'Buffer pinning failed.'
+        )
+
     scheduler = (
-        build_scheduler(optimizer, args.warmup_steps, total_logical_steps)
-        if args.warmup_steps > 0 else None
+        build_scheduler(optimizer, args.warmup_steps, total_logical_steps,
+                        args.scheduler_type)
+        if args.warmup_steps > 0 and args.scheduler_type != 'none' else None
     )
 
-    # ¦¡¦¡ Resume ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     start_epoch = 0
     global_step = 0
     if args.resume_ckpt:
@@ -654,75 +869,120 @@ def main():
     # =========================================================================
     print(f'\n[DP-Train] split={args.split}  epochs={args.epochs}  lr={args.lr}  '
           f'logical_batch={args.logical_batch}  physical_batch={args.physical_batch}  '
-          f'chunks/step?{approx_chunks}  ¥ò={sigma:.4f}')
+          f'chunks/step~{approx_chunks}  sigma={sigma:.4f}')
     print('=' * 60)
 
+    # LoRA: track which epsilon milestones have been saved (LoRA mode only)
+    saved_milestones = set()
+
+    # Loss history for CSV logging + loss_curve.png
+    step_hist, step_loss_hist = [], []
+    epoch_rows = []   # (epoch, global_step, train_loss, val_loss, epsilon)
+
+    train_start = time.time()
     for epoch in range(start_epoch, start_epoch + args.epochs):
         ldm.train()
         epoch_losses = []
         t0           = time.time()
 
-        for logical_batch in dp_loader:
-            # logical_batch is one Poisson-sampled batch of size ? logical_batch
-            # (q = logical_batch/N ? consistent with sigma and get_epsilon)
-            images  = logical_batch['image'].to(device)   # [B, 1, H, W]
-            reports = logical_batch['reports']             # list[str], len ? B
+        # BatchMemoryManager splits each Poisson-sampled logical batch into
+        # physical batches and calls optimizer.step() after every one,
+        # which is required for Poisson-sampling compatibility.
+        # _is_last_step_skipped is False only at the logical-batch boundary
+        # (when the actual DP noise-and-update step is performed).
+        physical_losses = []
+        last_loss_dict  = {}
 
-            B       = images.shape[0]
-            n_chunks = max(1, math.ceil(B / args.physical_batch))
+        with BatchMemoryManager(
+            data_loader             = dp_loader,
+            max_physical_batch_size = args.physical_batch,
+            optimizer               = optimizer,
+        ) as memory_safe_loader:
+            for images, reports in memory_safe_loader:
+                optimizer.zero_grad()
 
-            optimizer.zero_grad()
-            step_loss    = 0.0
-            last_loss_dict = {}
-
-            # ¦¡¦¡ VirtualBatch: split logical batch into physical chunks ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-            # Mirrors DP-LDM's VirtualBatchWrapper(max_batch_size=physical_batch)
-            # All per-sample grads accumulate before the single DP step below.
-            for i in range(n_chunks):
-                start = i * args.physical_batch
-                end   = min(start + args.physical_batch, B)
-                chunk = {
-                    'image'  : images[start:end],
-                    'reports': reports[start:end],
+                batch = {
+                    'image'  : images.to(device),
+                    'reports': list(reports),
                 }
-                loss, loss_dict = ldm._module.training_step_dp(chunk)
-                (loss / n_chunks).backward()   # accumulate grad into param.grad_sample
-                step_loss     += loss.item() / n_chunks
+                loss, loss_dict = ldm._module.training_step_dp(batch)
+                loss.backward()
+                optimizer.step()
+
+                physical_losses.append(loss.item())
                 last_loss_dict = loss_dict
 
-            # ¦¡¦¡ One DP step: clip all accumulated per-sample grads, add noise ¦¡¦¡
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+                # _is_last_step_skipped is True for intermediate physical
+                # batches; False when the logical-batch DP update fired.
+                if not getattr(optimizer, '_is_last_step_skipped', False):
+                    step_loss       = float(np.mean(physical_losses))
+                    physical_losses = []
 
-            epoch_losses.append(step_loss)
-            global_step += 1
+                    if scheduler is not None:
+                        scheduler.step()
 
-            if global_step % args.log_every == 0:
-                info    = '  '.join(f'{k}={v.item():.4f}'
-                                    for k, v in last_loss_dict.items())
-                eps_now = privacy_engine.get_epsilon(args.target_delta)
-                print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
-                      f'{info}  ¥å={eps_now:.4f}')
+                    epoch_losses.append(step_loss)
+                    global_step += 1
 
-        # ¦¡¦¡ Epoch summary ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+                    step_hist.append(global_step)
+                    step_loss_hist.append(step_loss)
+
+                    if global_step % args.log_every == 0:
+                        info    = '  '.join(f'{k}={v.item():.4f}'
+                                            for k, v in last_loss_dict.items())
+                        eps_now = privacy_engine.get_epsilon(args.target_delta)
+                        print(f'  ep {epoch+1:04d}  step {global_step:06d} | '
+                              f'{info}  eps={eps_now:.4f}')
+
         elapsed   = time.time() - t0
         eps_now   = privacy_engine.get_epsilon(args.target_delta)
         mean_loss = float(np.mean(epoch_losses)) if epoch_losses else float('nan')
 
-        val_str = ''
+        val_str  = ''
+        val_loss = float('nan')
         if val_loader is not None:
             val_loss = evaluate(ldm, val_loader, device, args.val_batches)
             val_str  = f'  val_loss={val_loss:.4f}'
 
+        # Wall-clock so far and ETA over the remaining epochs (avg epoch time).
+        done_epochs   = epoch - start_epoch + 1
+        total_elapsed = time.time() - train_start
+        remaining     = args.epochs - done_epochs
+        eta_sec       = (total_elapsed / done_epochs) * remaining
         print(f'[Epoch {epoch+1:04d}/{start_epoch+args.epochs}] '
               f'loss={mean_loss:.4f}{val_str}  '
-              f'¥å={eps_now:.4f}  ¥ä={args.target_delta}  '
-              f'time={elapsed:.1f}s')
+              f'eps={eps_now:.4f}  delta={args.target_delta}  '
+              f'time={elapsed:.1f}s  '
+              f'elapsed={_fmt_hms(total_elapsed)}  eta={_fmt_hms(eta_sec)}')
+
+        # Record epoch summary, dump CSVs, and refresh loss_curve.png
+        epoch_rows.append((epoch + 1, global_step, mean_loss, val_loss, eps_now))
+        _write_loss_csvs(args.save_dir, step_hist, step_loss_hist, epoch_rows)
+        plot_path = save_loss_plot(args.save_dir, step_hist, step_loss_hist,
+                                   epoch_rows)
+        if plot_path:
+            print(f'  [plot] loss curve -> {plot_path}')
 
         if eps_now > args.target_epsilon * 1.05:
-            print(f'[WARNING] ¥å_spent={eps_now:.4f} exceeds target '
-                  f'¥å={args.target_epsilon}. Consider early stopping.')
+            print(f'[WARNING] eps_spent={eps_now:.4f} exceeds target '
+                  f'eps={args.target_epsilon}. Consider early stopping.')
+
+        # LoRA: save a small adapter file each time we cross a budget milestone
+        if args.use_lora:
+            for m in sorted(args.eps_milestones):
+                if m not in saved_milestones and eps_now >= m:
+                    saved_milestones.add(m)
+                    lora_path = os.path.join(
+                        args.save_dir, f'ldm_lora_eps{m:g}.pt')
+                    save_lora_checkpoint(
+                        save_path      = lora_path,
+                        model          = ldm,
+                        privacy_engine = privacy_engine,
+                        epoch          = epoch + 1,
+                        global_step    = global_step,
+                        args           = args,
+                        target_delta   = args.target_delta,
+                    )
 
         if (epoch + 1) % args.save_every == 0:
             ckpt_path = os.path.join(args.save_dir, f'ldm_dp_epoch{epoch+1:04d}.pt')
@@ -737,7 +997,6 @@ def main():
                 target_delta   = args.target_delta,
             )
 
-    # ¦¡¦¡ Final checkpoint ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
     final_path = os.path.join(args.save_dir, 'ldm_dp_final.pt')
     save_dp_checkpoint(
         save_path      = final_path,
@@ -750,7 +1009,10 @@ def main():
         target_delta   = args.target_delta,
     )
     eps_final = privacy_engine.get_epsilon(args.target_delta)
-    print(f'\nTraining complete.  Final ¥å={eps_final:.4f}  ¥ä={args.target_delta}')
+    total_train = time.time() - train_start
+    print(f'\nTraining complete.  Final eps={eps_final:.4f}  '
+          f'delta={args.target_delta}  '
+          f'total_time={_fmt_hms(total_train)} ({total_train:.1f}s)')
 
 
 if __name__ == '__main__':
