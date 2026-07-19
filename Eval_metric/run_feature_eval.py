@@ -158,6 +158,8 @@ def parse_args():
     p.add_argument('--reg', default=1e-6, type=float)
     p.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
                    help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
+    p.add_argument('--pca_dim', default=None, type=int,
+                   help='FDS: reduce features to this dim (PCA on real) first, e.g. 64')
     p.add_argument('--perplexity', default=30.0, type=float)
     p.add_argument('--seed', default=0, type=int)
     p.add_argument('--ckpt', default=None, help='ckpt to record args from (#3)')
@@ -191,11 +193,13 @@ def run(args):
 
     if 'fds' in args.metrics:
         from Eval_metric.fds import compute_fds
+        pca_dim = getattr(args, 'pca_dim', None)
         fds = compute_fds(feats_real, feats_gen, reg=args.reg,
-                          cov=getattr(args, 'fds_cov', 'lw'))
+                          cov=getattr(args, 'fds_cov', 'lw'), pca_dim=pca_dim)
         fds.update({'eval_model': args.eval_model,
                     'n_real': int(len(feats_real)), 'n_gen': int(len(feats_gen)),
-                    'feature_dim': int(feats_real.shape[1])})
+                    'feature_dim': int(feats_real.shape[1]),
+                    'pca_dim': int(pca_dim) if pca_dim else None})
         with open(os.path.join(args.out_dir, 'fds.json'), 'w') as f:
             json.dump(fds, f, indent=2)
         print(f'[fds] gen||real={fds["fds_gen_given_real"]:.4f}  '

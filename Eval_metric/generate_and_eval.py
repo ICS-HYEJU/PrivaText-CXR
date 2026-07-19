@@ -55,8 +55,16 @@ def parse_args():
 
     # ── generation args (mirror LDM_dp_inference.parse_args) ──────────────────
     g = p.add_argument_group('generation')
-    g.add_argument('--descriptions', required=True,
-                   help='.txt (one description per line) OR inline string')
+    g.add_argument('--prompt_source', default='file', choices=['file', 'split'],
+                   help="'file': prompts from --descriptions. 'split': prompts "
+                        'are real reports pulled from the MIMIC --eval_split, so '
+                        'the generated distribution matches the real reference.')
+    g.add_argument('--descriptions', default=None,
+                   help='.txt (one per line) OR inline string. Required when '
+                        '--prompt_source file.')
+    g.add_argument('--n_prompts', default=None, type=int,
+                   help='prompt_source=split: number of report prompts to use '
+                        '(default: same as --max_real, else all in the split).')
     g.add_argument('--n_samples', default=1, type=int,
                    help='independent samples per description')
     g.add_argument('--sample_timesteps', default=None, type=int)
@@ -77,6 +85,8 @@ def parse_args():
     e.add_argument('--reg', default=1e-6, type=float)
     e.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
                    help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
+    e.add_argument('--pca_dim', default=None, type=int,
+                   help='FDS: reduce features to this dim (PCA on real) first, e.g. 64')
     e.add_argument('--perplexity', default=30.0, type=float)
     # real reference source (either --real_dir OR dataset mode)
     e.add_argument('--real_dir', default=None)
@@ -92,13 +102,37 @@ def parse_args():
     return p.parse_args()
 
 
+def resolve_descriptions(args):
+    """Prompts either from --descriptions (file) or from the eval split reports."""
+    if args.prompt_source == 'split':
+        # (A) pull real reports from the dataset so generated prompts — and thus
+        # the generated distribution — match the real reference split.
+        if not args.root_path:
+            raise SystemExit('--prompt_source split needs --root_path (MIMIC root)')
+        from Data.mimic_cxr import MIMICCXRDataset
+        ds = MIMICCXRDataset(argparse.Namespace(
+            root_path=args.root_path, split_csv=args.split_csv, split=args.eval_split,
+            image_size=args.vae_img_size, max_length=args.max_length,
+            patient_whitelist=None))
+        cap = args.n_prompts if args.n_prompts not in (None, 0) else \
+            (args.max_real if args.max_real not in (None, 0) else len(ds))
+        n = min(cap, len(ds))
+        prompts = [ds[i][1] for i in range(n)]        # (image, report) -> report
+        print(f'[gen] prompts from split={args.eval_split}: {n} report(s)')
+        return prompts
+    from LDM_dp_inference import load_descriptions
+    if not args.descriptions:
+        raise SystemExit('--prompt_source file needs --descriptions')
+    return load_descriptions(args.descriptions)
+
+
 def generate(args, device):
     """Run inference; save to <gen_output_dir>/samples. Returns that samples dir."""
     import torch
-    from LDM_dp_inference import build_and_load_ldm, load_descriptions, save_outputs
+    from LDM_dp_inference import build_and_load_ldm, save_outputs
 
     torch.manual_seed(args.seed)
-    descriptions = load_descriptions(args.descriptions)
+    descriptions = resolve_descriptions(args)
     print(f'[gen] {len(descriptions)} description(s) x {args.n_samples} sample(s)')
 
     ldm, embedder = build_and_load_ldm(args, device)
@@ -131,7 +165,7 @@ def build_eval_cfg(args, gen_dir):
         gen_dir=gen_dir, out_dir=args.out_dir, eval_model=args.eval_model,
         image_size=args.vae_img_size, device=device, batch_size=args.eval_batch_size,
         metrics=args.metrics, reg=args.reg, fds_cov=args.fds_cov,
-        perplexity=args.perplexity, seed=args.seed, ckpt=ckpt)
+        pca_dim=args.pca_dim, perplexity=args.perplexity, seed=args.seed, ckpt=ckpt)
 
 
 def main():
