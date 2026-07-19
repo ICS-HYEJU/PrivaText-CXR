@@ -43,7 +43,11 @@ def parse_args():
     from LDM_dp_inference import add_model_args
     p = argparse.ArgumentParser(
         description='Generate DP-LDM images and evaluate them in one shot',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        # add_model_args already defines some names shared with the eval group
+        # (e.g. --max_length used for report tokenisation); 'resolve' lets the
+        # later (eval) definition win instead of raising a conflict error.
+        conflict_handler='resolve')
 
     # ── model / checkpoint args (shared with inference: adds --device_id,
     #    --vae_img_size, vae_*/unet_*/diffusion args, --dp_ckpt/--lora_ckpt/…) ──
