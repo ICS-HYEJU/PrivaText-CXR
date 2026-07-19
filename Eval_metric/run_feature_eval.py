@@ -18,15 +18,30 @@ Output layout (matches the requested convention)
         ckpt_info.json        # args/epsilon/lora the ckpt was produced with (#3)
         _features/            # cached real_<model>.npz, gen_<model>.npz
 
+Real reference source (pick one)
+--------------------------------
+  (a) --real_dir <folder>  : a folder of real PNGs.
+  (b) dataset mode         : omit --real_dir and pass --root_path <MIMIC root>;
+      real images are loaded straight from the dataset by --eval_split
+      (train/validate/test) — no separate test_pngs folder needed.
+
 Usage
 -----
+    # dataset mode (real loaded by split=test)
     python Eval_metric/run_feature_eval.py \\
-        --real_dir  ./real_test_pngs \\
+        --root_path /storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0 \\
+        --eval_split test --max_real 500 \\
         --gen_dir   ./generated_eps5/samples \\
         --out_dir   ./eval/eps5 \\
         --eval_model xrv --image_size 256 \\
+        --device cuda:0 \\
         --ckpt      ./finetune_dp/ldm_lora_eps5.pt \\
         --metrics fds tsne fid
+
+    # or folder mode
+    python Eval_metric/run_feature_eval.py \\
+        --real_dir ./real_test_pngs --gen_dir ./generated_eps5/samples \\
+        --out_dir ./eval/eps5 --eval_model xrv --metrics fds tsne fid
 """
 
 import os
@@ -77,9 +92,55 @@ def _merge_summary(out_dir, new_fields):
     return summary
 
 
+def load_real_features(args, cache_path):
+    """
+    Real reference features from EITHER:
+      (a) --real_dir : a folder of real PNGs, OR
+      (b) the MIMIC dataset, loaded by split (train/val/test) — no PNG dump
+          needed; images come straight from the dataset via args.eval_split.
+    Returns np.ndarray [N, D].
+    """
+    from Eval_metric.features import extract_features, extract_features_from_tensors
+    if args.real_dir:
+        feats, _ = extract_features(args.real_dir, args.eval_model, args.device,
+                                    args.image_size, args.batch_size, cache_path=cache_path)
+        return feats
+
+    # dataset mode — mirror LDM_dp_eval.build_eval_dataset
+    from Data.mimic_cxr import MIMICCXRDataset
+    whitelist = None
+    if args.dp_split_json:
+        with open(args.dp_split_json, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        whitelist = manifest.get(args.dp_split_group, manifest.get('groups', {}).get(args.dp_split_group))
+    ds = MIMICCXRDataset(argparse.Namespace(
+        root_path=args.root_path, split_csv=args.split_csv, split=args.eval_split,
+        image_size=args.image_size, max_length=args.max_length,
+        patient_whitelist=whitelist))
+    n = len(ds) if args.max_real in (None, 0) else min(args.max_real, len(ds))
+    print(f'[real] dataset split={args.eval_split}  using {n}/{len(ds)} images')
+    images = [ds[i][0] for i in range(n)]          # (image, report) -> image [1,H,W]
+    cid = f'{args.eval_split}:{n}:{args.image_size}'
+    return extract_features_from_tensors(images, args.eval_model, args.device,
+                                         args.batch_size, cache_path=cache_path, cache_id=cid)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description='Feature-based eval driver (steps 1-3)')
-    p.add_argument('--real_dir', required=True, help='folder of held-out REAL pngs')
+    # --- real reference source: EITHER --real_dir OR dataset (--root_path + --eval_split) ---
+    p.add_argument('--real_dir', default=None,
+                   help='folder of held-out REAL pngs. Omit to load from the '
+                        'MIMIC dataset by split (--root_path/--eval_split) instead.')
+    p.add_argument('--root_path', default=None,
+                   help='MIMIC root (dataset mode, when --real_dir is not given)')
+    p.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv')
+    p.add_argument('--eval_split', default='test', help='train/validate/test')
+    p.add_argument('--max_length', default=512, type=int)
+    p.add_argument('--max_real', default=None, type=int,
+                   help='cap number of real images (default: all in the split)')
+    p.add_argument('--dp_split_json', default=None,
+                   help='optional dp_splits.json to restrict real patients')
+    p.add_argument('--dp_split_group', default='train')
     p.add_argument('--gen_dir', required=True, help='folder of GENERATED pngs (e.g. ./generated_eps5/samples)')
     p.add_argument('--out_dir', required=True, help='e.g. ./eval/eps5')
     p.add_argument('--eval_model', default='xrv', choices=['inception', 'xrv'])
@@ -95,8 +156,16 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
+def run(args):
+    """Run feature-based eval (steps 1-3) for a config namespace.
+
+    Reused by both the CLI (main) and the generate+eval orchestrator, so the
+    two entry points share one implementation. `args` needs the fields set by
+    parse_args() below.
+    """
+    if not args.real_dir and not args.root_path:
+        raise SystemExit('provide a real reference: either --real_dir <folder> '
+                         'or --root_path <MIMIC root> (dataset mode, uses --eval_split)')
     os.makedirs(args.out_dir, exist_ok=True)
     cache_dir = os.path.join(args.out_dir, '_features')
     real_cache = os.path.join(cache_dir, f'real_{args.eval_model}.npz')
@@ -104,8 +173,7 @@ def main():
 
     from Eval_metric.features import extract_features
     # Step 1: extract features ONCE (cached); every metric below reuses these.
-    feats_real, _ = extract_features(args.real_dir, args.eval_model, args.device,
-                                     args.image_size, args.batch_size, cache_path=real_cache)
+    feats_real = load_real_features(args, real_cache)
     feats_gen, _ = extract_features(args.gen_dir, args.eval_model, args.device,
                                     args.image_size, args.batch_size, cache_path=gen_cache)
     print(f'[driver] real={feats_real.shape}  gen={feats_gen.shape}  model={args.eval_model}')
@@ -149,8 +217,13 @@ def main():
         merged['tsne_perplexity'] = float(perp)
         print(f'[tsne] -> {out_png}')
 
-    _merge_summary(args.out_dir, merged)
+    summary = _merge_summary(args.out_dir, merged)
     dump_ckpt_info(args.ckpt, args.out_dir)
+    return summary
+
+
+def main():
+    run(parse_args())
 
 
 if __name__ == '__main__':

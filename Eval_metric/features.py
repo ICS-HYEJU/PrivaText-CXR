@@ -125,6 +125,65 @@ def _cache_key(image_paths, eval_model, image_size):
     return h.hexdigest()[:12]
 
 
+def extract_features_from_tensors(images, eval_model, device='cpu',
+                                  batch_size=16, cache_path=None, cache_id=None,
+                                  verbose=True):
+    """
+    Extract features from an iterable of image tensors (each [1, H, W] or
+    [1, 1, H, W] in [-1, 1]) — e.g. real images pulled straight from a Dataset
+    whose split is chosen by args (train/val/test), so no PNG dump is needed.
+
+    Caching is keyed by `cache_id` (a stable string, e.g. "test:200:256"); when
+    it matches an existing cache the network is not re-run.
+
+    Returns
+    -------
+    feats : np.ndarray  [N, D]
+    """
+    images = list(images)
+    if len(images) == 0:
+        raise RuntimeError('no images provided to extract_features_from_tensors')
+
+    key = f'{eval_model}|{cache_id}|{len(images)}' if cache_id else None
+    if cache_path and key and os.path.exists(cache_path):
+        try:
+            data = np.load(cache_path, allow_pickle=True)
+            if str(data['key']) == key:
+                if verbose:
+                    print(f'[features] cache hit  {cache_path}  ({data["feats"].shape})')
+                return data['feats']
+        except Exception:
+            pass
+
+    import torch
+    model, preprocess = build_feature_extractor(eval_model, device)
+
+    def _as_bchw(t):
+        if t.dim() == 3:            # [1, H, W] -> [1, 1, H, W]
+            t = t.unsqueeze(0)
+        return t
+
+    feats = []
+    with torch.no_grad():
+        for i in range(0, len(images), batch_size):
+            batch = torch.cat([_as_bchw(images[j]) for j in range(i, min(i + batch_size, len(images)))], 0)
+            batch = preprocess(batch.to(device))
+            feats.append(model(batch).float().cpu().numpy())
+            if verbose:
+                print(f'[features] {eval_model}  {min(i + batch_size, len(images))}/{len(images)}',
+                      end='\r')
+    feats = np.concatenate(feats, 0)
+    if verbose:
+        print(f'\n[features] extracted {feats.shape} from {len(images)} tensors')
+
+    if cache_path and key:
+        os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+        np.savez(cache_path, feats=feats, key=key)
+        if verbose:
+            print(f'[features] cached -> {cache_path}')
+    return feats
+
+
 def extract_features(image_dir, eval_model, device='cpu', image_size=256,
                      batch_size=16, cache_path=None, recursive=True, verbose=True):
     """
