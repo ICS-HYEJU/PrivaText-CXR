@@ -80,23 +80,35 @@ def _kl_gaussian(mu0, s0, mu1, s1):
     return 0.5 * (tr_term + maha - k + logdet_ratio)
 
 
-def compute_fds(feats_real, feats_gen, reg=1e-6, cov='lw'):
+def compute_fds(feats_real, feats_gen, reg=1e-6, cov='lw', pca_dim=None):
     """
     Returns a dict with both KL directions and their symmetric average.
         fds_gen_given_real : D_KL(gen || real)  (hallucination-sensitive)
         fds_real_given_gen : D_KL(real || gen)  (mode-collapse-sensitive)
         fds_symmetric      : mean of the two
+
+    pca_dim : if set, reduce features to this many dims BEFORE fitting the
+        Gaussians. The PCA basis is fit on the REAL features only (the fixed
+        reference), then applied to both real and generated — so the subspace is
+        identical across models and FDS stays comparable. With the real test set
+        capped (e.g. 361 images) this makes n > dim, giving statistically valid
+        absolute values.
     """
     feats_real = np.asarray(feats_real, dtype=np.float64)
     feats_gen = np.asarray(feats_gen, dtype=np.float64)
+    if pca_dim:
+        from sklearn.decomposition import PCA
+        k = int(min(pca_dim, feats_real.shape[1], len(feats_real) - 1))
+        pca = PCA(n_components=k, random_state=0).fit(feats_real)   # fit on real
+        feats_real = pca.transform(feats_real)
+        feats_gen = pca.transform(feats_gen)
     D = feats_real.shape[1]
     n_min = min(len(feats_real), len(feats_gen))
     if n_min <= D:
         print(f'[fds][warn] samples (min={n_min}) <= feature_dim ({D}). '
-              f"Empirical covariance would be singular; using cov='{cov}' "
-              '(Ledoit-Wolf recommended). For stable absolute values, generate '
-              'many more samples (n >> feature_dim) or use --eval_model inception '
-              'only if you have enough images.')
+              f"Covariance is ill-conditioned; using cov='{cov}' "
+              '(Ledoit-Wolf). For stable ABSOLUTE values, generate more samples '
+              '(n >> dim) and/or set --pca_dim (e.g. 64) to reduce dim below n.')
     mu_r, s_r = _gaussian_stats(feats_real, reg, cov)
     mu_g, s_g = _gaussian_stats(feats_gen, reg, cov)
     kl_g_r = _kl_gaussian(mu_g, s_g, mu_r, s_r)         # gen || real
@@ -110,15 +122,16 @@ def compute_fds(feats_real, feats_gen, reg=1e-6, cov='lw'):
 
 def compute_fds_from_dirs(real_dir, gen_dir, eval_model='xrv', image_size=256,
                           device='cpu', batch_size=16, reg=1e-6, cov='lw',
-                          real_cache=None, gen_cache=None):
+                          pca_dim=None, real_cache=None, gen_cache=None):
     from Eval_metric.features import extract_features
     fr, _ = extract_features(real_dir, eval_model, device, image_size,
                              batch_size, cache_path=real_cache)
     fg, _ = extract_features(gen_dir, eval_model, device, image_size,
                              batch_size, cache_path=gen_cache)
-    out = compute_fds(fr, fg, reg=reg, cov=cov)
+    out = compute_fds(fr, fg, reg=reg, cov=cov, pca_dim=pca_dim)
     out.update({'eval_model': eval_model, 'n_real': int(len(fr)),
-                'n_gen': int(len(fg)), 'feature_dim': int(fr.shape[1])})
+                'n_gen': int(len(fg)), 'feature_dim': int(fr.shape[1]),
+                'pca_dim': int(pca_dim) if pca_dim else None})
     return out
 
 
@@ -135,6 +148,9 @@ def parse_args():
     p.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
                    help="covariance estimator: 'lw' Ledoit-Wolf (robust when "
                         "n<dim), 'empirical' sample cov (needs n>>dim)")
+    p.add_argument('--pca_dim', default=None, type=int,
+                   help='reduce features to this dim (PCA fit on real) before '
+                        'fitting Gaussians; e.g. 64. Makes n>dim with small sets')
     p.add_argument('--output', default=None, help='write result JSON here')
     return p.parse_args()
 
@@ -144,7 +160,7 @@ def main():
     cache_dir = os.path.join(os.path.dirname(args.output or '.'), '_features')
     res = compute_fds_from_dirs(
         args.real_dir, args.gen_dir, args.eval_model, args.image_size,
-        args.device, args.batch_size, args.reg, args.fds_cov,
+        args.device, args.batch_size, args.reg, args.fds_cov, args.pca_dim,
         real_cache=os.path.join(cache_dir, f'real_{args.eval_model}.npz'),
         gen_cache=os.path.join(cache_dir, f'gen_{args.eval_model}.npz'))
     print(json.dumps(res, indent=2))
