@@ -156,8 +156,13 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
+def run(args):
+    """Run feature-based eval (steps 1-3) for a config namespace.
+
+    Reused by both the CLI (main) and the generate+eval orchestrator, so the
+    two entry points share one implementation. `args` needs the fields set by
+    parse_args() below.
+    """
     if not args.real_dir and not args.root_path:
         raise SystemExit('provide a real reference: either --real_dir <folder> '
                          'or --root_path <MIMIC root> (dataset mode, uses --eval_split)')
@@ -212,8 +217,13 @@ def main():
         merged['tsne_perplexity'] = float(perp)
         print(f'[tsne] -> {out_png}')
 
-    _merge_summary(args.out_dir, merged)
+    summary = _merge_summary(args.out_dir, merged)
     dump_ckpt_info(args.ckpt, args.out_dir)
+    return summary
+
+
+def main():
+    run(parse_args())
 
 
 if __name__ == '__main__':
