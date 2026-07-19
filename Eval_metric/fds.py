@@ -40,10 +40,25 @@ import argparse
 import numpy as np
 
 
-def _gaussian_stats(feats, reg):
+def _gaussian_stats(feats, reg, cov='lw'):
+    """
+    Fit a Gaussian to `feats` [N, D].
+
+    cov = 'lw'        : Ledoit-Wolf shrinkage covariance — well-conditioned even
+                        when N < D (the usual case: few generated samples, 1024-d
+                        features).  This is the robust default.
+          'empirical' : plain sample covariance (np.cov); singular when N < D,
+                        so KL can blow up.  Only sensible when N >> D.
+    A small reg*I floor is always added for numerical positive-definiteness.
+    """
     mu = feats.mean(0)
-    sigma = np.cov(feats, rowvar=False)
-    sigma = sigma + reg * np.eye(sigma.shape[0])
+    D = feats.shape[1]
+    if cov == 'lw':
+        from sklearn.covariance import LedoitWolf
+        sigma = LedoitWolf(assume_centered=False).fit(feats).covariance_
+    else:
+        sigma = np.cov(feats, rowvar=False)
+    sigma = sigma + reg * np.eye(D)
     return mu, sigma
 
 
@@ -65,7 +80,7 @@ def _kl_gaussian(mu0, s0, mu1, s1):
     return 0.5 * (tr_term + maha - k + logdet_ratio)
 
 
-def compute_fds(feats_real, feats_gen, reg=1e-6):
+def compute_fds(feats_real, feats_gen, reg=1e-6, cov='lw'):
     """
     Returns a dict with both KL directions and their symmetric average.
         fds_gen_given_real : D_KL(gen || real)  (hallucination-sensitive)
@@ -74,8 +89,16 @@ def compute_fds(feats_real, feats_gen, reg=1e-6):
     """
     feats_real = np.asarray(feats_real, dtype=np.float64)
     feats_gen = np.asarray(feats_gen, dtype=np.float64)
-    mu_r, s_r = _gaussian_stats(feats_real, reg)
-    mu_g, s_g = _gaussian_stats(feats_gen, reg)
+    D = feats_real.shape[1]
+    n_min = min(len(feats_real), len(feats_gen))
+    if n_min <= D:
+        print(f'[fds][warn] samples (min={n_min}) <= feature_dim ({D}). '
+              f"Empirical covariance would be singular; using cov='{cov}' "
+              '(Ledoit-Wolf recommended). For stable absolute values, generate '
+              'many more samples (n >> feature_dim) or use --eval_model inception '
+              'only if you have enough images.')
+    mu_r, s_r = _gaussian_stats(feats_real, reg, cov)
+    mu_g, s_g = _gaussian_stats(feats_gen, reg, cov)
     kl_g_r = _kl_gaussian(mu_g, s_g, mu_r, s_r)         # gen || real
     kl_r_g = _kl_gaussian(mu_r, s_r, mu_g, s_g)         # real || gen
     return {
@@ -86,14 +109,14 @@ def compute_fds(feats_real, feats_gen, reg=1e-6):
 
 
 def compute_fds_from_dirs(real_dir, gen_dir, eval_model='xrv', image_size=256,
-                          device='cpu', batch_size=16, reg=1e-6,
+                          device='cpu', batch_size=16, reg=1e-6, cov='lw',
                           real_cache=None, gen_cache=None):
     from Eval_metric.features import extract_features
     fr, _ = extract_features(real_dir, eval_model, device, image_size,
                              batch_size, cache_path=real_cache)
     fg, _ = extract_features(gen_dir, eval_model, device, image_size,
                              batch_size, cache_path=gen_cache)
-    out = compute_fds(fr, fg, reg=reg)
+    out = compute_fds(fr, fg, reg=reg, cov=cov)
     out.update({'eval_model': eval_model, 'n_real': int(len(fr)),
                 'n_gen': int(len(fg)), 'feature_dim': int(fr.shape[1])})
     return out
@@ -108,7 +131,10 @@ def parse_args():
     p.add_argument('--device', default='cpu')
     p.add_argument('--batch_size', default=16, type=int)
     p.add_argument('--reg', default=1e-6, type=float,
-                   help='covariance shrinkage Sigma + reg*I')
+                   help='numerical PD floor Sigma + reg*I')
+    p.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
+                   help="covariance estimator: 'lw' Ledoit-Wolf (robust when "
+                        "n<dim), 'empirical' sample cov (needs n>>dim)")
     p.add_argument('--output', default=None, help='write result JSON here')
     return p.parse_args()
 
@@ -118,7 +144,7 @@ def main():
     cache_dir = os.path.join(os.path.dirname(args.output or '.'), '_features')
     res = compute_fds_from_dirs(
         args.real_dir, args.gen_dir, args.eval_model, args.image_size,
-        args.device, args.batch_size, args.reg,
+        args.device, args.batch_size, args.reg, args.fds_cov,
         real_cache=os.path.join(cache_dir, f'real_{args.eval_model}.npz'),
         gen_cache=os.path.join(cache_dir, f'gen_{args.eval_model}.npz'))
     print(json.dumps(res, indent=2))
