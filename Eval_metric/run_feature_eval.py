@@ -156,7 +156,7 @@ def parse_args():
     p.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
                    choices=['fds', 'tsne', 'fid', 'clip'])
     # CLIPScore (metric 'clip'): text-image alignment via a domain encoder
-    p.add_argument('--clip_backend', default='biovil-t',
+    p.add_argument('--clip_backend', default='medclip',
                    choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
     p.add_argument('--clip_model', default='ViT-B-32', help='open_clip model (cxr-clip/openclip)')
     p.add_argument('--clip_pretrained', default='openai', help='open_clip weights or ckpt path')

@@ -221,7 +221,7 @@ def real_baseline(root_path, split_csv, eval_split, image_size, max_length,
 def parse_args():
     p = argparse.ArgumentParser(description='CLIPScore with domain encoders')
     p.add_argument('--gen_dir', required=True, help='folder of generated pngs (samples/)')
-    p.add_argument('--backend', default='biovil-t',
+    p.add_argument('--backend', default='medclip',
                    choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
     p.add_argument('--clip_model', default='ViT-B-32', help='open_clip model name (cxr-clip/openclip)')
     p.add_argument('--clip_pretrained', default='openai', help='open_clip weights or ckpt path')
