@@ -81,7 +81,12 @@ def parse_args():
     e.add_argument('--eval_batch_size', default=16, type=int,
                    help='batch size for feature extraction')
     e.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
-                   choices=['fds', 'tsne', 'fid'])
+                   choices=['fds', 'tsne', 'fid', 'clip'])
+    e.add_argument('--clip_backend', default='biovil-t',
+                   choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
+    e.add_argument('--clip_model', default='ViT-B-32')
+    e.add_argument('--clip_pretrained', default='openai')
+    e.add_argument('--clip_w', default=2.5, type=float)
     e.add_argument('--reg', default=1e-6, type=float)
     e.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
                    help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
@@ -165,7 +170,9 @@ def build_eval_cfg(args, gen_dir):
         gen_dir=gen_dir, out_dir=args.out_dir, eval_model=args.eval_model,
         image_size=args.vae_img_size, device=device, batch_size=args.eval_batch_size,
         metrics=args.metrics, reg=args.reg, fds_cov=args.fds_cov,
-        pca_dim=args.pca_dim, perplexity=args.perplexity, seed=args.seed, ckpt=ckpt)
+        pca_dim=args.pca_dim, perplexity=args.perplexity, seed=args.seed, ckpt=ckpt,
+        clip_backend=args.clip_backend, clip_model=args.clip_model,
+        clip_pretrained=args.clip_pretrained, clip_w=args.clip_w)
 
 
 def main():
