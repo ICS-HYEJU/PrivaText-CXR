@@ -46,6 +46,7 @@ Usage
 
 import os
 import sys
+import csv
 import json
 import argparse
 
@@ -79,6 +80,107 @@ def dump_ckpt_info(ckpt_path, out_dir):
         json.dump(info, f, indent=2, default=str)
     print(f'[ckpt_info] -> {path}')
     return info
+
+
+def _load_lpips(device):
+    """LPIPS callable(real, gen)->[B], or None if weights/lib unavailable."""
+    try:
+        import torch
+        from Loss.lpips import LPIPS
+        net = LPIPS().to(device).eval()
+        try:
+            net.load_from_pretrained()
+        except Exception:
+            pass
+        for p_ in net.parameters():
+            p_.requires_grad = False
+
+        def _lpips(real, gen):
+            r = real.repeat(1, 3, 1, 1) if real.shape[1] == 1 else real
+            g = gen.repeat(1, 3, 1, 1) if gen.shape[1] == 1 else gen
+            with torch.no_grad():
+                return net(r, g).view(-1)
+        return _lpips
+    except Exception as e:
+        print(f'[lpips] unavailable ({e})')
+        return None
+
+
+def _load_gen_index_pairs(gen_dir):
+    """[(abs_image_path, prompt_index), ...] from descriptions.csv (gen_dir or parent)."""
+    for base in (gen_dir, os.path.dirname(os.path.abspath(gen_dir))):
+        csv_path = os.path.join(base, 'descriptions.csv')
+        if os.path.isfile(csv_path):
+            pairs = []
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    fp = os.path.join(base, row['file'])
+                    if os.path.isfile(fp) and row.get('index', '').strip() != '':
+                        pairs.append((fp, int(row['index'])))
+            if pairs:
+                return pairs
+    return None
+
+
+def compute_paired_pixel_metrics(args, which):
+    """
+    Paired SSIM/PSNR/LPIPS: generated image i vs the real image of report i.
+    Requires (a) dataset mode (--root_path) for the real images and (b) the
+    generation prompts to correspond to the eval split BY INDEX
+    (--paired_from_split, auto-set when generate_and_eval uses --prompt_source
+    split). Otherwise the index->real mapping is meaningless, so we skip.
+    """
+    if not getattr(args, 'paired_from_split', False):
+        print('[paired] skipped (need --paired_from_split: gen index must map to '
+              'the eval split; only true when prompts came from the split)')
+        return {}
+    if not args.root_path:
+        print('[paired] skipped (need --root_path dataset mode for the paired real image)')
+        return {}
+    pairs = _load_gen_index_pairs(args.gen_dir)
+    if not pairs:
+        print('[paired] skipped (descriptions.csv with index column not found)')
+        return {}
+    import torch
+    from Data.mimic_cxr import MIMICCXRDataset
+    from Eval_metric.features import load_image_as_tensor
+    ds = MIMICCXRDataset(argparse.Namespace(
+        root_path=args.root_path, split_csv=args.split_csv, split=args.eval_split,
+        image_size=args.image_size, max_length=args.max_length, patient_whitelist=None))
+    valid = [(fp, idx) for fp, idx in pairs if 0 <= idx < len(ds)]
+    if not valid:
+        print('[paired] skipped (no gen index falls within the split range)')
+        return {}
+    ssim_fn = psnr_fn = lpips_fn = None
+    if 'ssim' in which:
+        from Eval_metric.ssim import compute_ssim as ssim_fn
+    if 'psnr' in which:
+        from Eval_metric.psnr import compute_psnr as psnr_fn
+    if 'lpips' in which:
+        lpips_fn = _load_lpips(args.device)
+    acc = {'ssim': [], 'psnr': [], 'lpips': []}
+    bs = max(1, args.batch_size)
+    for i in range(0, len(valid), bs):
+        chunk = valid[i:i + bs]
+        real = torch.cat([ds[idx][0].unsqueeze(0) for _, idx in chunk], 0).to(args.device)
+        gen = torch.cat([load_image_as_tensor(fp, args.image_size) for fp, _ in chunk], 0).to(args.device)
+        if ssim_fn is not None:
+            acc['ssim'].append(ssim_fn(real, gen).detach().cpu())
+        if psnr_fn is not None:
+            acc['psnr'].append(psnr_fn(real, gen).detach().cpu())
+        if lpips_fn is not None:
+            acc['lpips'].append(lpips_fn(real, gen).detach().cpu())
+    out = {'n_paired': len(valid)}
+    for k in ('ssim', 'psnr', 'lpips'):
+        if acc[k]:
+            t = torch.cat(acc[k])
+            t = t[torch.isfinite(t)]
+            out[f'{k}_mean'] = float(t.mean())
+            out[f'{k}_std'] = float(t.std())
+    print('[paired] ' + '  '.join(f'{k}={out.get(k + "_mean"):.4f}'
+                                   for k in ('ssim', 'psnr', 'lpips') if f'{k}_mean' in out)
+          + f'  (n={out["n_paired"]})')
+    return out
 
 
 def _merge_summary(out_dir, new_fields):
@@ -154,7 +256,10 @@ def parse_args():
     p.add_argument('--device', default='cpu')
     p.add_argument('--batch_size', default=16, type=int)
     p.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
-                   choices=['fds', 'tsne', 'fid', 'clip'])
+                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips'])
+    p.add_argument('--paired_from_split', action='store_true',
+                   help='enable paired ssim/psnr/lpips: gen image index maps to the '
+                        'eval-split real image (only valid when prompts came from the split)')
     # CLIPScore (metric 'clip'): text-image alignment via a domain encoder
     p.add_argument('--clip_backend', default='medclip',
                    choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
@@ -235,6 +340,13 @@ def run(args):
                  emb=emb, n_real=len(feats_real), eval_model=args.eval_model, perplexity=perp)
         merged['tsne_perplexity'] = float(perp)
         print(f'[tsne] -> {out_png}')
+
+    pixel_wanted = [m for m in ('ssim', 'psnr', 'lpips') if m in args.metrics]
+    if pixel_wanted:
+        try:
+            merged.update(compute_paired_pixel_metrics(args, pixel_wanted))
+        except Exception as e:
+            print(f'[paired] skipped ({type(e).__name__}: {e})')
 
     if 'clip' in args.metrics:
         try:

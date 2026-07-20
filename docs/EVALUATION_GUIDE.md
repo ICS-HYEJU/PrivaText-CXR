@@ -80,7 +80,14 @@ MIMIC-CXR (image + report)
 > **backbone 선택 의미**: `xrv`(TorchXRayVision DenseNet-121)는 CXR로 사전학습 → 임상적으로
 > 더 유의미. `inception`은 자연영상 통계라 참고용.
 
-### 4.2 이미지 품질 — 픽셀/지각 기반 (paired, `LDM_dp_eval.py`)
+### 4.2 이미지 품질 — 픽셀/지각 기반 (paired)
+
+> 두 경로에서 생성됨: (1) `LDM_dp_eval.py`, 또는 (2) 통합 드라이버
+> `run_feature_eval.py`/`generate_and_eval.py`에 `--metrics ... ssim psnr lpips` 추가 시.
+> 통합 드라이버의 paired 지표는 **생성 프롬프트가 eval split에서 왔을 때만**(gen 인덱스↔real 인덱스
+> 매핑이 성립) 계산된다: `generate_and_eval`은 `--prompt_source split`이면 자동 활성,
+> `run_feature_eval`은 `--paired_from_split` 플래그 필요. 조건 미충족 시 `[paired] skipped ...`.
+> 키에 `n_paired`, `*_std`가 함께 기록됨.
 
 | 지표 | 방향 | 의미 |
 |---|---|---|
