@@ -87,6 +87,9 @@ def parse_args():
     e.add_argument('--clip_model', default='ViT-B-32')
     e.add_argument('--clip_pretrained', default='openai')
     e.add_argument('--clip_w', default=2.5, type=float)
+    e.add_argument('--clip_text_mode', default='findings', choices=['findings', 'full'])
+    e.add_argument('--clip_retrieval_ks', nargs='+', type=int, default=[1, 5, 10])
+    e.add_argument('--clip_batch_size', default=32, type=int)
     e.add_argument('--reg', default=1e-6, type=float)
     e.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
                    help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
@@ -122,8 +125,12 @@ def resolve_descriptions(args):
         cap = args.n_prompts if args.n_prompts not in (None, 0) else \
             (args.max_real if args.max_real not in (None, 0) else len(ds))
         n = min(cap, len(ds))
-        prompts = [ds[i][1] for i in range(n)]        # (image, report) -> report
-        print(f'[gen] prompts from split={args.eval_split}: {n} report(s)')
+        # Condition generation on FINDINGS/IMPRESSION only (shared util, identical
+        # to what CLIPScore uses) — one prompt policy across generation + eval.
+        from Eval_metric.text_utils import extract_findings_impression
+        prompts = [extract_findings_impression(ds[i][1]) for i in range(n)]
+        print(f'[gen] prompts from split={args.eval_split}: {n} report(s) '
+              '(FINDINGS/IMPRESSION only)')
         return prompts
     from LDM_dp_inference import load_descriptions
     if not args.descriptions:
@@ -173,6 +180,8 @@ def build_eval_cfg(args, gen_dir):
         pca_dim=args.pca_dim, perplexity=args.perplexity, seed=args.seed, ckpt=ckpt,
         clip_backend=args.clip_backend, clip_model=args.clip_model,
         clip_pretrained=args.clip_pretrained, clip_w=args.clip_w,
+        clip_text_mode=args.clip_text_mode, clip_retrieval_ks=args.clip_retrieval_ks,
+        clip_batch_size=args.clip_batch_size,
         # paired ssim/psnr/lpips are only valid when the gen index maps to the
         # eval split — i.e. prompts were pulled from the split.
         paired_from_split=(args.prompt_source == 'split'))

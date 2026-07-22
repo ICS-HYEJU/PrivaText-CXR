@@ -109,15 +109,24 @@ MIMIC-CXR (image + report)
 
 ### 4.4 텍스트-이미지 정합 — CLIPScore (MedCLIP, 기본 백엔드)
 
-- 개념: `CLIPScore = w·max(cos(f_img, f_txt), 0)` (w=2.5). MedCLIP의 이미지·텍스트 인코더가
-  **공유 공간**에 정렬 → 코사인이 "이미지가 프롬프트 의미를 담았는가"를 측정. **(↑)**.
+- 개념: MedCLIP의 이미지·텍스트 인코더가 **공유 공간**에 정렬 → 코사인이 "이미지가 프롬프트
+  의미를 담았는가"를 측정. **(↑)**.
+- **주 지표 = `cos_mean`(raw 코사인)**. `clipscore_mean = w·max(cos,0)`(w=2.5)은 OpenAI CLIP
+  기준 스케일이라 MedCLIP에선 **참고값**으로만 본다. 둘 다 json에 기록됨.
+- **텍스트 = FINDINGS/IMPRESSION만**(`clip_text_mode='findings'`, 기본). 생성 프롬프트와 CLIP
+  텍스트가 동일 util(`Eval_metric/text_utils.extract_findings_impression`)을 써서 일관.
 - `clipscore.json` / summary 키:
-  - `clip_gen_clipscore_mean/std`, `clip_gen_cos_mean/std`, `clip_gen_n` — **생성물 정합**.
-  - (real 기준선 활성 시) `clip_real_clipscore_mean/...` — real (image,report) 정합 **상한(ceiling)**.
-  - **`clip_gap` = real − gen (↓)** — 인코더마다 코사인 스케일이 달라 **절대값 대신 gap으로 모델 간 비교**.
-  - `clip_backend`(=medclip).
-- **읽는 법**: `clip_gap`이 작을수록 생성물이 real 수준의 텍스트 정합에 근접. ε가 낮아질수록
-  gap이 커지는 경향을 기대(=프라이버시 강화 시 정합 저하).
+  - `clip_gen_cos_mean/std`(주), `clip_gen_clipscore_mean/std`(참고), `clip_gen_n`.
+  - retrieval: `clip_gen_R@{1,5,10}_i2t`, `..._t2i`, `clip_gen_median_rank_i2t/t2i`,
+    `clip_gen_duplicate_prompts`. (↑ R@k, ↓ median_rank)
+  - (real 기준선 활성 시) `clip_real_*` — real (image,report) 정합/retrieval **상한(ceiling)**.
+  - **`clip_gap_cos` = real_cos − gen_cos (↓)** ⭐ 주 비교값 (스케일 제거). `clip_gap_clipscore`도 병기.
+  - `clip_backend`(=medclip), `clip_text_mode`.
+- **읽는 법**: `clip_gap_cos`가 작을수록 생성물이 real 수준 정합에 근접. retrieval R@k가 높을수록
+  "생성 이미지가 자기 프롬프트를 잘 회수" = 정합 강함. ε↓일수록 gap↑·R@k↓ 경향 기대.
+- **주의**: retrieval은 **프롬프트가 다양·고유할 때** 의미가 큼(`--prompt_source split --n_samples 1`
+  권장). 중복 프롬프트가 많으면 `duplicate_prompts`로 확인. 또한 **FINDINGS/IMPRESSION 프롬프트로
+  생성한 이미지**여야 정합 해석이 맞으므로, 정책 변경 시 **모든 ε 재생성** 권장.
 
 ### 4.5 (계획) Downstream classification — TSTR / label-agreement
 
