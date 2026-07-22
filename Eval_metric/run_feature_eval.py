@@ -266,6 +266,11 @@ def parse_args():
     p.add_argument('--clip_model', default='ViT-B-32', help='open_clip model (cxr-clip/openclip)')
     p.add_argument('--clip_pretrained', default='openai', help='open_clip weights or ckpt path')
     p.add_argument('--clip_w', default=2.5, type=float)
+    p.add_argument('--clip_text_mode', default='findings', choices=['findings', 'full'],
+                   help="CLIP text: 'findings'=FINDINGS/IMPRESSION only (default)")
+    p.add_argument('--clip_retrieval_ks', nargs='+', type=int, default=[1, 5, 10],
+                   help='CLIP retrieval R@k cutoffs (empty to disable)')
+    p.add_argument('--clip_batch_size', default=32, type=int)
     p.add_argument('--reg', default=1e-6, type=float)
     p.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
                    help="FDS covariance estimator (lw=Ledoit-Wolf, robust when n<dim)")
@@ -352,23 +357,29 @@ def run(args):
         try:
             from Eval_metric.clipscore import (load_encoder, clipscore,
                                                load_pairs_from_csv, real_baseline)
+            ks = tuple(getattr(args, 'clip_retrieval_ks', None) or ())
+            tmode = getattr(args, 'clip_text_mode', 'findings')
             enc = load_encoder(args.clip_backend, args.device,
                                getattr(args, 'clip_model', 'ViT-B-32'),
-                               getattr(args, 'clip_pretrained', 'openai'))
+                               getattr(args, 'clip_pretrained', 'openai'),
+                               batch_size=getattr(args, 'clip_batch_size', 32))
             paths, prompts = load_pairs_from_csv(args.gen_dir)
-            clip_res = {'clip_backend': enc.name}
-            gen = clipscore(paths, prompts, enc, w=args.clip_w)
+            clip_res = {'clip_backend': enc.name, 'clip_text_mode': tmode}
+            gen = clipscore(paths, prompts, enc, w=args.clip_w, text_mode=tmode, retrieval_ks=ks)
             clip_res.update({f'clip_gen_{k}': v for k, v in gen.items()})
-            print(f'[clip] gen clipscore={gen["clipscore_mean"]:.4f} '
-                  f'(cos={gen["cos_mean"]:.4f}, n={gen["n"]})')
+            print(f'[clip] gen cos_mean={gen["cos_mean"]:.4f} (primary)  '
+                  f'clipscore={gen["clipscore_mean"]:.4f}  n={gen["n"]}')
             if args.root_path:                 # dataset mode -> real ceiling + gap
                 real = real_baseline(args.root_path, args.split_csv, args.eval_split,
                                      args.image_size, args.max_length, enc,
                                      max_real=args.max_real, w=args.clip_w,
-                                     tmp_dir=os.path.join(args.out_dir, '_clip_real_tmp'))
+                                     tmp_dir=os.path.join(args.out_dir, '_clip_real_tmp'),
+                                     text_mode=tmode, retrieval_ks=ks)
                 clip_res.update({f'clip_real_{k}': v for k, v in real.items()})
-                clip_res['clip_gap'] = float(real['clipscore_mean'] - gen['clipscore_mean'])
-                print(f'[clip] real={real["clipscore_mean"]:.4f}  gap={clip_res["clip_gap"]:.4f}')
+                clip_res['clip_gap_cos'] = float(real['cos_mean'] - gen['cos_mean'])
+                clip_res['clip_gap_clipscore'] = float(real['clipscore_mean'] - gen['clipscore_mean'])
+                print(f'[clip] real cos_mean={real["cos_mean"]:.4f}  '
+                      f'gap_cos={clip_res["clip_gap_cos"]:.4f}')
             with open(os.path.join(args.out_dir, 'clipscore.json'), 'w') as f:
                 json.dump(clip_res, f, indent=2)
             merged.update(clip_res)
