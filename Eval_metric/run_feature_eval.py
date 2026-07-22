@@ -256,10 +256,15 @@ def parse_args():
     p.add_argument('--device', default='cpu')
     p.add_argument('--batch_size', default=16, type=int)
     p.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
-                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips'])
+                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips', 'label'])
     p.add_argument('--paired_from_split', action='store_true',
-                   help='enable paired ssim/psnr/lpips: gen image index maps to the '
-                        'eval-split real image (only valid when prompts came from the split)')
+                   help='enable paired ssim/psnr/lpips AND label-agreement: gen image '
+                        'index maps to the eval-split real image / study (only valid '
+                        'when prompts came from the split)')
+    # label-agreement (metric 'label'): XRV DenseNet AUROC vs CheXpert GT
+    p.add_argument('--xrv_weights', nargs='+',
+                   default=['densenet121-res224-all', 'densenet121-res224-nih'])
+    p.add_argument('--chexpert_csv', default=None, help='override CheXpert csv path')
     # CLIPScore (metric 'clip'): text-image alignment via a domain encoder
     p.add_argument('--clip_backend', default='medclip',
                    choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
@@ -352,6 +357,20 @@ def run(args):
             merged.update(compute_paired_pixel_metrics(args, pixel_wanted))
         except Exception as e:
             print(f'[paired] skipped ({type(e).__name__}: {e})')
+
+    if 'label' in args.metrics:
+        try:
+            from Eval_metric.downstream_cls import compute_label_agreement
+            la = compute_label_agreement(args)
+            if la:
+                with open(os.path.join(args.out_dir, 'label_agreement.json'), 'w') as f:
+                    json.dump(la, f, indent=2)
+                for short, r in la.items():   # macro summary only (per-pathology in json)
+                    for k in ('auroc_gen_macro', 'auroc_real_macro',
+                              'auroc_gap_macro', 'auroc_ratio_macro'):
+                        merged[f'label_{short}_{k}'] = r.get(k)
+        except Exception as e:
+            print(f'[label] skipped ({type(e).__name__}: {e})')
 
     if 'clip' in args.metrics:
         try:
