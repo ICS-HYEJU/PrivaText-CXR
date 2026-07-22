@@ -81,7 +81,10 @@ def parse_args():
     e.add_argument('--eval_batch_size', default=16, type=int,
                    help='batch size for feature extraction')
     e.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
-                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips'])
+                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips', 'label'])
+    e.add_argument('--xrv_weights', nargs='+',
+                   default=['densenet121-res224-all', 'densenet121-res224-nih'])
+    e.add_argument('--chexpert_csv', default=None)
     e.add_argument('--clip_backend', default='medclip',
                    choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
     e.add_argument('--clip_model', default='ViT-B-32')
@@ -182,6 +185,7 @@ def build_eval_cfg(args, gen_dir):
         clip_pretrained=args.clip_pretrained, clip_w=args.clip_w,
         clip_text_mode=args.clip_text_mode, clip_retrieval_ks=args.clip_retrieval_ks,
         clip_batch_size=args.clip_batch_size,
+        xrv_weights=args.xrv_weights, chexpert_csv=args.chexpert_csv,
         # paired ssim/psnr/lpips are only valid when the gen index maps to the
         # eval split — i.e. prompts were pulled from the split.
         paired_from_split=(args.prompt_source == 'split'))

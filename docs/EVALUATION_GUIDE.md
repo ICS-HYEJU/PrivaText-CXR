@@ -128,10 +128,21 @@ MIMIC-CXR (image + report)
   권장). 중복 프롬프트가 많으면 `duplicate_prompts`로 확인. 또한 **FINDINGS/IMPRESSION 프롬프트로
   생성한 이미지**여야 정합 해석이 맞으므로, 정책 변경 시 **모든 ε 재생성** 권장.
 
-### 4.5 (계획) Downstream classification — TSTR / label-agreement
+### 4.5 Downstream classification — label-agreement (구현됨), TSTR (계획)
 
-- 아직 미구현(다음 단계). TSTR=생성셋으로 분류기 학습 후 real test AUROC, 또는 사전학습 CXR
-  분류기의 조건 라벨 회수율. ε별 AUROC 곡선으로 privacy–utility tradeoff 정량화 예정.
+- **label-agreement**(`--metrics ... label`): 사전학습 **XRV DenseNet-121**을 생성/real 이미지에
+  적용해 **CheXpert GT 라벨(mimic-cxr-2.0.0-chexpert.csv[.gz])** 대비 AUROC 산출.
+- 두 가중치를 함께: `densenet121-res224-nih`(NIH=사전학습 도메인, out-of-domain·엄격) +
+  `densenet121-res224-all`(MIMIC 포함·in-domain·상한 높음, **FID 백본과 공유이므로 덜 독립적**).
+- `label_agreement.json` / summary 키 (weight별 short=`all`/`nih`):
+  - `label_<short>_auroc_gen_macro`, `label_<short>_auroc_real_macro`,
+    **`label_<short>_auroc_gap_macro`(=real−gen, ↓)** ⭐, `label_<short>_auroc_ratio_macro`(=gen/real, ↑).
+  - per-pathology AUROC(gen/real)와 support는 `label_agreement.json`에만.
+- **읽는 법**: **분류기 절대 AUROC는 weight set 간 직접 비교 금지**. 각 분류기의 **gen을 자기 real과**
+  비교(gap/ratio)해야 공정. gap↓·ratio→1일수록 생성물이 real 수준의 병변 판별력 보유.
+- **제약**: `--paired_from_split` 필요(gen index→split study join). 불확실 라벨(-1) **drop**.
+  채점 라벨 = 각 분류기 유효라벨(op_threshs) ∩ CheXpert GT (nih≈7, all≈11).
+- **TSTR**(Train on Synthetic, Test on Real)는 계획 단계(생성셋으로 분류기 학습 후 real AUROC).
 
 ## 5. 실행 방법 (재현/추가 생성이 필요할 때)
 
