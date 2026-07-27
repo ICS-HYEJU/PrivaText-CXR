@@ -245,8 +245,8 @@ def compute_label_agreement(args):
 # ── CLI ──────────────────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(description='Downstream label-agreement (XRV DenseNet AUROC)')
-    p.add_argument('--gen_dir', required=True, help='generated pngs (samples/) with descriptions.csv')
-    p.add_argument('--root_path', required=True, help='MIMIC root (real images + chexpert csv)')
+    p.add_argument('--gen_dir', default='/home/hjchoi/PycharmProjects/PrivaText-CXR/EVAL/gen_out/eps10', help='generated pngs (samples/) with descriptions.csv')
+    p.add_argument('--root_path', default='/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0', help='MIMIC root (real images + chexpert csv)')
     p.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv')
     p.add_argument('--eval_split', default='test')
     p.add_argument('--chexpert_csv', default=None, help='override CheXpert csv path')

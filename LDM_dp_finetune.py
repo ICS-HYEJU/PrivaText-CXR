@@ -270,7 +270,7 @@ def parse_args():
     parser.add_argument('--finetune_biobert', default=False)
 
     # LoRA (adapt-lora) --------------------------------------------------------
-    parser.add_argument('--use_lora', default=False,
+    parser.add_argument('--use_lora', default=True,
                         type=lambda x: str(x).lower() != 'false',
                         help='Train LoRA adapters on cross-attention instead of '
                              'full SpatialTransformer blocks')

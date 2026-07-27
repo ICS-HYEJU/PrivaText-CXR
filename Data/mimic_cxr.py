@@ -81,7 +81,7 @@ def parse_args():
                         help="'report'=FINDINGS+IMPRESSION (truncated), "
                              "'full'=entire .txt, 'label'=CheXpert pathologies")
     parser.add_argument("--chexpert_csv", type=str,
-                        default="mimic-cxr-2.0.0-chexpert.csv",
+                        default="mimic-cxr-2.0.0-chexpert.csv.gz",
                         help="CheXpert label CSV (relative to root_path or "
                              "absolute); used only when prompt_mode='label'")
 
