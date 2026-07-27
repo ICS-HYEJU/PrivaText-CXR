@@ -1,20 +1,32 @@
 """
-Data/mimic_cxr.py  ?  MIMIC-CXR Map-Style Dataset
+Data/mimic_cxr.py  -  MIMIC-CXR Map-Style Dataset
 ---------------------------------------------------
 Map-style dataset compatible with DP-SGD (Opacus UniformWithReplacementSampler).
 Each sample returns (image_tensor, report_str).
 
-Loads from pre-built split directories produced by prepare_split_dirs():
-    <prebuilt_split_dir>/
-    ¦§¦¡¦¡ train/
-    ¦¢   ¦§¦¡¦¡ p10/
-    ¦¢   ¦¢   ¦¦¦¡¦¡ p10000032/
-    ¦¢   ¦¢       ¦§¦¡¦¡ s50414267/
-    ¦¢   ¦¢       ¦¢   ¦¦¦¡¦¡ <dicom_id>.dcm
-    ¦¢   ¦¢       ¦¦¦¡¦¡ s50414267.txt
-    ¦¢   ¦§¦¡¦¡ p11/ ... p19/
-    ¦§¦¡¦¡ validate/
-    ¦¦¦¡¦¡ test/
+Two input modes are supported (auto-detected from the args passed in):
+
+1. PhysioNet mode  (pass `root_path` [+ optional `split_csv`])
+   Reads directly from the original MIMIC-CXR PhysioNet directory using the
+   official split CSV (mimic-cxr-2.0.0-split.csv).  No pre-built split dirs.
+
+       <root_path>/
+       ├── files/
+       │   ├── p10/p10000032/s50414267/<dicom_id>.dcm
+       │   └── p10/p10000032/s50414267.txt
+       └── mimic-cxr-2.0.0-split.csv
+
+2. Pre-built split mode  (pass `prebuilt_split_dir`)
+   Scans <prebuilt_split_dir>/<split>/ built by prepare_split_dirs().
+
+       <prebuilt_split_dir>/
+       ├── train/  ├── validate/  └── test/
+
+DICOM files that are missing on disk are silently skipped (partial downloads).
+DICOM files whose pixel data cannot be decoded (truncated / corrupted:
+"number of bytes of pixel data is less than expected") are dropped at index
+build when `validate_dicom` is enabled (default), with the validation result
+cached to a JSON manifest so the (expensive) decode is paid only once.
 
 External usage (training scripts):
     from Data.mimic_cxr import dataset_loader
@@ -49,12 +61,20 @@ except ImportError:
 # =============================================================================
 def parse_args():
     parser = argparse.ArgumentParser(description="MIMIC-CXR Dataset")
-    parser.add_argument("--device_id",          type=int, default=1)
+    parser.add_argument("--device_id", type=int, default=1)
 
-    # Paths
-    parser.add_argument("--prebuilt_split_dir", type=str,
-                        default='/storage/hjchoi/mimic/split',
-                        help="root of pre-built split dirs (train/validate/test)")
+    # Paths  -  provide EITHER --root_path (PhysioNet mode) OR
+    #           --prebuilt_split_dir (pre-built split mode)
+    parser.add_argument("--root_path", type=str,
+                        default='/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0',
+                        help="Root of original MIMIC-CXR PhysioNet download "
+                             "(contains files/ and mimic-cxr-2.0.0-split.csv)")
+    parser.add_argument("--split_csv", type=str,
+                        default='mimic-cxr-2.0.0-split.csv',
+                        help="Split CSV filename (relative to root_path, or absolute path)")
+    parser.add_argument("--prebuilt_split_dir", type=str, default=None,
+                        help="root of pre-built split dirs (train/validate/test); "
+                             "when set, takes precedence over --root_path")
 
     # Dataset
     parser.add_argument("--split",       type=str, default="train",
@@ -69,8 +89,8 @@ def parse_args():
                         action="store_false",
                         help="disable DICOM validation (keep every file)")
     parser.add_argument("--dicom_cache", type=str, default=None,
-                        help="path to the DICOM validation cache "
-                             "(default: <split_dir>/.dicom_valid_cache.json)")
+                        help="path to the DICOM validation cache JSON "
+                             "(default: alongside the data / cwd)")
 
     # DataLoader
     parser.add_argument("--batch_size",  type=int, default=8)
@@ -91,13 +111,15 @@ class MIMICCXRDataset(Dataset):
     """
     MIMIC-CXR Map-Style Dataset.
 
-    Scans <prebuilt_split_dir>/<split>/ at init to build an idx-mapped sample
-    list (lightweight path strings only).  Each __getitem__ call loads one
-    DICOM file on demand.
+    Builds an idx-mapped sample list at init (lightweight path strings only).
+    Each __getitem__ call loads one DICOM file on demand.
 
     Args:
-        args : Namespace ? requires prebuilt_split_dir, split, image_size,
-                           max_length
+        args : Namespace.  Provide EITHER
+                 - root_path [+ split_csv]        (PhysioNet mode), OR
+                 - prebuilt_split_dir             (pre-built split mode)
+               plus split, image_size, max_length.
+               Optional: patient_whitelist, validate_dicom, dicom_cache.
     """
     def __init__(self, args):
         super().__init__()
@@ -109,10 +131,44 @@ class MIMICCXRDataset(Dataset):
         self.validate_dicom = getattr(args, "validate_dicom", True)
         self.dicom_cache    = getattr(args, "dicom_cache", None)
 
-        self.scan_root = os.path.join(args.prebuilt_split_dir, self.split)
-        if not os.path.isdir(self.scan_root):
-            raise FileNotFoundError(
-                f"[MIMICCXRDataset] split dir not found: {self.scan_root}"
+        # Optional patient-level filter for DP budget-isolated splits
+        # (D_search / D_train / D_test).  When set, only samples whose
+        # patient_id (e.g. "p10000032") is in this set are kept.
+        wl = getattr(args, "patient_whitelist", None)
+        self.patient_whitelist = set(wl) if wl is not None else None
+
+        # -- Resolve input mode ------------------------------------------------
+        prebuilt  = getattr(args, "prebuilt_split_dir", None)
+        root_path = getattr(args, "root_path", None)
+
+        if prebuilt:
+            self.mode      = "prebuilt"
+            self.scan_root = os.path.join(prebuilt, self.split)
+            if not os.path.isdir(self.scan_root):
+                raise FileNotFoundError(
+                    f"[MIMICCXRDataset] split dir not found: {self.scan_root}"
+                )
+        elif root_path:
+            self.mode      = "physionet"
+            self.root_path = root_path
+            self.files_dir = os.path.join(self.root_path, "files")
+
+            split_csv = getattr(args, "split_csv", "mimic-cxr-2.0.0-split.csv")
+            self.split_csv = (split_csv if os.path.isabs(split_csv)
+                              else os.path.join(self.root_path, split_csv))
+
+            if not os.path.isfile(self.split_csv):
+                raise FileNotFoundError(
+                    f"[MIMICCXRDataset] split CSV not found: {self.split_csv}"
+                )
+            if not os.path.isdir(self.files_dir):
+                raise FileNotFoundError(
+                    f"[MIMICCXRDataset] files/ directory not found: {self.files_dir}"
+                )
+        else:
+            raise ValueError(
+                "[MIMICCXRDataset] provide either 'prebuilt_split_dir' or "
+                "'root_path' in args."
             )
 
         self.transform = transforms.Compose([
@@ -122,14 +178,19 @@ class MIMICCXRDataset(Dataset):
         ])
 
         self.samples = self._build_index()
-        n_raw = len(self.samples)
+        if self.patient_whitelist is not None:
+            self.samples = [s for s in self.samples
+                            if s["patient_id"] in self.patient_whitelist]
 
+        n_raw = len(self.samples)
         if self.validate_dicom:
             self.samples = self._filter_corrupted(self.samples)
-
         n_dropped = n_raw - len(self.samples)
-        print(f"[MIMICCXRDataset] split='{self.split}'  "
-              f"total={len(self.samples)}  (dropped {n_dropped} corrupted)")
+
+        print(f"[MIMICCXRDataset] mode='{self.mode}'  split='{self.split}'  "
+              f"total={len(self.samples)}  (dropped {n_dropped} corrupted)"
+              + (f"  (patient_whitelist={len(self.patient_whitelist)} patients)"
+                 if self.patient_whitelist is not None else ""))
 
     # -------------------------------------------------------------------------
     # Map-style interface
@@ -142,7 +203,7 @@ class MIMICCXRDataset(Dataset):
         """
         Returns:
             image  : Tensor [1, H, W]  normalised to [-1, 1]
-            report : str  ? "FINDINGS: <...> IMPRESSION: <...>"
+            report : str  - "FINDINGS: <...> IMPRESSION: <...>"
         """
         meta = self.samples[idx]
 
@@ -160,6 +221,54 @@ class MIMICCXRDataset(Dataset):
     # -------------------------------------------------------------------------
 
     def _build_index(self) -> list:
+        if self.mode == "prebuilt":
+            return self._build_index_prebuilt()
+        return self._build_index_physionet()
+
+    def _build_index_physionet(self) -> list:
+        """
+        Read the split CSV, construct DICOM and report paths, and keep only
+        rows whose DICOM file exists on disk.
+        """
+        import pandas as pd
+
+        df = pd.read_csv(self.split_csv)
+        if self.split:
+            df = df[df["split"] == self.split].reset_index(drop=True)
+
+        samples = []
+        missing = 0
+
+        for _, row in df.iterrows():
+            subject_id = int(row["subject_id"])
+            study_id   = int(row["study_id"])
+            dicom_id   = str(row["dicom_id"]).strip()
+
+            pid_str = f"p{subject_id}"
+            prefix  = pid_str[:3]            # e.g. "p10"
+
+            patient_dir = os.path.join(self.files_dir, prefix, pid_str)
+            study_dir   = os.path.join(patient_dir, f"s{study_id}")
+            dcm_path    = os.path.join(study_dir, f"{dicom_id}.dcm")
+            report_path = os.path.join(patient_dir, f"s{study_id}.txt")
+
+            if not os.path.exists(dcm_path):
+                missing += 1
+                continue
+
+            samples.append({
+                "dcm_path"   : dcm_path,
+                "report_path": report_path,
+                "study_id"   : f"s{study_id}",
+                "patient_id" : pid_str,
+            })
+
+        if missing:
+            print(f"[MIMICCXRDataset] {missing} DICOM files not yet downloaded, skipped.")
+
+        return samples
+
+    def _build_index_prebuilt(self) -> list:
         """
         Walk scan_root and collect (dcm_path, report_path) for every .dcm file.
         Structure: <scan_root>/p1X/pXXXXXXXX/sYYYYYYYY/*.dcm
@@ -202,7 +311,10 @@ class MIMICCXRDataset(Dataset):
     def _cache_path(self) -> str:
         if self.dicom_cache:
             return self.dicom_cache
-        return os.path.join(self.scan_root, ".dicom_valid_cache.json")
+        if self.mode == "prebuilt":
+            return os.path.join(self.scan_root, ".dicom_valid_cache.json")
+        # PhysioNet root may be read-only; default to cwd.
+        return os.path.join(os.getcwd(), f".dicom_valid_cache_{self.split}.json")
 
     @staticmethod
     def _is_readable_dcm(path: str) -> bool:
@@ -264,8 +376,7 @@ class MIMICCXRDataset(Dataset):
                 dropped.append(path)
 
             if dirty and (i + 1) % 2000 == 0:
-                print(f"[MIMICCXRDataset] validating DICOMs "
-                      f"{i + 1}/{n_total} ...")
+                print(f"[MIMICCXRDataset] validating DICOMs {i + 1}/{n_total} ...")
 
         if dirty:
             try:
@@ -344,7 +455,7 @@ class MIMICCXRDataset(Dataset):
 
 
 # =============================================================================
-# dataset_loader  ?  DataLoader with BioBERT collate (used by training scripts)
+# dataset_loader  -  DataLoader with BioBERT collate (used by training scripts)
 # =============================================================================
 
 def dataset_loader(
