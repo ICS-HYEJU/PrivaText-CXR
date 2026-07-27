@@ -76,10 +76,15 @@ def load_chexpert_gt(csv_path):
     import pandas as pd
     df = pd.read_csv(csv_path)                     # pandas reads .gz transparently
     label_cols = [c for c in df.columns if c not in ('subject_id', 'study_id')]
+    # Use numpy arrays keyed by ORIGINAL column names — itertuples()._asdict()
+    # mangles names with spaces (e.g. 'Enlarged Cardiomediastinum').
+    subj = df['subject_id'].astype(int).to_numpy()
+    stud = df['study_id'].astype(int).to_numpy()
+    vals = df[label_cols].to_numpy(dtype=float)    # blanks -> NaN
     gt = {}
-    for row in df.itertuples(index=False):
-        d = row._asdict()
-        gt[(int(d['subject_id']), int(d['study_id']))] = {c: d[c] for c in label_cols}
+    for i in range(len(df)):
+        gt[(int(subj[i]), int(stud[i]))] = {
+            label_cols[j]: vals[i, j] for j in range(len(label_cols))}
     return gt
 
 
@@ -245,8 +250,8 @@ def compute_label_agreement(args):
 # ── CLI ──────────────────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(description='Downstream label-agreement (XRV DenseNet AUROC)')
-    p.add_argument('--gen_dir', default='/home/hjchoi/PycharmProjects/PrivaText-CXR/EVAL/gen_out/eps10', help='generated pngs (samples/) with descriptions.csv')
-    p.add_argument('--root_path', default='/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0', help='MIMIC root (real images + chexpert csv)')
+    p.add_argument('--gen_dir', required=True, help='generated pngs (samples/) with descriptions.csv')
+    p.add_argument('--root_path', required=True, help='MIMIC root (real images + chexpert csv)')
     p.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv')
     p.add_argument('--eval_split', default='test')
     p.add_argument('--chexpert_csv', default=None, help='override CheXpert csv path')

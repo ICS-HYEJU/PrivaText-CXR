@@ -56,6 +56,16 @@ class _MedCLIP:
 
     def __init__(self, device, batch_size=32):
         import torch  # noqa: F401
+        # MedCLIP imports transformers.CLIPFeatureExtractor, which newer
+        # transformers renamed to CLIPImageProcessor. Alias it before importing
+        # medclip so its `from transformers import CLIPFeatureExtractor` resolves.
+        import transformers
+        if not hasattr(transformers, 'CLIPFeatureExtractor'):
+            try:
+                from transformers import CLIPImageProcessor
+                transformers.CLIPFeatureExtractor = CLIPImageProcessor
+            except Exception:
+                pass
         from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
         self.torch = __import__('torch')
         self.device = device
