@@ -51,21 +51,40 @@ def _l2norm(x, eps=1e-8):
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + eps)
 
 
+def _shim_clip_feature_extractor():
+    """
+    MedCLIP does `from transformers import CLIPFeatureExtractor`, a name removed
+    from newer transformers (now CLIPImageProcessor). Alias it on the transformers
+    module BEFORE importing medclip so that import resolves. Robust to lazy
+    modules / missing names; warns if it cannot resolve a replacement.
+    """
+    import transformers
+    def _try(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    if _try(lambda: transformers.CLIPFeatureExtractor) is not None:
+        return
+    cls = (_try(lambda: transformers.CLIPImageProcessor)
+           or _try(lambda: transformers.CLIPImageProcessorFast)
+           or _try(lambda: __import__(
+               'transformers.models.clip.image_processing_clip',
+               fromlist=['CLIPImageProcessor']).CLIPImageProcessor))
+    if cls is not None:
+        transformers.CLIPFeatureExtractor = cls
+        print(f'[medclip] shimmed transformers.CLIPFeatureExtractor -> {cls.__name__}')
+    else:
+        print('[medclip] WARNING: could not alias CLIPFeatureExtractor; medclip '
+              'import may fail. Try: pip install "transformers<4.36"')
+
+
 class _MedCLIP:
     name = 'medclip'
 
     def __init__(self, device, batch_size=32):
         import torch  # noqa: F401
-        # MedCLIP imports transformers.CLIPFeatureExtractor, which newer
-        # transformers renamed to CLIPImageProcessor. Alias it before importing
-        # medclip so its `from transformers import CLIPFeatureExtractor` resolves.
-        import transformers
-        if not hasattr(transformers, 'CLIPFeatureExtractor'):
-            try:
-                from transformers import CLIPImageProcessor
-                transformers.CLIPFeatureExtractor = CLIPImageProcessor
-            except Exception:
-                pass
+        _shim_clip_feature_extractor()
         from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
         self.torch = __import__('torch')
         self.device = device
