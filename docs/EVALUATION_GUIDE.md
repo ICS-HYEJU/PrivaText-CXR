@@ -140,6 +140,8 @@ MIMIC-CXR (image + report)
   - per-pathology AUROC(gen/real)와 support는 `label_agreement.json`에만.
 - **읽는 법**: **분류기 절대 AUROC는 weight set 간 직접 비교 금지**. 각 분류기의 **gen을 자기 real과**
   비교(gap/ratio)해야 공정. gap↓·ratio→1일수록 생성물이 real 수준의 병변 판별력 보유.
+- **ROC 그래프**: `label`을 돌리면 `out_dir`에 **`label_auroc_roc.png`** 저장(양쪽 eval 경로 모두).
+  분류기(all/nih) × 신뢰 병변별로 **gen(빨강 실선) vs real(파랑 점선) ROC 곡선**, 범례에 AUROC 표기.
 - **제약**: `--paired_from_split` 필요(gen index→split study join). 불확실 라벨(-1) **drop**.
   채점 라벨 = 각 분류기 유효라벨(op_threshs) ∩ CheXpert GT (nih≈7, all≈11).
 - **macro 신뢰도**: per-pathology AUROC는 양성이 1~2개면 `1.0`/`0.5` 같은 노이즈가 됩니다.

@@ -363,7 +363,8 @@ def run(args):
     if 'label' in args.metrics:
         try:
             from Eval_metric.downstream_cls import compute_label_agreement
-            la = compute_label_agreement(args)
+            la = compute_label_agreement(
+                args, roc_png=os.path.join(args.out_dir, 'label_auroc_roc.png'))
             if la:
                 with open(os.path.join(args.out_dir, 'label_agreement.json'), 'w') as f:
                     json.dump(la, f, indent=2)

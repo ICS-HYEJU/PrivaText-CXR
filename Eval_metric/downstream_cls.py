@@ -139,7 +139,7 @@ def auroc_per_pathology(probs, model, gt, keys, min_pos=10):
     """
     from sklearn.metrics import roc_auc_score
     pathologies = list(model.pathologies)
-    per, support = {}, {}
+    per, support, curves = {}, {}, {}
     for i, pname in enumerate(pathologies):
         if pname not in XRV_TO_CHEXPERT or not _valid_pathology(model, i):
             continue
@@ -161,10 +161,11 @@ def auroc_per_pathology(probs, model, gt, keys, min_pos=10):
         n_pos = int(sum(y_true))
         per[pname] = float(roc_auc_score(y_true, y_score))
         support[pname] = {'n': len(y_true), 'n_pos': n_pos, 'n_neg': len(y_true) - n_pos}
+        curves[pname] = (np.asarray(y_true), np.asarray(y_score))   # for ROC plot
     included = [p for p in per
                if min(support[p]['n_pos'], support[p]['n_neg']) >= min_pos]
     macro = float(np.mean([per[p] for p in included])) if included else None
-    return per, macro, support, included
+    return per, macro, support, included, curves
 
 
 # ── gen/real image collection (paired by descriptions.csv index) ─────────────
@@ -191,7 +192,47 @@ def _key_of_sample(ds, idx):
     return (subj, stid)
 
 
-def compute_label_agreement(args):
+def _plot_roc(collected, out_png):
+    """ROC curves (gen solid vs real dashed) per classifier x reliable pathology."""
+    from sklearn.metrics import roc_curve
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    shorts = [s for s in collected if collected[s]['included']]
+    if not shorts:
+        print('[label] ROC plot skipped (no reliable pathology to draw)')
+        return
+    max_cols = max(len(collected[s]['included']) for s in shorts)
+    fig, axes = plt.subplots(len(shorts), max_cols,
+                             figsize=(3.8 * max_cols, 3.4 * len(shorts)), squeeze=False)
+    for r, s in enumerate(shorts):
+        inc = collected[s]['included']
+        cg, cr = collected[s]['curves_gen'], collected[s]['curves_real']
+        pg, pr = collected[s]['auroc_gen'], collected[s]['auroc_real']
+        for c in range(max_cols):
+            ax = axes[r][c]
+            if c >= len(inc):
+                ax.axis('off')
+                continue
+            p = inc[c]
+            fr, tr, _ = roc_curve(*cr[p])
+            fg, tg, _ = roc_curve(*cg[p])
+            ax.plot(fr, tr, '--', color='#2563eb', label=f'real {pr.get(p, float("nan")):.3f}')
+            ax.plot(fg, tg, '-', color='#dc2626', label=f'gen {pg.get(p, float("nan")):.3f}')
+            ax.plot([0, 1], [0, 1], ':', color='gray', lw=1)
+            ax.set_title(f'{s} · {p}', fontsize=10)
+            ax.set_xlabel('FPR'); ax.set_ylabel('TPR')
+            ax.legend(loc='lower right', fontsize=8)
+    fig.suptitle('Label-agreement ROC (gen vs real, AUROC in legend)')
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+    print(f'[label] ROC -> {out_png}')
+
+
+def compute_label_agreement(args, roc_png=None):
     """
     Returns {short_weights: {auroc_gen_macro, auroc_real_macro, auroc_gap_macro,
     auroc_ratio_macro, per_pathology_gen, per_pathology_real, n, weights}}.
@@ -227,7 +268,7 @@ def compute_label_agreement(args):
 
     weights_list = getattr(args, 'xrv_weights', None) or DEFAULT_XRV_WEIGHTS
     bs = max(1, getattr(args, 'batch_size', 16))
-    results = {}
+    results, collected = {}, {}
     for weights in weights_list:
         try:
             model = load_xrv_classifier(weights, args.device)
@@ -237,9 +278,13 @@ def compute_label_agreement(args):
         p_gen = classify(model, gen_imgs, args.device, bs)
         p_real = classify(model, real_imgs, args.device, bs)
         min_pos = getattr(args, 'label_min_pos', 10)
-        gen_per, gen_macro, gen_sup, included = auroc_per_pathology(p_gen, model, gt, keys, min_pos)
-        real_per, real_macro, _, _ = auroc_per_pathology(p_real, model, gt, keys, min_pos)
+        gen_per, gen_macro, gen_sup, included, gen_curves = auroc_per_pathology(
+            p_gen, model, gt, keys, min_pos)
+        real_per, real_macro, _, _, real_curves = auroc_per_pathology(
+            p_real, model, gt, keys, min_pos)
         short = weights.split('-')[-1]              # 'all' / 'nih'
+        collected[short] = {'included': included, 'auroc_gen': gen_per, 'auroc_real': real_per,
+                            'curves_gen': gen_curves, 'curves_real': real_curves}
         gap = (real_macro - gen_macro) if (gen_macro is not None and real_macro is not None) else None
         ratio = (gen_macro / real_macro) if (gen_macro and real_macro) else None
         results[short] = {
@@ -256,6 +301,11 @@ def compute_label_agreement(args):
         print(f'[label] {short:4s} gen_macro={gm}  real_macro={rm}  gap={gp}  '
               f'n={len(valid)}  macro over {len(included)} pathology(ies) '
               f'(min_pos={min_pos}): {included}')
+    if roc_png and collected:
+        try:
+            _plot_roc(collected, roc_png)
+        except Exception as e:
+            print(f'[label] ROC plot skipped ({type(e).__name__}: {e})')
     return results
 
 
@@ -275,13 +325,17 @@ def parse_args():
     p.add_argument('--batch_size', default=16, type=int)
     p.add_argument('--device', default='cpu')
     p.add_argument('--output', default=None)
+    p.add_argument('--roc_png', default=None, help='save ROC-curve PNG (default: sibling of --output)')
     p.set_defaults(paired_from_split=True)          # standalone assumes split prompts
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    res = compute_label_agreement(args)
+    roc_png = args.roc_png
+    if roc_png is None and args.output:
+        roc_png = os.path.join(os.path.dirname(os.path.abspath(args.output)), 'label_auroc_roc.png')
+    res = compute_label_agreement(args, roc_png=roc_png)
     print(json.dumps(res, indent=2))
     if args.output:
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
