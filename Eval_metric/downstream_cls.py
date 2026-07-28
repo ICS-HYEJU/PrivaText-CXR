@@ -126,11 +126,16 @@ def _valid_pathology(model, idx):
         return True
 
 
-def auroc_per_pathology(probs, model, gt, keys):
+def auroc_per_pathology(probs, model, gt, keys, min_pos=10):
     """
     probs [N,18], keys [(subject_id, study_id)] per row.
-    Returns (per_pathology_auroc: dict, macro: float|None, support: dict).
+    Returns (per_pathology_auroc, macro, support, macro_pathologies).
     Uncertain (-1) and missing (NaN) GT are dropped per pathology.
+
+    per-pathology AUROC is reported for EVERY scorable pathology, but `macro`
+    only averages the RELIABLE ones — those with at least `min_pos` positives AND
+    `min_pos` negatives — since AUROC on 1-2 positives is pure noise (e.g. 1.0 /
+    0.5). `macro_pathologies` lists which were included.
     """
     from sklearn.metrics import roc_auc_score
     pathologies = list(model.pathologies)
@@ -153,10 +158,13 @@ def auroc_per_pathology(probs, model, gt, keys):
             y_score.append(float(probs[r, i]))
         if len(set(y_true)) < 2:                    # need both classes for AUROC
             continue
+        n_pos = int(sum(y_true))
         per[pname] = float(roc_auc_score(y_true, y_score))
-        support[pname] = {'n': len(y_true), 'n_pos': int(sum(y_true))}
-    macro = float(np.mean(list(per.values()))) if per else None
-    return per, macro, support
+        support[pname] = {'n': len(y_true), 'n_pos': n_pos, 'n_neg': len(y_true) - n_pos}
+    included = [p for p in per
+               if min(support[p]['n_pos'], support[p]['n_neg']) >= min_pos]
+    macro = float(np.mean([per[p] for p in included])) if included else None
+    return per, macro, support, included
 
 
 # ── gen/real image collection (paired by descriptions.csv index) ─────────────
@@ -228,22 +236,26 @@ def compute_label_agreement(args):
             continue
         p_gen = classify(model, gen_imgs, args.device, bs)
         p_real = classify(model, real_imgs, args.device, bs)
-        gen_per, gen_macro, gen_sup = auroc_per_pathology(p_gen, model, gt, keys)
-        real_per, real_macro, _ = auroc_per_pathology(p_real, model, gt, keys)
+        min_pos = getattr(args, 'label_min_pos', 10)
+        gen_per, gen_macro, gen_sup, included = auroc_per_pathology(p_gen, model, gt, keys, min_pos)
+        real_per, real_macro, _, _ = auroc_per_pathology(p_real, model, gt, keys, min_pos)
         short = weights.split('-')[-1]              # 'all' / 'nih'
         gap = (real_macro - gen_macro) if (gen_macro is not None and real_macro is not None) else None
         ratio = (gen_macro / real_macro) if (gen_macro and real_macro) else None
         results[short] = {
-            'weights': weights,
+            'weights': weights, 'min_pos': min_pos,
             'auroc_gen_macro': gen_macro, 'auroc_real_macro': real_macro,
             'auroc_gap_macro': gap, 'auroc_ratio_macro': ratio,
+            'macro_pathologies': included,          # reliable set the macro averages
             'per_pathology_gen': gen_per, 'per_pathology_real': real_per,
             'support': gen_sup, 'n': len(valid),
         }
         gm = f'{gen_macro:.4f}' if gen_macro is not None else 'NA'
         rm = f'{real_macro:.4f}' if real_macro is not None else 'NA'
         gp = f'{gap:.4f}' if gap is not None else 'NA'
-        print(f'[label] {short:4s} gen_macro={gm}  real_macro={rm}  gap={gp}  n={len(valid)}')
+        print(f'[label] {short:4s} gen_macro={gm}  real_macro={rm}  gap={gp}  '
+              f'n={len(valid)}  macro over {len(included)} pathology(ies) '
+              f'(min_pos={min_pos}): {included}')
     return results
 
 
@@ -256,6 +268,8 @@ def parse_args():
     p.add_argument('--eval_split', default='test')
     p.add_argument('--chexpert_csv', default=None, help='override CheXpert csv path')
     p.add_argument('--xrv_weights', nargs='+', default=DEFAULT_XRV_WEIGHTS)
+    p.add_argument('--label_min_pos', default=10, type=int,
+                   help='min positives AND negatives for a pathology to enter macro')
     p.add_argument('--image_size', default=256, type=int)
     p.add_argument('--max_length', default=512, type=int)
     p.add_argument('--batch_size', default=16, type=int)

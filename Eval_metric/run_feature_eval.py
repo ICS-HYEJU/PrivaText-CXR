@@ -264,6 +264,8 @@ def parse_args():
     # label-agreement (metric 'label'): XRV DenseNet AUROC vs CheXpert GT
     p.add_argument('--xrv_weights', nargs='+',
                    default=['densenet121-res224-all', 'densenet121-res224-nih'])
+    p.add_argument('--label_min_pos', default=10, type=int,
+                   help='min positives+negatives for a pathology to enter label macro AUROC')
     p.add_argument('--chexpert_csv', default=None, help='override CheXpert csv path')
     # CLIPScore (metric 'clip'): text-image alignment via a domain encoder
     p.add_argument('--clip_backend', default='medclip',

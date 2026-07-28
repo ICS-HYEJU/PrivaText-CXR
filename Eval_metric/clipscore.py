@@ -53,30 +53,41 @@ def _l2norm(x, eps=1e-8):
 
 def _shim_clip_feature_extractor():
     """
-    MedCLIP does `from transformers import CLIPFeatureExtractor`, a name removed
-    from newer transformers (now CLIPImageProcessor). Alias it on the transformers
-    module BEFORE importing medclip so that import resolves. Robust to lazy
-    modules / missing names; warns if it cannot resolve a replacement.
+    MedCLIP does `from transformers import CLIPFeatureExtractor`, a name REMOVED
+    from transformers v5 (now CLIPImageProcessor). We alias it before importing
+    medclip. transformers' _LazyModule intercepts setattr, so we assign into
+    __dict__ directly (what `from transformers import X` actually reads) and then
+    VERIFY it is visible; if not, tell the user to pin transformers.
     """
-    import transformers
+    import importlib
+    transformers = importlib.import_module('transformers')
+
     def _try(getter):
         try:
             return getter()
         except Exception:
             return None
+
     if _try(lambda: transformers.CLIPFeatureExtractor) is not None:
-        return
+        return  # already importable
     cls = (_try(lambda: transformers.CLIPImageProcessor)
            or _try(lambda: transformers.CLIPImageProcessorFast)
-           or _try(lambda: __import__(
-               'transformers.models.clip.image_processing_clip',
-               fromlist=['CLIPImageProcessor']).CLIPImageProcessor))
-    if cls is not None:
-        transformers.CLIPFeatureExtractor = cls
-        print(f'[medclip] shimmed transformers.CLIPFeatureExtractor -> {cls.__name__}')
+           or _try(lambda: importlib.import_module(
+               'transformers.models.clip.image_processing_clip').CLIPImageProcessor)
+           or _try(lambda: importlib.import_module(
+               'transformers.models.clip.feature_extraction_clip').CLIPFeatureExtractor))
+    if cls is None:
+        print('[medclip] WARNING: no CLIPImageProcessor found to alias. '
+              'Pin transformers: pip install "transformers<5"')
+        return
+    # bypass _LazyModule.__setattr__ by writing straight into the module dict
+    transformers.__dict__['CLIPFeatureExtractor'] = cls
+    visible = _try(lambda: transformers.CLIPFeatureExtractor) is not None
+    if visible:
+        print(f'[medclip] shim CLIPFeatureExtractor -> {cls.__name__} (ok)')
     else:
-        print('[medclip] WARNING: could not alias CLIPFeatureExtractor; medclip '
-              'import may fail. Try: pip install "transformers<4.36"')
+        print('[medclip] WARNING: alias not visible to `from transformers import` '
+              '— pin transformers instead: pip install "transformers<5"')
 
 
 class _MedCLIP:
