@@ -84,6 +84,7 @@ def parse_args():
                    choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips', 'label'])
     e.add_argument('--xrv_weights', nargs='+',
                    default=['densenet121-res224-all', 'densenet121-res224-nih'])
+    e.add_argument('--label_min_pos', default=10, type=int)
     e.add_argument('--chexpert_csv', default=None)
     e.add_argument('--clip_backend', default='medclip',
                    choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
@@ -186,6 +187,7 @@ def build_eval_cfg(args, gen_dir):
         clip_text_mode=args.clip_text_mode, clip_retrieval_ks=args.clip_retrieval_ks,
         clip_batch_size=args.clip_batch_size,
         xrv_weights=args.xrv_weights, chexpert_csv=args.chexpert_csv,
+        label_min_pos=args.label_min_pos,
         # paired ssim/psnr/lpips are only valid when the gen index maps to the
         # eval split — i.e. prompts were pulled from the split.
         paired_from_split=(args.prompt_source == 'split'))

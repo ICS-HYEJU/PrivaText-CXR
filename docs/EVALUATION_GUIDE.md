@@ -142,6 +142,10 @@ MIMIC-CXR (image + report)
   비교(gap/ratio)해야 공정. gap↓·ratio→1일수록 생성물이 real 수준의 병변 판별력 보유.
 - **제약**: `--paired_from_split` 필요(gen index→split study join). 불확실 라벨(-1) **drop**.
   채점 라벨 = 각 분류기 유효라벨(op_threshs) ∩ CheXpert GT (nih≈7, all≈11).
+- **macro 신뢰도**: per-pathology AUROC는 양성이 1~2개면 `1.0`/`0.5` 같은 노이즈가 됩니다.
+  그래서 **macro는 양성·음성 각각 `--label_min_pos`(기본 10) 이상인 병변만** 평균합니다
+  (`macro_pathologies`에 포함 목록 기록). per-pathology와 `support`(n_pos/n_neg)는 전부 남으니
+  **신뢰 판단은 support로**. n=361처럼 표본이 작으면 대개 Cardiomegaly/Effusion/Edema 정도만 신뢰 가능.
 - **TSTR**(Train on Synthetic, Test on Real)는 계획 단계(생성셋으로 분류기 학습 후 real AUROC).
 
 ## 5. 실행 방법 (재현/추가 생성이 필요할 때)

@@ -51,21 +51,51 @@ def _l2norm(x, eps=1e-8):
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + eps)
 
 
+def _shim_clip_feature_extractor():
+    """
+    MedCLIP does `from transformers import CLIPFeatureExtractor`, a name REMOVED
+    from transformers v5 (now CLIPImageProcessor). We alias it before importing
+    medclip. transformers' _LazyModule intercepts setattr, so we assign into
+    __dict__ directly (what `from transformers import X` actually reads) and then
+    VERIFY it is visible; if not, tell the user to pin transformers.
+    """
+    import importlib
+    transformers = importlib.import_module('transformers')
+
+    def _try(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    if _try(lambda: transformers.CLIPFeatureExtractor) is not None:
+        return  # already importable
+    cls = (_try(lambda: transformers.CLIPImageProcessor)
+           or _try(lambda: transformers.CLIPImageProcessorFast)
+           or _try(lambda: importlib.import_module(
+               'transformers.models.clip.image_processing_clip').CLIPImageProcessor)
+           or _try(lambda: importlib.import_module(
+               'transformers.models.clip.feature_extraction_clip').CLIPFeatureExtractor))
+    if cls is None:
+        print('[medclip] WARNING: no CLIPImageProcessor found to alias. '
+              'Pin transformers: pip install "transformers<5"')
+        return
+    # bypass _LazyModule.__setattr__ by writing straight into the module dict
+    transformers.__dict__['CLIPFeatureExtractor'] = cls
+    visible = _try(lambda: transformers.CLIPFeatureExtractor) is not None
+    if visible:
+        print(f'[medclip] shim CLIPFeatureExtractor -> {cls.__name__} (ok)')
+    else:
+        print('[medclip] WARNING: alias not visible to `from transformers import` '
+              '— pin transformers instead: pip install "transformers<5"')
+
+
 class _MedCLIP:
     name = 'medclip'
 
     def __init__(self, device, batch_size=32):
         import torch  # noqa: F401
-        # MedCLIP imports transformers.CLIPFeatureExtractor, which newer
-        # transformers renamed to CLIPImageProcessor. Alias it before importing
-        # medclip so its `from transformers import CLIPFeatureExtractor` resolves.
-        import transformers
-        if not hasattr(transformers, 'CLIPFeatureExtractor'):
-            try:
-                from transformers import CLIPImageProcessor
-                transformers.CLIPFeatureExtractor = CLIPImageProcessor
-            except Exception:
-                pass
+        _shim_clip_feature_extractor()
         from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
         self.torch = __import__('torch')
         self.device = device
