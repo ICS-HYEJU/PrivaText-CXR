@@ -68,6 +68,7 @@ def _shim_clip_feature_extractor():
         except Exception:
             return None
 
+    ver = getattr(transformers, '__version__', '?')
     if _try(lambda: transformers.CLIPFeatureExtractor) is not None:
         return  # already importable
     cls = (_try(lambda: transformers.CLIPImageProcessor)
@@ -77,17 +78,20 @@ def _shim_clip_feature_extractor():
            or _try(lambda: importlib.import_module(
                'transformers.models.clip.feature_extraction_clip').CLIPFeatureExtractor))
     if cls is None:
-        print('[medclip] WARNING: no CLIPImageProcessor found to alias. '
-              'Pin transformers: pip install "transformers<5"')
+        print(f'[medclip] WARNING: transformers=={ver} has no CLIPImageProcessor to '
+              'alias. Fix: pip install "transformers==4.35.2"  (or patch medclip)')
         return
     # bypass _LazyModule.__setattr__ by writing straight into the module dict
     transformers.__dict__['CLIPFeatureExtractor'] = cls
+    # also register on the clip submodule some medclip versions import from
+    _clip = _try(lambda: importlib.import_module('transformers.models.clip'))
+    if _clip is not None:
+        _clip.__dict__.setdefault('CLIPFeatureExtractor', cls)
     visible = _try(lambda: transformers.CLIPFeatureExtractor) is not None
-    if visible:
-        print(f'[medclip] shim CLIPFeatureExtractor -> {cls.__name__} (ok)')
-    else:
-        print('[medclip] WARNING: alias not visible to `from transformers import` '
-              '— pin transformers instead: pip install "transformers<5"')
+    print(f'[medclip] shim CLIPFeatureExtractor -> {cls.__name__} '
+          f'(transformers=={ver}, visible={visible})')
+    if not visible:
+        print('[medclip] WARNING: alias not visible; pin: pip install "transformers==4.35.2"')
 
 
 class _MedCLIP:
