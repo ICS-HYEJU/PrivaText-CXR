@@ -1,2 +1,23 @@
 __pycache__/
 *.py[cod]
+
+# Dataset and DICOM caches
+.dicom_valid_cache_*.json
+dp_splits.json
+
+# Model checkpoints and generated outputs
+checkpoints/
+pretrained/
+generated/
+generated_eps*/
+ep100/
+
+# Evaluation and training outputs
+EVAL/
+EVAL_OUTPUT/
+eval/
+finetune_dp/
+
+# Backup files
+*.bak
+.ai/
