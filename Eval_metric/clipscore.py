@@ -217,31 +217,48 @@ def _paired_cos(img_emb, txt_emb):
 def retrieval_metrics(img_emb, txt_emb, prompts, ks=(1, 5, 10)):
     """
     Cross retrieval on the shared embeddings.
-      i2t: each image ranks all texts; hit if a top-k text has the SAME prompt.
-      t2i: each text ranks all images; hit if a top-k image's prompt matches.
-    Correctness is by TEXT EQUALITY (not index) so duplicate prompts — e.g.
-    n_samples>1 per report — don't spuriously miss. Returns R@k + median/mean rank
-    for both directions, plus duplicate count.
+      i2t: each image ranks all texts; relevant = texts with the SAME prompt.
+      t2i: each text ranks all images; relevant = images whose prompt matches.
+    Relevance is by TEXT EQUALITY (not index) so duplicate prompts (e.g.
+    n_samples>1 per report) are handled correctly.
+
+    Reports, for each direction:
+      R@k  : Recall@k  — fraction of queries with a relevant item in top-k (hit rate)
+      P@k  : Precision@k — mean fraction of the top-k that are relevant
+      mAP  : mean Average Precision over queries
+      median_rank / mean_rank : rank of the first relevant item
     """
     S = img_emb @ txt_emb.T                       # [N_img, N_txt] cosine (L2-normed)
-    prompts = list(prompts)
+    prompts = np.asarray(list(prompts), dtype=object)
     N = len(prompts)
 
     def _side(sim):
         Rhit = {k: 0 for k in ks}
-        ranks = []
+        Psum = {k: 0.0 for k in ks}
+        ranks, aps = [], []
         for i in range(sim.shape[0]):
             order = np.argsort(-sim[i])
-            pos = next((p for p, j in enumerate(order) if prompts[j] == prompts[i]), N - 1)
-            r = pos + 1
-            ranks.append(r)
+            rel = (prompts[order] == prompts[i])      # bool, in retrieved order
+            hits = np.where(rel)[0]                    # 0-based positions of relevant
+            first = int(hits[0]) + 1 if hits.size else N
+            ranks.append(first)
             for k in ks:
-                if r <= k:
+                if first <= k:
                     Rhit[k] += 1
-        ranks = np.asarray(ranks)
-        out = {f'R@{k}': float(Rhit[k] / len(ranks)) for k in ks}
+                Psum[k] += float(rel[:k].sum()) / k    # Precision@k
+            if hits.size:                              # Average Precision
+                prec_at_hits = np.cumsum(rel)[hits] / (hits + 1.0)
+                aps.append(float(prec_at_hits.mean()))
+            else:
+                aps.append(0.0)
+        M = sim.shape[0]
+        out = {}
+        for k in ks:
+            out[f'R@{k}'] = float(Rhit[k] / M)
+            out[f'P@{k}'] = float(Psum[k] / M)
+        out['mAP'] = float(np.mean(aps))
         out['median_rank'] = float(np.median(ranks))
-        out['mean_rank'] = float(ranks.mean())
+        out['mean_rank'] = float(np.mean(ranks))
         return out
 
     res = {}
@@ -250,7 +267,7 @@ def retrieval_metrics(img_emb, txt_emb, prompts, ks=(1, 5, 10)):
     for k, v in _side(S.T).items():
         res[f'{k}_t2i'] = v
     res['retrieval_n'] = N
-    res['duplicate_prompts'] = int(N - len(set(prompts)))
+    res['duplicate_prompts'] = int(N - len(set(prompts.tolist())))
     return res
 
 

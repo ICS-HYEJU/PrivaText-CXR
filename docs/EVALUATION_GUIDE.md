@@ -122,8 +122,10 @@ MIMIC-CXR (image + report)
 - **중복 프롬프트**: `--clip_dedup` 주면 retrieval을 **고유 프롬프트 부분집합**에서 계산(반복 많을 때 공정).
 - `clipscore.json` / summary 키:
   - `clip_gen_cos_mean/std`(주), `clip_gen_clipscore_mean/std`(참고), `clip_gen_n`.
-  - retrieval: `clip_gen_R@{1,5,10}_i2t`, `..._t2i`, `clip_gen_median_rank_i2t/t2i`,
-    `clip_gen_duplicate_prompts`. (↑ R@k, ↓ median_rank)
+  - retrieval(i2t·t2i): `clip_gen_R@{1,5,10}_*`(Recall@k, ↑), `clip_gen_P@{1,5,10}_*`
+    (Precision@k, ↑), `clip_gen_mAP_*`(mean Average Precision, ↑),
+    `clip_gen_median_rank_*`(↓), `clip_gen_mean_rank_*`, `clip_gen_duplicate_prompts`.
+    정답 판정은 텍스트 동일성(중복 프롬프트=다중 정답 반영).
   - (real 기준선 활성 시) `clip_real_*` — real (image,report) 정합/retrieval **상한(ceiling)**.
   - **`clip_gap_cos` = real_cos − gen_cos (↓)** ⭐ 주 비교값 (스케일 제거). `clip_gap_clipscore`도 병기.
   - `clip_backend`(=medclip), `clip_text_mode`.
