@@ -254,20 +254,35 @@ def retrieval_metrics(img_emb, txt_emb, prompts, ks=(1, 5, 10)):
     return res
 
 
-def clipscore(image_paths, prompts, encoder, w=2.5, text_mode='findings',
-              retrieval_ks=(1, 5, 10), verbose=True):
+def _shuffled_cos(img_emb, txt_emb, texts, seed=0):
+    """Negative control: cosine of each image vs a MISMATCHED report (derangement,
+    avoiding accidental same-text matches). Its mean is the noise floor."""
+    rng = np.random.default_rng(seed)
+    n = len(texts)
+    if n < 2:
+        return np.zeros(n)
+    perm = rng.permutation(n)
+    for i in range(n):
+        tries = 0
+        while (perm[i] == i or texts[perm[i]] == texts[i]) and tries < 25:
+            perm[i] = int(rng.integers(n)); tries += 1
+    return np.sum(img_emb * txt_emb[perm], axis=1)
+
+
+def clipscore(image_paths, prompts, encoder, w=2.5, text_mode='FINDINGS/IMPRESSION',
+              retrieval_ks=(1, 5, 10), dedup=False, verbose=True):
     """
     Primary metric: cos_mean (raw cosine). clipscore_mean = w*max(cos,0) is a
     scaled convenience value (w=2.5 is calibrated for OpenAI CLIP, not MedCLIP).
-    text_mode='findings' keeps only FINDINGS/IMPRESSION (shared with generation);
-    'full' uses the prompt text as-is. retrieval_ks!=() adds R@k retrieval.
+    text_mode in {FINDINGS, FINDINGS/IMPRESSION, FULL} selects report sections
+    (shared with generation). Also reports a shuffled negative control
+    (cos_shuffled_mean) and the signal above it (cos_signal = cos - shuffled).
+    retrieval_ks!=() adds R@k retrieval; dedup=True runs retrieval on the unique-
+    prompt subset (fairer when many prompts repeat).
     """
+    from Eval_metric.text_utils import extract_report_sections
     prompts = list(prompts)
-    if text_mode == 'findings':
-        from Eval_metric.text_utils import extract_findings_impression
-        text_in = [extract_findings_impression(p) for p in prompts]
-    else:
-        text_in = prompts
+    text_in = [extract_report_sections(p, text_mode) for p in prompts]
     if verbose:
         print(f'[clip] {encoder.name}: encoding {len(image_paths)} image/text pair(s) '
               f'(text_mode={text_mode})')
@@ -275,10 +290,22 @@ def clipscore(image_paths, prompts, encoder, w=2.5, text_mode='findings',
     txt_emb = encoder.encode_text(text_in)
     cos = _paired_cos(img_emb, txt_emb)
     score = w * np.clip(cos, 0, None)
+    cos_shuf = _shuffled_cos(img_emb, txt_emb, text_in)
     out = {'clipscore_mean': float(score.mean()), 'clipscore_std': float(score.std()),
-           'cos_mean': float(cos.mean()), 'cos_std': float(cos.std()), 'n': int(len(cos))}
+           'cos_mean': float(cos.mean()), 'cos_std': float(cos.std()), 'n': int(len(cos)),
+           'cos_shuffled_mean': float(cos_shuf.mean()),        # negative control (noise floor)
+           'cos_signal': float(cos.mean() - cos_shuf.mean())}  # matched - mismatched
     if retrieval_ks:
-        out.update(retrieval_metrics(img_emb, txt_emb, text_in, tuple(retrieval_ks)))
+        if dedup:
+            seen, idx = set(), []
+            for i, t in enumerate(text_in):
+                if t not in seen:
+                    seen.add(t); idx.append(i)
+            ie, te, tt = img_emb[idx], txt_emb[idx], [text_in[i] for i in idx]
+        else:
+            ie, te, tt = img_emb, txt_emb, text_in
+        out.update(retrieval_metrics(ie, te, tt, tuple(retrieval_ks)))
+        out['retrieval_dedup'] = bool(dedup)
     return out
 
 
@@ -307,7 +334,7 @@ def load_pairs_from_csv(gen_dir):
 
 def real_baseline(root_path, split_csv, eval_split, image_size, max_length,
                   encoder, max_real=None, w=2.5, tmp_dir=None,
-                  text_mode='findings', retrieval_ks=(1, 5, 10)):
+                  text_mode='FINDINGS/IMPRESSION', retrieval_ks=(1, 5, 10), dedup=False):
     """
     Encoder's alignment on REAL (image, report) pairs from the split — an
     empirical ceiling.  Real images are dumped to PNG (encoders read from path).
@@ -331,7 +358,7 @@ def real_baseline(root_path, split_csv, eval_split, image_size, max_length,
         paths.append(fp)
         prompts.append(report)
     return clipscore(paths, prompts, encoder, w=w, text_mode=text_mode,
-                     retrieval_ks=retrieval_ks)
+                     retrieval_ks=retrieval_ks, dedup=dedup)
 
 
 def parse_args():
@@ -342,10 +369,13 @@ def parse_args():
     p.add_argument('--clip_model', default='ViT-B-32', help='open_clip model name (cxr-clip/openclip)')
     p.add_argument('--clip_pretrained', default='openai', help='open_clip weights or ckpt path')
     p.add_argument('--w', default=2.5, type=float, help='CLIPScore scale (clipscore_mean only)')
-    p.add_argument('--text_mode', default='findings', choices=['findings', 'full'],
-                   help="'findings': keep FINDINGS/IMPRESSION only (default); 'full': as-is")
+    from Eval_metric.text_utils import SECTION_MODES
+    p.add_argument('--text_mode', default='FINDINGS/IMPRESSION', choices=SECTION_MODES,
+                   help='report sections to embed (same set as generation --text_mode)')
     p.add_argument('--retrieval_ks', nargs='+', type=int, default=[1, 5, 10],
                    help='R@k cutoffs; pass nothing to disable retrieval')
+    p.add_argument('--dedup', action='store_true',
+                   help='run retrieval on the unique-prompt subset (fairer with repeats)')
     p.add_argument('--batch_size', default=32, type=int, help='encoder batch size')
     p.add_argument('--device', default='cpu')
     # optional real baseline
@@ -365,15 +395,16 @@ def run_clipscore(args):
                        batch_size=args.batch_size)
     paths, prompts = load_pairs_from_csv(args.gen_dir)
     res = {'backend': enc.name, 'w': args.w, 'text_mode': args.text_mode}
-    gen = clipscore(paths, prompts, enc, w=args.w, text_mode=args.text_mode, retrieval_ks=ks)
+    gen = clipscore(paths, prompts, enc, w=args.w, text_mode=args.text_mode,
+                    retrieval_ks=ks, dedup=args.dedup)
     res.update({f'gen_{k}': v for k, v in gen.items()})
     print(f'[clip] gen cos_mean={gen["cos_mean"]:.4f} (primary)  '
-          f'clipscore={gen["clipscore_mean"]:.4f}  n={gen["n"]}')
+          f'shuffled={gen["cos_shuffled_mean"]:.4f}  signal={gen["cos_signal"]:.4f}  n={gen["n"]}')
     if args.root_path:
         real = real_baseline(args.root_path, args.split_csv, args.eval_split,
                              args.image_size, args.max_length, enc,
                              max_real=args.max_real, w=args.w,
-                             text_mode=args.text_mode, retrieval_ks=ks)
+                             text_mode=args.text_mode, retrieval_ks=ks, dedup=args.dedup)
         res.update({f'real_{k}': v for k, v in real.items()})
         res['gap_cos'] = float(real['cos_mean'] - gen['cos_mean'])
         res['gap_clipscore'] = float(real['clipscore_mean'] - gen['clipscore_mean'])

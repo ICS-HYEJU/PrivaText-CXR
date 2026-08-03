@@ -113,8 +113,13 @@ MIMIC-CXR (image + report)
   의미를 담았는가"를 측정. **(↑)**.
 - **주 지표 = `cos_mean`(raw 코사인)**. `clipscore_mean = w·max(cos,0)`(w=2.5)은 OpenAI CLIP
   기준 스케일이라 MedCLIP에선 **참고값**으로만 본다. 둘 다 json에 기록됨.
-- **텍스트 = FINDINGS/IMPRESSION만**(`clip_text_mode='findings'`, 기본). 생성 프롬프트와 CLIP
-  텍스트가 동일 util(`Eval_metric/text_utils.extract_findings_impression`)을 써서 일관.
+- **텍스트 섹션 = `--text_mode`** ∈ `FINDINGS` / `FINDINGS/IMPRESSION`(기본) / `FULL`.
+  **생성 프롬프트(inference)와 CLIP 텍스트가 동일 모드**를 씀(`text_utils.extract_report_sections`).
+  `generate_and_eval`는 `--text_mode`가 생성·CLIP 둘 다 지배(clip은 미지정 시 자동 일치).
+- **negative control(항상 산출)**: `cos_shuffled_mean`(이미지 vs 무작위 다른 리포트=노이즈 바닥),
+  **`cos_signal = cos_mean − cos_shuffled_mean`**. signal이 0에 가까우면 그 인코더는 이 데이터에서
+  변별력 없음(작은 gap 무의미). signal이 뚜렷이 양수여야 CLIP 해석이 유효.
+- **중복 프롬프트**: `--clip_dedup` 주면 retrieval을 **고유 프롬프트 부분집합**에서 계산(반복 많을 때 공정).
 - `clipscore.json` / summary 키:
   - `clip_gen_cos_mean/std`(주), `clip_gen_clipscore_mean/std`(참고), `clip_gen_n`.
   - retrieval: `clip_gen_R@{1,5,10}_i2t`, `..._t2i`, `clip_gen_median_rank_i2t/t2i`,

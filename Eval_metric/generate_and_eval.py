@@ -67,6 +67,10 @@ def parse_args():
                         '(default: same as --max_real, else all in the split).')
     g.add_argument('--n_samples', default=1, type=int,
                    help='independent samples per description')
+    from Eval_metric.text_utils import SECTION_MODES
+    g.add_argument('--text_mode', default='FINDINGS/IMPRESSION', choices=SECTION_MODES,
+                   help='report sections used as the GENERATION prompt (split mode). '
+                        'CLIPScore reuses the same sections by default.')
     g.add_argument('--sample_timesteps', default=None, type=int)
     g.add_argument('--seed', default=0, type=int,
                    help='generation seed AND t-SNE seed')
@@ -91,8 +95,10 @@ def parse_args():
     e.add_argument('--clip_model', default='ViT-B-32')
     e.add_argument('--clip_pretrained', default='openai')
     e.add_argument('--clip_w', default=2.5, type=float)
-    e.add_argument('--clip_text_mode', default='findings', choices=['findings', 'full'])
+    e.add_argument('--clip_text_mode', default=None, choices=SECTION_MODES,
+                   help='CLIP text sections; default follows generation --text_mode')
     e.add_argument('--clip_retrieval_ks', nargs='+', type=int, default=[1, 5, 10])
+    e.add_argument('--clip_dedup', action='store_true')
     e.add_argument('--clip_batch_size', default=32, type=int)
     e.add_argument('--reg', default=1e-6, type=float)
     e.add_argument('--fds_cov', default='lw', choices=['lw', 'empirical'],
@@ -129,12 +135,12 @@ def resolve_descriptions(args):
         cap = args.n_prompts if args.n_prompts not in (None, 0) else \
             (args.max_real if args.max_real not in (None, 0) else len(ds))
         n = min(cap, len(ds))
-        # Condition generation on FINDINGS/IMPRESSION only (shared util, identical
-        # to what CLIPScore uses) — one prompt policy across generation + eval.
-        from Eval_metric.text_utils import extract_findings_impression
-        prompts = [extract_findings_impression(ds[i][1]) for i in range(n)]
+        # Condition generation on the chosen report sections (shared util,
+        # identical to what CLIPScore uses) — one prompt policy across gen + eval.
+        from Eval_metric.text_utils import extract_report_sections
+        prompts = [extract_report_sections(ds[i][1], args.text_mode) for i in range(n)]
         print(f'[gen] prompts from split={args.eval_split}: {n} report(s) '
-              '(FINDINGS/IMPRESSION only)')
+              f'(text_mode={args.text_mode})')
         return prompts
     from LDM_dp_inference import load_descriptions
     if not args.descriptions:
@@ -184,7 +190,8 @@ def build_eval_cfg(args, gen_dir):
         pca_dim=args.pca_dim, perplexity=args.perplexity, seed=args.seed, ckpt=ckpt,
         clip_backend=args.clip_backend, clip_model=args.clip_model,
         clip_pretrained=args.clip_pretrained, clip_w=args.clip_w,
-        clip_text_mode=args.clip_text_mode, clip_retrieval_ks=args.clip_retrieval_ks,
+        clip_text_mode=(args.clip_text_mode or args.text_mode),  # default: match generation
+        clip_retrieval_ks=args.clip_retrieval_ks, clip_dedup=args.clip_dedup,
         clip_batch_size=args.clip_batch_size,
         xrv_weights=args.xrv_weights, chexpert_csv=args.chexpert_csv,
         label_min_pos=args.label_min_pos,
