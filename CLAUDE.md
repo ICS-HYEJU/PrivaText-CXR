@@ -30,12 +30,17 @@ Report-conditional latent diffusion for chest X-ray generation, fine-tuned under
   (`experiment_spec.md` §2).
 - T2(full run)는 **사람의 명시적 승인 없이 시작하지 않습니다.**
 - 5일 런은 반드시 **detached**로 띄웁니다. 포그라운드로 대기하지 마십시오.
+- GPU 2개. 기본은 T1 후보 2개 병렬. T2 진행 중에는 1개를 T2 전용으로 둡니다.
+
+**데이터 분할**: MIMIC train을 **환자 ID 기준**으로 `search`(T1 탐색) / `train`(T2 최종)으로
+분리합니다. 이미지 단위로 나누면 같은 환자의 다른 촬영본이 양쪽에 걸쳐 누수가 발생합니다.
 
 **DP 예산은 최적화 대상이 아니라 하드 제약입니다.**
 
 - `--target_epsilon` / `--target_delta`를 기준 통과 목적으로 변경하는 것은 **금지**입니다.
-- private 데이터(MIMIC)에서의 반복 튜닝은 그 자체로 프라이버시를 소모합니다
-  (`experiment_spec.md` §3). MIMIC 사용 런은 전부 `RUN_LOG.md`에 기록합니다.
+- 반복 튜닝은 그 자체로 프라이버시를 소모합니다. 모든 런을 `RUN_LOG.md`에 기록합니다.
+- **Opacus는 sample-level(이미지 단위) DP를 제공합니다.** 환자당 이미지가 여러 장이므로 보고되는
+  ε은 환자 단위로 성립하지 않습니다 (`experiment_spec.md` §3.2, F-12 — 미결정).
 
 ## 코드 작업 시 주의
 

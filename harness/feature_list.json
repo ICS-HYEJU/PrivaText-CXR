@@ -152,25 +152,73 @@
     },
     {
       "id": "F-06",
-      "title": "LoRA 어댑터 지원",
+      "title": "로컬 LoRA 구현 푸시 및 하네스 연동",
       "milestone": "M4",
-      "priority": "P1",
-      "status": "todo",
-      "problem": "현재 LoRA가 구현되어 있지 않다(코드 내 관련 심볼 없음). 전체 finetune은 (a) 5일 3시간이 걸리고 (b) DP 노이즈가 학습 파라미터 수에 비례해 누적되므로 유틸리티에도 불리하다. 이 한 가지가 반복 비용과 품질 모두를 개선하는 유일한 항목이다.",
+      "priority": "P0",
+      "status": "blocked",
+      "blocked_by": "로컬 LoRA 코드가 원격 브랜치에 푸시되지 않음",
+      "problem": "사용자에 따르면 LoRA 구현과 '평가 시 LoRA 적용 여부' 처리가 로컬에 이미 존재한다. 그러나 푸시된 리포에는 전혀 없다(전체 .py 대상 'lora' grep 결과 0건). 하네스는 실제 학습 스크립트의 인자를 기준으로 동작하므로, 코드가 원격에 올라오기 전에는 hparam_space.json에 LoRA 파라미터를 등재할 수 없다.",
+      "evidence": "grep -rni 'lora' --include=*.py . → 매치 없음 (커밋 536720d 기준)",
       "spec": [
-        "UNet attention의 to_q/to_k/to_v/to_out에 LoRA 주입 (rank, alpha 인자화)",
-        "LoRA 파라미터만 optimizer에 등록 → Opacus가 감싸는 학습 파라미터 수 대폭 축소",
-        "--use_lora, --lora_rank, --lora_alpha 인자 추가 후 hparam_space.json에 등재",
-        "체크포인트는 LoRA weight만 저장 (용량 절감)"
+        "로컬 LoRA 작업을 원격 브랜치에 푸시",
+        "실제 CLI 플래그 이름 확인 (--use_lora / --lora_rank / --lora_alpha / 대상 모듈 등)",
+        "확인된 플래그를 hparam_space.json parameters에 등재 (rank/alpha는 tunable, use_lora는 tier 설정)",
+        "LoRA 적용 시 학습 가능 파라미터 수를 metrics/config에 기록 — DP 노이즈 규모 해석에 필요",
+        "LoRA on/off 각각의 1 epoch 소요 시간 측정 → tier별 예상 시간 재산정"
       ],
-      "files": ["Model/Diffusion/UNetmodel.py", "Model/attention_module_dp.py", "LDM_dp_finetune.py"],
+      "files": ["(로컬 LoRA 구현 파일 — 푸시 후 확정)", "harness/hparam_space.json"],
       "acceptance": [
-        "학습 가능 파라미터 수가 전체 finetune 대비 크게 감소함을 로그로 확인",
-        "T1 기준 동일 ε에서 val_loss가 전체 finetune보다 나쁘지 않다",
-        "T2 예상 소요 시간이 측정되어 기록된다"
+        "원격 브랜치에서 LoRA 관련 심볼이 검색된다",
+        "hparam_space.json에 실제 플래그 이름으로 LoRA 파라미터가 등재된다",
+        "LoRA 적용 시 학습 가능 파라미터 수 감소가 로그로 확인된다",
+        "T2 예상 소요 시간이 LoRA 적용 기준으로 갱신된다"
       ],
-      "note": "사용자가 '100에폭, lora 미적용 기준 5일 3시간'이라고 명시 → LoRA 도입이 이미 계획에 있는 것으로 보임. 우선순위 협의 필요",
-      "estimate": "L"
+      "why_p0": "DP 노이즈는 학습 파라미터 수에 비례해 누적되므로 LoRA는 반복 비용(5일)과 DP 유틸리티를 동시에 개선한다. 이미 구현되어 있다면 하네스의 기준 구성으로 삼는 것이 맞다.",
+      "estimate": "S (푸시 후)"
+    },
+    {
+      "id": "F-11",
+      "title": "환자 ID 기준 search/train 분할 전처리",
+      "milestone": "M1",
+      "priority": "P0",
+      "status": "todo",
+      "problem": "T1 하이퍼파라미터 탐색을 최종 학습 데이터와 분리된 환자 그룹에서 수행해야 한다(experiment_spec §3). 현재 MIMIC train split에 이런 분리가 없다. 추가로 데이터셋 다운로드가 진행 중이라 전처리를 다시 돌려야 한다.",
+      "spec": [
+        "MIMIC train split을 patient_id 기준으로 search / train 분리 (이미지 단위 분리 금지 — 누수)",
+        "분할 비율 결정 필요 (제안: search 15~20%)",
+        "seed 고정 + 분할 결과를 CSV/JSON으로 저장하여 재현 보장. 매 런마다 재계산하지 않는다",
+        "추가 다운로드된 데이터를 반영해도 기존 search/train 배정이 바뀌지 않도록 patient_id 해시 기반 배정 사용",
+        "--split_group {search,train} 인자 추가"
+      ],
+      "files": ["Data/split_dataset.py", "Data/mimic_cxr.py", "LDM_dp_finetune.py"],
+      "acceptance": [
+        "search와 train의 patient_id 교집합이 공집합임을 검증하는 체크가 있다",
+        "데이터 추가 다운로드 후 재실행해도 기존 환자의 그룹 배정이 유지된다",
+        "각 그룹의 환자 수/이미지 수가 기록된다 (sample_rate q 계산에 필요)"
+      ],
+      "reference": "Data/mimic_cxr_old.py:316 에 과거 patient-level 분할 로직이 주석으로 남아 있음",
+      "blocks": ["F-04", "F-05"],
+      "estimate": "M"
+    },
+    {
+      "id": "F-12",
+      "title": "프라이버시 단위 결정 — sample-level vs patient-level DP",
+      "milestone": "M1",
+      "priority": "P0",
+      "status": "blocked",
+      "blocked_by": "사람의 결정 필요",
+      "problem": "Opacus는 sample-level DP(이미지 1장 단위)를 제공한다. 데이터를 환자 단위로 다루고 있으므로 의도한 프라이버시 단위가 환자일 가능성이 높은데, 환자당 k장의 이미지가 있으면 보고되는 ε=10은 환자 단위로 성립하지 않는다. group privacy로 환산 시 대략 (k·ε, k·e^{(k-1)ε}·δ) 수준으로 약해진다.",
+      "options": [
+        "(a) sample-level로 확정하고 논문에 'image-level DP'로 정확히 기술 — 구현 변경 없음",
+        "(b) patient-level 보장 — 환자당 이미지 1장 제한, 또는 Poisson 샘플링을 환자 단위로 변경하고 환자별 gradient 합산 후 클리핑"
+      ],
+      "why_now": "나중에 (b)로 바꾸면 sigma 계산과 sample_rate가 전부 달라져 그동안의 T1 탐색 결과가 무효가 된다. 루프를 돌리기 전에 결정해야 한다.",
+      "acceptance": [
+        "선택한 단위가 experiment_spec.md에 명시되고 config.json에 기록된다",
+        "(b) 선택 시 sample_rate 계산이 환자 수 기준으로 바뀐 것이 검증된다"
+      ],
+      "blocks": ["F-04", "F-05"],
+      "estimate": "S (a 선택 시) / L (b 선택 시)"
     },
     {
       "id": "F-07",
@@ -253,34 +301,72 @@
     }
   ],
 
-  "critical_path": ["F-01", "F-02", "F-04", "F-05", "F-08"],
-  "critical_path_note": "이 5개가 끝나면 T0/T1 루프가 돈다. F-03은 진단 품질, F-07은 최종 품질 게이트, F-06은 반복 비용 개선. F-09는 사람의 입력 대기.",
+  "critical_path": ["F-12", "F-11", "F-06", "F-01", "F-02", "F-04", "F-05", "F-08"],
+  "critical_path_note": "F-12(프라이버시 단위)와 F-11(환자 단위 분할)이 앞에 있는 이유: 둘 다 sample_rate/sigma 계산의 전제를 바꾸므로, 나중에 결정하면 그동안의 T1 결과가 전부 무효가 된다. F-06은 로컬 코드 푸시만 하면 되므로 비용이 작고 tier 소요 시간 추정의 전제가 된다. F-03은 진단 품질(D-03/D-04), F-07은 최종 품질 게이트, F-09는 사람의 입력 대기.",
 
-  "open_questions": [
+  "resource_policy": {
+    "gpu_count": 2,
+    "default": "T1 후보 2개 병렬 실행 → 탐색 처리량 2배",
+    "during_T2": "GPU 1개는 T2 전용, 나머지 1개로 T1 탐색 계속",
+    "variance_measurement": "동일 설정을 seed만 바꿔 2 GPU에 돌리면 런간 분산을 측정할 수 있다. T1 개선폭이 이 분산보다 작으면 승격하지 않는다",
+    "constraint": "병렬 실행 시에도 '한 런 안에서 한 파라미터만 변경' 원칙은 유지한다. 서로 다른 파라미터를 각각 1개씩 바꾼 2개 런의 동시 실행은 허용"
+  },
+
+  "resolved_questions": [
     {
       "id": "Q-01",
-      "question": "T1 탐색을 MIMIC이 아닌 NIH에서 수행할 것인가?",
-      "why": "private 데이터에서 반복 튜닝하면 보고하는 ε이 실제 보장을 반영하지 못한다 (experiment_spec §3)",
-      "options": ["NIH를 프록시로 사용", "MIMIC train을 쪼개 튜닝 전용 shard 확보", "MIMIC에서 튜닝하되 횟수를 논문에 명시"],
-      "blocking": ["F-04"]
+      "question": "T1 탐색을 어느 데이터에서 수행할 것인가?",
+      "answer": "MIMIC train을 patient_id 기준으로 search/train 분리. search에서 탐색, train에서 최종 학습. 데이터셋 추가 다운로드 반영한 전처리 필요",
+      "resolved": "2026-08-03",
+      "spawned": ["F-11"]
     },
     {
       "id": "Q-02",
-      "question": "vae_ckpt / pretrained_ckpt로 사용할 확정된 체크포인트가 있는가?",
-      "why": "둘 다 default=None이며 미지정 시 경고만 내고 random weight로 진행된다(LDM_dp_finetune.py:510,542). 루프가 이 상태로 돌면 모든 결과가 무의미해진다",
-      "blocking": ["F-04", "F-05"]
+      "question": "vae_ckpt / pretrained_ckpt가 확정되어 있는가?",
+      "answer": "둘 다 확정됨. 경로를 harness/tiers.json 또는 launch_run.sh에 고정할 것",
+      "resolved": "2026-08-03"
     },
     {
       "id": "Q-03",
-      "question": "GPU를 몇 개 동시에 쓸 수 있는가?",
-      "why": "T1 후보를 병렬로 돌릴 수 있으면 탐색 처리량이 GPU 수만큼 늘어난다. 루프 설계(순차 vs 병렬)가 달라진다",
-      "blocking": ["F-05"]
+      "question": "동시 사용 가능한 GPU 수",
+      "answer": "2개 → resource_policy 참조",
+      "resolved": "2026-08-03"
     },
     {
       "id": "Q-04",
-      "question": "LoRA(F-06)를 루프 구축 전에 먼저 넣을 것인가, 후에 넣을 것인가?",
-      "why": "먼저 넣으면 T2 비용이 줄어 루프가 훨씬 실용적이지만 하네스 구축이 지연된다. 나중에 넣으면 이미 수행한 T1 결과와의 비교 가능성이 끊긴다",
-      "blocking": []
+      "question": "LoRA를 루프 구축 전에 넣을 것인가?",
+      "answer": "이미 로컬에 구현되어 있음(평가 시 적용 여부 처리 포함). 다만 원격 브랜치에 미푸시 상태 → F-06으로 전환",
+      "resolved": "2026-08-03",
+      "spawned": ["F-06"]
+    }
+  ],
+
+  "open_questions": [
+    {
+      "id": "Q-05",
+      "question": "프라이버시 단위가 이미지인가 환자인가?",
+      "why": "Opacus는 sample-level DP를 제공한다. 환자당 이미지가 여러 장이면 보고 ε이 환자 단위로 성립하지 않는다",
+      "blocking": ["F-04", "F-05"],
+      "feature": "F-12"
+    },
+    {
+      "id": "Q-06",
+      "question": "search / train 분할 비율은?",
+      "why": "search가 너무 작으면 T1 결과의 신뢰도가 낮고, 너무 크면 최종 학습 데이터가 줄어 T2 품질이 떨어진다",
+      "proposal": "search 15~20%",
+      "feature": "F-11"
+    },
+    {
+      "id": "Q-07",
+      "question": "LoRA 적용 기준 1 epoch 소요 시간은?",
+      "why": "5일 3시간은 LoRA 미적용 기준이다. LoRA 적용 시 시간이 달라지면 T1/T2 tier 정의(epoch 수, 서브셋 비율)를 재산정해야 한다",
+      "feature": "F-06"
+    },
+    {
+      "id": "Q-08",
+      "question": "임계값(THRESH_VAL_LOSS, THRESH_FID) 확정",
+      "why": "루프 6번 정지 조건. 베이스라인 T1 런 1회로 현실적 범위를 먼저 파악하는 것을 권장",
+      "feature": "F-09"
     }
   ]
 }
