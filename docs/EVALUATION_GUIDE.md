@@ -144,6 +144,21 @@ MIMIC-CXR (image + report)
   권장). 중복 프롬프트가 많으면 `duplicate_prompts`로 확인. 또한 **FINDINGS/IMPRESSION 프롬프트로
   생성한 이미지**여야 정합 해석이 맞으므로, 정책 변경 시 **모든 ε 재생성** 권장.
 
+### 4.4b CLIP 유효성 진단 — `clip_diagnose` (opt-in)
+
+real image-report cosine이 shuffled와 거의 같으면(signal≈0) CLIP 지표를 그대로 쓸 수 없다.
+`--metrics clip_diagnose`는 **real 이미지에서 인코더가 실제로 작동하는지** 검증(기존 지표/기본값
+불변, `clip_diagnose.json` + `clipdiag_*` 키만 추가):
+- **sanity**: `logit_scale`(학습된 CLIP ~50–100, ~14/1이면 미로드 의심), 임베딩 반복성(cos≈1).
+- **matched vs shuffled 통계**: `signal_mean` + **95% bootstrap CI**(`signal_ci_low/high`,
+  `signal_ci_excludes_zero`) + **permutation p** + effect size. tiny signal이 통계적으로 유의한지.
+- **zero-shot label AUROC**(⭐결정적): 짧은 병변 프롬프트 vs CheXpert GT.
+  **≫0.5면 인코더 정상 → 긴 report 텍스트가 문제**; **≈0.5면 인코더/전처리가 깨짐**.
+- **label-level retrieval**: 같은 CheXpert 라벨 공유=정답(관대). exact-text는 0이라도 여기서
+  유의미하면 CLIP을 **보조 semantic 지표**로 사용 가능.
+- 실행: `python Eval_metric/clip_diagnose.py --backend medclip --root_path ... --eval_split test
+  --max_real 361 --text_mode FINDINGS --output ./.../clip_diagnose.json` (또는 드라이버 metric).
+
 ### 4.5 Downstream classification — label-agreement (구현됨), TSTR (계획)
 
 - **label-agreement**(`--metrics ... label`): 사전학습 **XRV DenseNet-121**을 생성/real 이미지에
