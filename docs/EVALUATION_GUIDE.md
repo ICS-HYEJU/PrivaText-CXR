@@ -26,10 +26,12 @@
 MIMIC-CXR (image + report)
    └─ VAE 학습            (Autoencoder_train.py)              → vae_ep*.pt
    └─ LDM 사전학습        (LDM_train.py)                      → ldm_epoch*.pt
-   └─ DP LoRA 미세조정    (LDM_dp_finetune.py, DP-SGD+LoRA)   → ldm_lora_eps{1,3,5,10}.pt
-                              (ckpt 안에 args, epsilon_spent, lora_rank/alpha 저장)
+   └─ DP 미세조정         (LDM_dp_finetune.py, DP-SGD [+LoRA])
+                              → LoRA 어댑터 ldm_lora_eps{1,3,5,10}.pt  또는
+                                전체 DP 체크포인트 ldm_dp_final.pt (ckpt 안에 args/epsilon_spent 저장)
    └─ 추론/생성           (LDM_dp_inference.py 또는 generate_and_eval.py)
                               → ./<gen>/samples/*.png + descriptions.csv + grid_all.png
+                                (--text_mode로 프롬프트에 쓸 리포트 섹션 선택)
    └─ 평가                (아래 §4 스크립트)                  → ./eval/eps<N>/*.json, tsne.png
 ```
 
@@ -42,14 +44,17 @@ MIMIC-CXR (image + report)
 
 ```
 ./eval/eps<N>/
-    eval_summary.json     # 모든 지표가 병합되는 메인 파일 (여기부터 보면 됨)
-    fds.json              # FDS 단독 결과 (양방향 KL)
-    clipscore.json        # CLIPScore(gen/real/gap) 단독 결과
-    tsne.png              # real vs generated 특징공간 산점도
-    tsne_embedding.npz    # t-SNE 2D 좌표 (재플롯용: emb, n_real, perplexity)
-    ckpt_info.json        # 이 결과를 만든 ckpt의 학습 args, epsilon_spent, lora_rank/alpha
-    _features/            # feature 캐시(real_*.npz, gen_*.npz) — 재실행 가속용, 분석엔 불필요
-    eval_pairs.csv, pairs/# (LDM_dp_eval.py 사용 시) paired ssim/psnr/lpips 상세
+    eval_summary.json      # 모든 지표가 병합되는 메인 파일 (여기부터 보면 됨)
+    fds.json               # FDS 단독 결과 (양방향 KL)
+    clipscore.json         # CLIPScore(gen/real/gap/retrieval/negative-control)
+    label_agreement.json   # label-agreement per-pathology AUROC + support (all/nih)
+    label_auroc_roc.png    # label ROC 곡선 (gen vs real, 분류기×신뢰 병변)
+    tsne.png               # real vs generated 특징공간 산점도
+    tsne_embedding.npz     # t-SNE 2D 좌표 (재플롯용: emb, n_real, perplexity)
+    ckpt_info.json         # 이 결과를 만든 ckpt의 학습 args, epsilon_spent, lora_rank/alpha
+    _features/             # feature 캐시(real_*.npz, gen_*.npz) — 재실행 가속용, 분석엔 불필요
+    _clip_real_tmp/        # CLIP real 기준선용 임시 PNG (분석엔 불필요)
+    eval_pairs.csv, pairs/ # (LDM_dp_eval.py 사용 시) paired ssim/psnr/lpips 상세
 ```
 
 - **분석은 `eval_summary.json` 하나로 대부분 가능**. `ckpt_info.json`으로 어떤 ε/설정인지 확인.
@@ -116,12 +121,16 @@ MIMIC-CXR (image + report)
 - **텍스트 섹션 = `--text_mode`** ∈ `FINDINGS` / `FINDINGS/IMPRESSION`(기본) / `FULL`.
   **생성 프롬프트(inference)와 CLIP 텍스트가 동일 모드**를 씀(`text_utils.extract_report_sections`).
   `generate_and_eval`는 `--text_mode`가 생성·CLIP 둘 다 지배(clip은 미지정 시 자동 일치).
+  - ⚠️ **fallback**: 요청한 섹션이 없는 리포트(예: FINDINGS 없이 IMPRESSION만, 또는 둘 다 없음)는
+    **빈 프롬프트 방지를 위해 원문 전체로 대체**된다. 그래서 `--text_mode FINDINGS`인데도 일부
+    프롬프트가 `IMPRESSION: ...`/`FINAL REPORT ...`로 보일 수 있다(= FINDINGS 섹션이 없는 리포트).
 - **negative control(항상 산출)**: `cos_shuffled_mean`(이미지 vs 무작위 다른 리포트=노이즈 바닥),
   **`cos_signal = cos_mean − cos_shuffled_mean`**. signal이 0에 가까우면 그 인코더는 이 데이터에서
   변별력 없음(작은 gap 무의미). signal이 뚜렷이 양수여야 CLIP 해석이 유효.
 - **중복 프롬프트**: `--clip_dedup` 주면 retrieval을 **고유 프롬프트 부분집합**에서 계산(반복 많을 때 공정).
 - `clipscore.json` / summary 키:
   - `clip_gen_cos_mean/std`(주), `clip_gen_clipscore_mean/std`(참고), `clip_gen_n`.
+  - **negative control**: `clip_gen_cos_shuffled_mean`, `clip_gen_cos_signal`(=cos−shuffled).
   - retrieval(i2t·t2i): `clip_gen_R@{1,5,10}_*`(Recall@k, ↑), `clip_gen_P@{1,5,10}_*`
     (Precision@k, ↑), `clip_gen_mAP_*`(mean Average Precision, ↑),
     `clip_gen_median_rank_*`(↓), `clip_gen_mean_rank_*`, `clip_gen_duplicate_prompts`.
@@ -159,47 +168,67 @@ MIMIC-CXR (image + report)
 
 ## 5. 실행 방법 (재현/추가 생성이 필요할 때)
 
-**A) 생성 + 평가 원샷** (ckpt만 있고 이미지가 아직 없을 때):
+> **⚠️ 반드시 `/opt/medclip_env/bin/python`으로 실행** (§9 환경 참고). MedCLIP은 transformers
+> 4.24.0 + `wget`가 있는 이 venv에서만 동작하며, 이 venv가 torch·torchxrayvision·medclip을
+> 공유하므로 **모든 지표(fds/fid/tsne/label/clip/ssim/psnr/lpips)가 한 env에서 다 돈다.**
+
+**A) 생성 + 평가 원샷** — 한 명령으로 전체 summary 생성:
 ```bash
-python Eval_metric/generate_and_eval.py \
-  --dp_ckpt ./checkpoints/ldm/ldm_epoch0100.pt \
-  --lora_ckpt ./finetune_dp/.../ldm_lora_eps1.pt \
-  --vae_ckpt ./checkpoints/vae/vae_ep0070.pt \
-  --prompt_source split --n_prompts 361 --n_samples 1 \
-  --device_id 0 --gen_output_dir ./EVAL/gen_out/eps1 --out_dir ./eval/eps1 \
+/opt/medclip_env/bin/python Eval_metric/generate_and_eval.py \
+  --dp_ckpt   ./finetune_dp/lr2e-3/ldm_dp_final.pt \
+  --vae_ckpt  ./checkpoints/vae/vae_ep0070.pt \
+  --device_id 0 \
+  --prompt_source split --n_prompts 361 --n_samples 1 --text_mode FINDINGS \
+  --gen_output_dir ./EVAL/gen_out/lr2e-3/eps10/findings \
+  --out_dir        ./EVAL/metric/lr2e-3/eps10/findings \
   --root_path /storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0 \
-  --eval_split test --max_real 361 \
-  --eval_model xrv --pca_dim 64 \
-  --metrics fds tsne fid clip --clip_backend medclip
+  --eval_split test --max_real 361 --eval_model xrv --pca_dim 64 \
+  --metrics fds tsne fid clip ssim psnr lpips label
 ```
+- `--lora_ckpt`는 LoRA 어댑터를 쓸 때만. 전체 DP 체크포인트(`ldm_dp_final.pt`)면 `--dp_ckpt`만.
+- `--prompt_source split`이면 paired 지표(ssim/psnr/lpips/label)가 자동 활성(`paired_from_split`).
+- `--text_mode` ∈ FINDINGS / FINDINGS/IMPRESSION / FULL — **생성 프롬프트와 CLIP 텍스트에 동시 적용**.
 
-**B) 디스크의 기존 생성물만 평가**:
+**B) 디스크의 기존 생성물만 평가** (paired/label엔 `--paired_from_split` 필수):
 ```bash
-python Eval_metric/run_feature_eval.py \
-  --gen_dir ./EVAL/gen_out/eps1/samples --out_dir ./eval/eps1 \
+/opt/medclip_env/bin/python Eval_metric/run_feature_eval.py \
+  --gen_dir ./EVAL/gen_out/lr2e-3/eps10/findings/samples \
+  --out_dir ./EVAL/metric/lr2e-3/eps10/findings \
   --root_path /storage/.../mimic-cxr/2.1.0 --eval_split test --max_real 361 \
-  --device cuda:0 --eval_model xrv --pca_dim 64 \
-  --metrics fds tsne fid clip --clip_backend medclip \
-  --ckpt ./finetune_dp/.../ldm_lora_eps1.pt
+  --paired_from_split --device cuda:0 --eval_model xrv --pca_dim 64 \
+  --clip_text_mode FINDINGS \
+  --metrics fds tsne fid clip ssim psnr lpips label \
+  --ckpt ./finetune_dp/lr2e-3/ldm_dp_final.pt
 ```
 
-**C) paired SSIM/PSNR/LPIPS(+FID)** — 같은 `--output_dir`에 먼저 실행하면 summary에 누적:
+**CLIPScore 단독** (negative-control·중복제외 포함):
 ```bash
-python LDM_dp_eval.py --dp_ckpt ... --lora_ckpt ... --vae_ckpt ... \
-  --root_path /storage/.../mimic-cxr/2.1.0 --eval_split test --max_eval 361 \
-  --metrics ssim psnr lpips --compute_fid true --eval_model xrv \
-  --output_dir ./eval/eps1
-```
-
-**CLIPScore 단독**:
-```bash
-python Eval_metric/clipscore.py --gen_dir ./EVAL/gen_out/eps1/samples \
-  --backend medclip --device cuda:0 \
+/opt/medclip_env/bin/python Eval_metric/clipscore.py \
+  --gen_dir ./EVAL/gen_out/lr2e-3/eps10/findings/samples \
+  --backend medclip --text_mode FINDINGS --dedup --device cuda:0 \
   --root_path /storage/.../mimic-cxr/2.1.0 --eval_split test --max_real 361 \
-  --output ./eval/eps1/clipscore.json
+  --output ./EVAL/metric/lr2e-3/eps10/findings/clipscore.json
 ```
 
-의존성: `pip install torch torchvision numpy scipy scikit-learn pillow matplotlib torchxrayvision medclip`.
+**label-agreement 단독**:
+```bash
+/opt/medclip_env/bin/python Eval_metric/downstream_cls.py \
+  --gen_dir ./EVAL/gen_out/lr2e-3/eps10/findings/samples \
+  --root_path /storage/.../mimic-cxr/2.1.0 --eval_split test --max_real 361 \
+  --device cuda:0 --label_min_pos 10 \
+  --output ./EVAL/metric/lr2e-3/eps10/findings/label_agreement.json
+```
+
+### 주요 옵션 요약
+| 옵션 | 기본 | 의미 |
+|---|---|---|
+| `--eval_model` | xrv | feature backbone (xrv 1024-d / inception 2048-d) |
+| `--pca_dim` | none | FDS: real에 PCA fit 후 축소(작은 셋 안정화). gen도 pca_dim보다 커야 |
+| `--text_mode` | FINDINGS/IMPRESSION | 리포트 섹션 (생성+CLIP 공통) |
+| `--clip_dedup` | off | CLIP retrieval을 고유 프롬프트 부분집합에서 |
+| `--label_min_pos` | 10 | label macro에 넣을 최소 양성·음성 수 |
+| `--xrv_weights` | all + nih | label 분류기 가중치들 |
+| `--paired_from_split` | off | run_feature_eval에서 paired/label 활성(gen index→split) |
 
 ## 6. 결과 분석 지침 (분석 채팅용 핵심)
 
@@ -214,8 +243,12 @@ python Eval_metric/clipscore.py --gen_dir ./EVAL/gen_out/eps1/samples \
    `n_real`, `n_gen`, `fid_backbone`, `pca_dim`, `eval_split`을 각 json에서 대조 확인.
 5. **FDS 방향 해석**: `fds_real_given_gen` vs `fds_gen_given_real`의 대소로 **collapse vs hallucination**
    진단. 절대값은 표본 수에 민감하니 **모델 간 상대 비교**로 사용.
-6. **CLIP은 gap으로**: `clip_gap`(real−gen)으로 비교. 절대 `clip_gen_clipscore_mean`만으로 판단 금지.
-7. **T-SNE는 근거 보강용**: 수치(FID/FDS)의 결론을 시각적으로 확인하는 용도.
+6. **CLIP은 gap으로**: **`clip_gap_cos`**(real_cos−gen_cos)로 비교. 절대 `clip_gen_cos_mean`만으로 판단 금지.
+7. **CLIP 신뢰도 먼저 확인**: `clip_real_cos_signal`(=real cos − shuffled)이 ~0이면 그 인코더는 이
+   데이터에서 변별력 없음 → CLIP 계열(cos/gap/R@k/P@k/mAP) 전부 참고만. 뚜렷이 양수라야 해석 유효.
+8. **label은 gap/ratio + support**: `label_*_auroc_gap_macro`/`_ratio_macro`로 분류기별 gen↔real 비교.
+   weight set 간 절대 AUROC 비교 금지. per-pathology는 `support`(n_pos/n_neg≥10)만 신뢰.
+9. **T-SNE는 근거 보강용**: 수치(FID/FDS)의 결론을 시각적으로 확인하는 용도.
 
 ## 7. 알아둘 제약/함정
 
@@ -227,16 +260,39 @@ python Eval_metric/clipscore.py --gen_dir ./EVAL/gen_out/eps1/samples \
 - **프롬프트 다양성**: 소수 프롬프트로 대량 생성하면 분포가 인위적으로 좁아짐 →
   분포 지표엔 **`--prompt_source split`**(test 리포트 사용)이 바람직.
 - **PyTorch ≥2.6**: 우리 ckpt는 비-텐서 객체 포함 → `torch.load(..., weights_only=False)` 사용(코드 반영됨).
+- **MedCLIP/transformers 버전**: MedCLIP은 **transformers 4.24.0**에서 동작(신버전 5.x는 `CLIPFeatureExtractor`
+  제거로 실패). 그래서 **`/opt/medclip_env/bin/python`(4.24.0 + wget)** 로 실행해야 clip이 산다. clip이
+  `[clip] skipped (ImportError ...)`면 대개 base conda(5.8.1)로 실행한 것. §9 참고.
 - **CLIP 백엔드 부재 시**: 라이브러리/가중치 없으면 드라이버가 `[clip] skipped ...`로 안전하게 건너뜀
   (다른 지표는 정상 진행).
 - **feature 캐시**: `_features/`는 재실행 가속용. real셋/설정을 바꾸면 캐시가 자동 무효화(키 불일치)된다.
+- **text_mode fallback**: `--text_mode FINDINGS`라도 FINDINGS 섹션이 없는 리포트는 원문으로 대체됨
+  (§4.4). FINDINGS만 깨끗하게 쓰려면 후속으로 `--section_fallback` 옵션(현재 미구현)을 추가해야 한다.
 
 ## 8. 코드 위치 (참조)
 
 - 지표 구현: `Eval_metric/`
   - `features.py`(feature 추출+캐시), `fds.py`(FDS), `tsne_viz.py`(T-SNE),
-    `clipscore.py`(CLIPScore: medclip/biovil-t/cxr-clip), `fid.py`(FID),
-    `psnr.py`/`ssim.py`(paired 픽셀 지표), `../Loss/lpips.py`(LPIPS).
+    `clipscore.py`(CLIPScore: medclip/biovil-t/cxr-clip + retrieval + negative-control),
+    `downstream_cls.py`(label-agreement AUROC + ROC png), `fid.py`(FID),
+    `psnr.py`/`ssim.py`(paired 픽셀 지표), `text_utils.py`(리포트 섹션 추출), `../Loss/lpips.py`(LPIPS).
   - 드라이버: `run_feature_eval.py`(기존 이미지 평가), `generate_and_eval.py`(생성+평가 원샷).
-- paired 생성-평가: `LDM_dp_eval.py`. 생성: `LDM_dp_inference.py`.
+    두 진입점 모두 `run_feature_eval.run(cfg)`를 공유 → 지표 로직 단일화.
+- paired 생성-평가(별도): `LDM_dp_eval.py`. 생성: `LDM_dp_inference.py`.
 - 계획 문서: `docs/EVAL_PLAN.md`, 프레임워크: `docs/DP_LDM_FRAMEWORK_PLAN.md`.
+
+## 9. 실행 환경 (Docker / Python) — 매우 중요
+
+컨테이너 `CXR_dp_medclip` 안에 **Python 환경이 둘**이고 `transformers` 버전이 다르다.
+
+| 환경 | Python | transformers | 용도 |
+|---|---|---|---|
+| **A (base conda)** | `/opt/conda/bin/python` | **5.8.1** | 학습/DP-SGD (Opacus). **MedCLIP 불가**(CLIPFeatureExtractor 제거) |
+| **B (medclip venv)** | **`/opt/medclip_env/bin/python`** | **4.24.0** | **평가 실행용**. MedCLIP + wget 있음 |
+
+- **평가는 전부 B로 실행**: `/opt/medclip_env/bin/python Eval_metric/...`. B는 `--system-site-packages`라
+  torch·torchxrayvision·medclip을 A와 공유 → 모든 지표가 한 env에서 동작.
+- 프로젝트 경로(컨테이너): **`/workspace/PrivaText-CXR`**. 데이터: `/storage/hjchoi/...`.
+- MedCLIP 패키지는 `/opt/conda/.../medclip`에 있고 B가 공유. **medclip 소스를 임의 수정하지 말 것**
+  (예전에 tf5용으로 패치했다가 B(tf4.24)가 깨졌음 → 원본 유지가 맞음).
+- 실제 실행 Python 확인: `python -c "import sys; print(sys.executable)"`.
