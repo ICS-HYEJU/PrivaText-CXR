@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/user/PrivaText-CXR/**)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(cat harness/*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(du:*)",
+      "Bash(df:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(python harness/watch_run.py:*)",
+      "Bash(python harness/evaluate.py:*)",
+      "Bash(harness/launch_run.sh:*)"
+    ],
+    "ask": [
+      "Bash(python LDM_dp_finetune.py:*)",
+      "Bash(python LDM_train.py:*)",
+      "Bash(python Autoencoder_train.py:*)",
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Read(//home/user/PrivaText-CXR/**/*.pt)"
+    ]
+  }
+}

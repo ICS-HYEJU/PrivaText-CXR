@@ -1,0 +1,286 @@
+{
+  "$schema_version": "0.1",
+  "project": "PrivaText-CXR",
+  "purpose": "DP finetune 학습/검증 자동화 루프를 성립시키기 위해 선행 구현이 필요한 작업 목록",
+  "generated": "2026-08-03",
+  "status_legend": ["todo", "in_progress", "blocked", "done"],
+
+  "milestones": [
+    {
+      "id": "M1",
+      "name": "에이전트 가독성 확보",
+      "goal": "에이전트가 학습 결과를 파싱 가능한 형태로 읽고, 런끼리 서로 덮어쓰지 않게 한다",
+      "features": ["F-01", "F-02", "F-03"],
+      "exit_criteria": "T0 스모크 런 1회가 runs/<run_id>/{config.json,metrics.jsonl,status.json}을 생성하고 에이전트가 이를 파싱해 요약할 수 있다"
+    },
+    {
+      "id": "M2",
+      "name": "루프 실행 기반",
+      "goal": "5일 런을 detached로 띄우고 비행 중 감시할 수 있게 한다",
+      "features": ["F-04", "F-05", "F-08"],
+      "exit_criteria": "T1 런이 자동 실행되고, 트립와이어 위반 시 자동 중단되며 analysis.md가 생성된다"
+    },
+    {
+      "id": "M3",
+      "name": "평가 파이프라인",
+      "goal": "val_loss 외에 FID 기반 품질 게이트를 확보한다",
+      "features": ["F-07", "F-09"],
+      "exit_criteria": "체크포인트 경로를 주면 FID가 계산되어 metrics에 병합된다"
+    },
+    {
+      "id": "M4",
+      "name": "런 시간 단축",
+      "goal": "5일 3시간이라는 반복 비용을 구조적으로 낮춘다",
+      "features": ["F-06", "F-10"],
+      "exit_criteria": "동일 품질을 유지하며 T2 소요 시간이 유의미하게 감소한다"
+    }
+  ],
+
+  "features": [
+    {
+      "id": "F-01",
+      "title": "run_id 기반 런 디렉토리 격리",
+      "milestone": "M1",
+      "priority": "P0",
+      "status": "todo",
+      "problem": "--save_dir가 './finetune_dp'로 고정되어 하이퍼파라미터가 다른 런들이 체크포인트를 서로 덮어쓴다. 루프 2번('사용된 하이퍼파라미터 저장')이 성립하지 않는다.",
+      "evidence": "LDM_dp_finetune.py:238 --save_dir default='./finetune_dp'; Autoencoder_train.py:128 default='./checkpoints/vae'",
+      "spec": [
+        "run_id = {tier}_{YYYYMMDD-HHMMSS}_{hash8} 생성. hash8 = hparam_space.json의 tunable=true 파라미터만 정렬 직렬화한 sha256[:8]",
+        "runs/<run_id>/ 하위에 config.json, metrics.jsonl, stdout.log, status.json, ckpt/ 생성",
+        "config.json = vars(args) 전체 + git commit hash + 실행 커맨드 원문",
+        "--tier {T0,T1,T2} 인자 추가"
+      ],
+      "files": ["LDM_dp_finetune.py", "harness/run_utils.py (신규)"],
+      "acceptance": [
+        "동일 스크립트를 하이퍼파라미터만 바꿔 2회 실행 시 서로 다른 디렉토리에 기록된다",
+        "동일 하이퍼파라미터로 실행 시 hash8이 같아 중복 실행을 감지할 수 있다",
+        "config.json만으로 런을 그대로 재현하는 커맨드를 복원할 수 있다"
+      ],
+      "blocks": ["F-02", "F-04", "F-05"],
+      "estimate": "S"
+    },
+    {
+      "id": "F-02",
+      "title": "metrics.jsonl 구조화 출력",
+      "milestone": "M1",
+      "priority": "P0",
+      "status": "todo",
+      "problem": "모든 메트릭이 stdout print로만 나간다. 에이전트가 정규식으로 로그를 긁는 방식은 포맷이 바뀌면 조용히 깨진다. 루프 3번(평가)의 입력이 없다.",
+      "evidence": "LDM_dp_finetune.py:718 print(f'[Epoch ...]') — 파일 출력 없음",
+      "spec": [
+        "매 epoch 종료 시 experiment_spec.md §5 스키마대로 1줄 append",
+        "필드: run_id, epoch, global_step, train_loss, val_loss, epsilon_spent, lr, wall_sec, timestamp",
+        "append 후 flush + fsync — 5일 런 도중에도 외부에서 읽을 수 있어야 함",
+        "기존 print는 유지 (사람이 보는 용도)"
+      ],
+      "files": ["LDM_dp_finetune.py"],
+      "acceptance": [
+        "학습 중 다른 프로세스에서 tail 했을 때 최신 epoch 줄이 즉시 보인다",
+        "잘못된 줄(중간에 kill된 경우) 하나 때문에 전체 파싱이 실패하지 않는다"
+      ],
+      "depends_on": ["F-01"],
+      "estimate": "S"
+    },
+    {
+      "id": "F-03",
+      "title": "DP 진단 신호 로깅 (grad_norm_pre_clip, clipped_frac)",
+      "milestone": "M1",
+      "priority": "P1",
+      "status": "todo",
+      "problem": "decision_rules.md의 D-03(클리핑 포화)/D-04(노이즈 지배)는 DP 특유의 실패 모드를 구분하는 규칙인데, 이 두 신호 없이는 판정 자체가 불가능하다. 현재는 둘 다 D-99(미매칭)로 빠진다.",
+      "spec": [
+        "logical batch마다 클리핑 이전 per-sample grad norm의 median/p90 기록",
+        "clipped_frac = (norm > max_grad_norm 인 샘플 수) / (전체 샘플 수)",
+        "epoch 평균을 metrics.jsonl에 포함",
+        "Opacus GradSampleModule에서 per-sample norm을 얻는 방법 확인 필요 (optimizer 훅 또는 p.grad_sample)"
+      ],
+      "files": ["LDM_dp_finetune.py"],
+      "acceptance": [
+        "metrics.jsonl에 grad_norm_pre_clip_median, clipped_frac이 매 epoch 기록된다",
+        "max_grad_norm을 1/10로 낮춘 T0 런에서 clipped_frac이 1.0에 근접하는 것으로 신호 유효성이 검증된다"
+      ],
+      "depends_on": ["F-02"],
+      "risk": "Opacus 내부 API 의존. 버전 업그레이드 시 깨질 수 있으므로 실패해도 학습은 계속되도록 방어적으로 구현할 것",
+      "estimate": "M"
+    },
+    {
+      "id": "F-04",
+      "title": "tier 프리셋 (T0 smoke / T1 proxy / T2 full)",
+      "milestone": "M2",
+      "priority": "P0",
+      "status": "todo",
+      "problem": "1회 학습이 5일 3시간(약 1.24h/epoch)이라 전체 학습을 루프에 태울 수 없다. 짧은 검증 런이 없으면 하네스 자체를 디버깅할 방법도 없다.",
+      "spec": [
+        "T0: epochs=1, 데이터 200 샘플 서브셋, val_batches=5, save_every=1 → 목표 15분 이내",
+        "T1: epochs=3, 데이터 10~20% 서브셋, save_every=1 → 목표 2~5시간",
+        "T2: epochs=100, 전체 데이터, save_every=5",
+        "--subset_frac / --subset_n 인자 추가 (deterministic seed로 샘플링, 런 간 동일 서브셋 보장)",
+        "T1의 warmup_steps는 총 스텝 수에 비례해 자동 축소"
+      ],
+      "files": ["LDM_dp_finetune.py", "harness/tiers.json (신규)"],
+      "acceptance": [
+        "T0가 15분 이내에 정상 종료하며 metrics.jsonl에 1줄이 남는다",
+        "T1 서브셋이 seed 고정으로 재현된다",
+        "T1의 epsilon 계산이 서브셋 크기(N 변화)를 올바르게 반영한다"
+      ],
+      "depends_on": ["F-01"],
+      "risk": "서브셋으로 N이 줄면 sample_rate q = logical_batch/N 이 커져 동일 epochs에서 ε이 훨씬 빨리 소모된다. T1 결과를 T2로 외삽할 때 이 차이를 반드시 문서화할 것",
+      "estimate": "M"
+    },
+    {
+      "id": "F-05",
+      "title": "detached 실행 + 비행 중 감시 (트립와이어)",
+      "milestone": "M2",
+      "priority": "P0",
+      "status": "todo",
+      "problem": "5일 런을 에이전트가 포그라운드로 붙들 수 없다. 또한 실패를 5일 뒤에 발견하면 자동화의 의미가 없다.",
+      "spec": [
+        "nohup 또는 tmux로 detached 실행, PID를 status.json에 기록",
+        "watch 스크립트: metrics.jsonl을 폴링하며 decision_rules.md §1 트립와이어(TW-01~TW-06) 검사",
+        "위반 시 프로세스에 SIGTERM 후 status.json에 {state:aborted, tripwire:TW-0X, evidence:...} 기록",
+        "TW-05(stall)는 자동 재시작하지 않고 보고만 — OOM/노드 장애 가능성"
+      ],
+      "files": ["harness/launch_run.sh (신규)", "harness/watch_run.py (신규)"],
+      "acceptance": [
+        "에이전트 세션이 종료되어도 학습이 계속된다",
+        "인위적으로 NaN을 주입한 런이 TW-01로 자동 중단된다",
+        "중단 사유가 status.json과 analysis.md 양쪽에 기록된다"
+      ],
+      "depends_on": ["F-01", "F-02"],
+      "estimate": "M"
+    },
+    {
+      "id": "F-06",
+      "title": "LoRA 어댑터 지원",
+      "milestone": "M4",
+      "priority": "P1",
+      "status": "todo",
+      "problem": "현재 LoRA가 구현되어 있지 않다(코드 내 관련 심볼 없음). 전체 finetune은 (a) 5일 3시간이 걸리고 (b) DP 노이즈가 학습 파라미터 수에 비례해 누적되므로 유틸리티에도 불리하다. 이 한 가지가 반복 비용과 품질 모두를 개선하는 유일한 항목이다.",
+      "spec": [
+        "UNet attention의 to_q/to_k/to_v/to_out에 LoRA 주입 (rank, alpha 인자화)",
+        "LoRA 파라미터만 optimizer에 등록 → Opacus가 감싸는 학습 파라미터 수 대폭 축소",
+        "--use_lora, --lora_rank, --lora_alpha 인자 추가 후 hparam_space.json에 등재",
+        "체크포인트는 LoRA weight만 저장 (용량 절감)"
+      ],
+      "files": ["Model/Diffusion/UNetmodel.py", "Model/attention_module_dp.py", "LDM_dp_finetune.py"],
+      "acceptance": [
+        "학습 가능 파라미터 수가 전체 finetune 대비 크게 감소함을 로그로 확인",
+        "T1 기준 동일 ε에서 val_loss가 전체 finetune보다 나쁘지 않다",
+        "T2 예상 소요 시간이 측정되어 기록된다"
+      ],
+      "note": "사용자가 '100에폭, lora 미적용 기준 5일 3시간'이라고 명시 → LoRA 도입이 이미 계획에 있는 것으로 보임. 우선순위 협의 필요",
+      "estimate": "L"
+    },
+    {
+      "id": "F-07",
+      "title": "LDM 생성물 FID 평가 경로",
+      "milestone": "M3",
+      "priority": "P1",
+      "status": "todo",
+      "problem": "Eval_metric/fid.py가 621줄 전부 주석 처리되어 실행 불가. 게다가 그 내용은 VAE 재구성용 FID이며, LDM이 실제로 '생성'한 이미지에 대한 FID 경로가 없다. 현재 LDM 품질 게이트가 val_loss 하나뿐이다.",
+      "evidence": "Eval_metric/fid.py — 비주석 라인 수가 실질 0에 가까움 (전체가 주석 블록)",
+      "spec": [
+        "fid.py 주석 해제 및 동작 복원",
+        "LDM 샘플링 경로 추가: 체크포인트 로드 → report 조건으로 N장 생성 → real set과 FID",
+        "샘플 수 N, sampling steps를 인자화 (평가 비용 관리)",
+        "결과를 runs/<run_id>/metrics.jsonl 또는 eval.json에 병합"
+      ],
+      "files": ["Eval_metric/fid.py", "harness/evaluate.py (신규)"],
+      "acceptance": [
+        "체크포인트 경로를 주면 FID 수치가 산출된다",
+        "동일 체크포인트 2회 평가 시 FID 변동폭이 기록되어, 이후 비교의 노이즈 하한을 알 수 있다"
+      ],
+      "open_question": "SSIM/PSNR은 재구성 지표라 diffusion 생성물에 직접 적용 불가. VAE 단계 게이트로만 쓸지 확정 필요",
+      "estimate": "L"
+    },
+    {
+      "id": "F-08",
+      "title": "RUN_LOG.md 누적 실험 기록",
+      "milestone": "M2",
+      "priority": "P1",
+      "status": "todo",
+      "problem": "루프 4번('원인 분석 및 기록')과 5번('분석 기반 조정')이 성립하려면 이전 런들의 이력이 남아야 한다. 또한 DP 프로젝트에서는 MIMIC에 대해 몇 번 튜닝했는지 자체가 논문에 보고되어야 할 정보다(experiment_spec §3).",
+      "spec": [
+        "런 종료 시 RUN_LOG.md에 1행 append: run_id, tier, dataset, 변경 파라미터, 적용 규칙 ID, 핵심 메트릭, 결과",
+        "MIMIC(private) 사용 런은 별도 표시 및 누적 카운트",
+        "runs/<run_id>/analysis.md 링크"
+      ],
+      "files": ["harness/RUN_LOG.md (신규)", "harness/run_utils.py"],
+      "acceptance": [
+        "N번째 런에서 에이전트가 RUN_LOG.md만 읽고 이전 시도와 그 결론을 파악할 수 있다",
+        "동일 하이퍼파라미터 재시도를 감지해 중복 실행을 막는다"
+      ],
+      "depends_on": ["F-01"],
+      "estimate": "S"
+    },
+    {
+      "id": "F-09",
+      "title": "임계값(threshold) 확정",
+      "milestone": "M3",
+      "priority": "P0",
+      "status": "blocked",
+      "blocked_by": "사람의 결정 필요",
+      "problem": "루프 6번(기준 초과 시 stop)의 정지 조건이 정의되지 않았다. 임계값 없이는 에이전트가 pass/fail을 판정할 수 없어 루프가 종료 조건 없이 돈다.",
+      "needed": [
+        "THRESH_VAL_LOSS — 베이스라인 런 1회로 현실적 범위 파악 후 설정 권장",
+        "THRESH_FID — 논문/베이스라인 근거 필요 (제안: ≤ 50, 근거 확인 필요)",
+        "target_epsilon 확정 (현재 default 10.0이 실험 정의값인지)",
+        "T1 결과를 T2로 승격할 때의 최소 개선폭"
+      ],
+      "note": "확정 전까지 에이전트는 자동 pass/fail 판정을 하지 않고 사람에게 보고한다 (decision_rules §5-4)",
+      "estimate": "-"
+    },
+    {
+      "id": "F-10",
+      "title": "리포지토리 위생 (.gitignore / requirements.txt / 인코딩)",
+      "milestone": "M4",
+      "priority": "P2",
+      "status": "todo",
+      "problem": "루프가 체크포인트를 대량 생성하는데 .gitignore가 없다. 이미 checkpoints/vae/vae_ep0020.pt가 커밋되어 있다. requirements.txt가 없어 환경 재현이 불가하다. 다수 소스 파일이 cp949로 저장되어 주석이 깨져 있다(에이전트가 코드를 읽고 원인 분석해야 하므로 실질적 문제).",
+      "evidence": "리포 루트에 .gitignore/requirements.txt 부재; checkpoints/ 3.9MB 커밋됨; 'A→B'가 '¡æ'로 표시됨",
+      "spec": [
+        ".gitignore: runs/, checkpoints/, *.pt, __pycache__/, .idea/",
+        "requirements.txt 또는 environment.yml 고정 (torch, opacus, transformers, torchmetrics 버전 명시)",
+        "소스 파일 UTF-8 재인코딩 (별도 커밋으로 분리 — diff가 커지므로)"
+      ],
+      "files": [".gitignore", "requirements.txt"],
+      "acceptance": [
+        "새 런의 산출물이 git status를 오염시키지 않는다",
+        "opacus 버전이 고정되어 F-03의 내부 API 의존이 깨지지 않는다"
+      ],
+      "estimate": "S"
+    }
+  ],
+
+  "critical_path": ["F-01", "F-02", "F-04", "F-05", "F-08"],
+  "critical_path_note": "이 5개가 끝나면 T0/T1 루프가 돈다. F-03은 진단 품질, F-07은 최종 품질 게이트, F-06은 반복 비용 개선. F-09는 사람의 입력 대기.",
+
+  "open_questions": [
+    {
+      "id": "Q-01",
+      "question": "T1 탐색을 MIMIC이 아닌 NIH에서 수행할 것인가?",
+      "why": "private 데이터에서 반복 튜닝하면 보고하는 ε이 실제 보장을 반영하지 못한다 (experiment_spec §3)",
+      "options": ["NIH를 프록시로 사용", "MIMIC train을 쪼개 튜닝 전용 shard 확보", "MIMIC에서 튜닝하되 횟수를 논문에 명시"],
+      "blocking": ["F-04"]
+    },
+    {
+      "id": "Q-02",
+      "question": "vae_ckpt / pretrained_ckpt로 사용할 확정된 체크포인트가 있는가?",
+      "why": "둘 다 default=None이며 미지정 시 경고만 내고 random weight로 진행된다(LDM_dp_finetune.py:510,542). 루프가 이 상태로 돌면 모든 결과가 무의미해진다",
+      "blocking": ["F-04", "F-05"]
+    },
+    {
+      "id": "Q-03",
+      "question": "GPU를 몇 개 동시에 쓸 수 있는가?",
+      "why": "T1 후보를 병렬로 돌릴 수 있으면 탐색 처리량이 GPU 수만큼 늘어난다. 루프 설계(순차 vs 병렬)가 달라진다",
+      "blocking": ["F-05"]
+    },
+    {
+      "id": "Q-04",
+      "question": "LoRA(F-06)를 루프 구축 전에 먼저 넣을 것인가, 후에 넣을 것인가?",
+      "why": "먼저 넣으면 T2 비용이 줄어 루프가 훨씬 실용적이지만 하네스 구축이 지연된다. 나중에 넣으면 이미 수행한 T1 결과와의 비교 가능성이 끊긴다",
+      "blocking": []
+    }
+  ]
+}

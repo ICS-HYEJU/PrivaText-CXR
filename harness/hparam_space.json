@@ -1,0 +1,235 @@
+{
+  "$schema_version": "0.1",
+  "target_script": "LDM_dp_finetune.py",
+  "description": "에이전트가 조정 가능한 하이퍼파라미터의 화이트리스트와 안전 범위. 여기에 없는 인자는 에이전트가 임의로 바꾸지 않는다.",
+
+  "policy": {
+    "one_change_per_iteration": true,
+    "rationale": "원인 귀속(attribution)이 불가능해지므로 한 번에 하나만 변경한다. 예외는 coupled_with에 명시된 쌍뿐이다.",
+    "forbidden_without_human_approval": [
+      "target_epsilon",
+      "target_delta",
+      "root_path",
+      "split"
+    ],
+    "forbidden_reason": "프라이버시 예산과 데이터 경로는 실험 정의 자체다. 에이전트가 기준을 맞추기 위해 예산을 늘리는 것은 목표 조작에 해당한다."
+  },
+
+  "constraints": [
+    {
+      "id": "C-01",
+      "name": "privacy_budget",
+      "expr": "epsilon_spent <= target_epsilon",
+      "type": "hard",
+      "on_violation": "abort_run",
+      "note": "품질과 무관하게 실패 처리. 이 제약을 완화해서 기준을 통과시키는 것은 금지."
+    },
+    {
+      "id": "C-02",
+      "name": "memory_fit",
+      "expr": "physical_batch <= max_physical_batch_that_fits_vram",
+      "type": "hard",
+      "on_violation": "reduce_physical_batch_only",
+      "note": "physical_batch는 품질 하이퍼파라미터가 아니라 자원 파라미터다. 결과 해석에 영향을 주지 않으므로 OOM 시 자유롭게 낮춘다."
+    },
+    {
+      "id": "C-03",
+      "name": "logical_batch_divisibility",
+      "expr": "logical_batch % physical_batch == 0",
+      "type": "soft",
+      "on_violation": "warn",
+      "note": "나눠떨어지지 않으면 마지막 chunk가 작아져 per-sample grad 통계가 흔들린다."
+    },
+    {
+      "id": "C-04",
+      "name": "epsilon_epoch_coupling",
+      "expr": "epochs 증가 시 동일 target_epsilon 유지를 위해 noise_multiplier(sigma) 자동 증가",
+      "type": "informational",
+      "on_violation": "n/a",
+      "note": "DP에서 epochs는 공짜가 아니다. epochs를 늘리면 스텝당 노이즈가 커져 오히려 품질이 나빠질 수 있다. decision_rules D-06 참조."
+    }
+  ],
+
+  "parameters": [
+    {
+      "name": "lr",
+      "flag": "--lr",
+      "type": "float",
+      "default": 1e-4,
+      "range": [1e-5, 5e-4],
+      "scale": "log",
+      "step_rule": "x0.5 or x2 (한 번에 2배 이내)",
+      "priority": 1,
+      "tier": ["T1", "T2"],
+      "tunable": true,
+      "notes": "DP 학습은 노이즈 때문에 non-private 대비 더 작은 lr을 선호하는 경우가 많다. 발산 시 최우선 조정 대상."
+    },
+    {
+      "name": "max_grad_norm",
+      "flag": "--max_grad_norm",
+      "type": "float",
+      "default": 1.0,
+      "range": [0.1, 5.0],
+      "scale": "log",
+      "step_rule": "x0.5 or x2",
+      "priority": 1,
+      "tier": ["T1", "T2"],
+      "tunable": true,
+      "coupled_with": ["lr"],
+      "coupling_note": "clipping norm C를 절반으로 줄이면 유효 업데이트 크기도 절반이 된다. C를 낮출 때 lr을 함께 올리는 것은 허용되는 유일한 2-변수 동시 변경이다.",
+      "notes": "DP-SGD에서 가장 민감한 파라미터. clipped_frac이 거의 1.0이면 C가 너무 작다는 신호(D-03)."
+    },
+    {
+      "name": "logical_batch",
+      "flag": "--logical_batch",
+      "type": "int",
+      "default": 256,
+      "range": [64, 1024],
+      "scale": "pow2",
+      "step_rule": "x2 (한 단계씩)",
+      "priority": 2,
+      "tier": ["T1", "T2"],
+      "tunable": true,
+      "notes": "DP에서 큰 배치는 signal-to-noise를 개선한다(노이즈는 배치당 1회, 시그널은 B개 평균). 단 sample_rate q가 커져 동일 ε 대비 σ도 커지므로 단조 개선은 아니다. 벽시계 시간도 함께 증가."
+    },
+    {
+      "name": "ablation_blocks",
+      "flag": "--ablation_blocks",
+      "type": "int",
+      "default": -1,
+      "range": [-1, 12],
+      "scale": "linear",
+      "step_rule": "±2",
+      "priority": 2,
+      "tier": ["T1", "T2"],
+      "tunable": true,
+      "notes": "-1 = 전체 finetune. DP 노이즈는 학습 파라미터 수에 비례해 누적되므로, 부분 finetune은 DP 유틸리티의 핵심 레버다. LoRA(F-06) 도입 전까지 가장 강력한 수단.",
+      "verify_before_use": "코드에서 이 인자가 실제로 어떤 블록을 freeze 하는지 확인할 것 (LDM_dp_finetune.py:226)"
+    },
+    {
+      "name": "warmup_steps",
+      "flag": "--warmup_steps",
+      "type": "int",
+      "default": 500,
+      "range": [0, 2000],
+      "scale": "linear",
+      "step_rule": "±250",
+      "priority": 3,
+      "tier": ["T2"],
+      "tunable": true,
+      "notes": "T1은 3 epoch뿐이라 warmup이 전체 스텝을 잡아먹을 수 있다. T1에서는 총 스텝 수에 비례해 축소할 것."
+    },
+    {
+      "name": "unet_dropout",
+      "flag": "--unet_dropout",
+      "type": "float",
+      "default": 0.0,
+      "range": [0.0, 0.2],
+      "scale": "linear",
+      "step_rule": "+0.05",
+      "priority": 3,
+      "tier": ["T1", "T2"],
+      "tunable": true,
+      "notes": "DP 노이즈 자체가 정규화로 작동하므로 추가 dropout의 효용은 제한적일 수 있다. 과적합(D-02) 확인된 경우에만."
+    },
+    {
+      "name": "finetune_biobert",
+      "flag": "--finetune_biobert",
+      "type": "bool",
+      "default": true,
+      "range": [true, false],
+      "priority": 3,
+      "tier": ["T1"],
+      "tunable": true,
+      "notes": "false로 두면 학습 파라미터가 크게 줄어 DP 노이즈 부담이 감소한다. 대신 텍스트 조건부 정합성이 떨어질 수 있다. ablation_blocks와 효과가 겹치므로 동시에 바꾸지 말 것."
+    },
+    {
+      "name": "use_ema",
+      "flag": "--use_ema",
+      "type": "bool",
+      "default": false,
+      "range": [true, false],
+      "priority": 4,
+      "tier": ["T2"],
+      "tunable": true,
+      "notes": "노이즈가 큰 DP 학습에서 EMA는 평가 안정성을 개선하는 경향이 있다. T2 확정 런에서 켜는 것을 검토."
+    },
+    {
+      "name": "scale_by_std",
+      "flag": "--scale_by_std",
+      "type": "bool",
+      "default": false,
+      "priority": 4,
+      "tier": ["T1"],
+      "tunable": true,
+      "notes": "latent 스케일 정규화. val_loss가 처음부터 비정상적으로 크거나 작으면 먼저 확인(D-05)."
+    },
+    {
+      "name": "epochs",
+      "flag": "--epochs",
+      "type": "int",
+      "default": 30,
+      "range": [1, 100],
+      "priority": 2,
+      "tier": ["T0", "T1", "T2"],
+      "tunable": true,
+      "tunable_caveat": "품질 하이퍼파라미터로 취급하지 말 것. tier를 정의하는 값이며, ε 예산과 직접 결합되어 있다(C-04). 변경 시 반드시 decision_rules D-06 절차를 따른다.",
+      "tier_values": {"T0": 1, "T1": 3, "T2": 100}
+    },
+    {
+      "name": "physical_batch",
+      "flag": "--physical_batch",
+      "type": "int",
+      "default": 8,
+      "range": [1, 64],
+      "priority": null,
+      "tier": ["T0", "T1", "T2"],
+      "tunable": false,
+      "category": "resource",
+      "notes": "자원 파라미터. OOM 회피 목적으로만 조정하며 실험 결과 비교에 영향을 주지 않는다(gradient accumulation으로 logical_batch가 보존됨). 결과 표에 기재하지 않는다."
+    },
+    {
+      "name": "num_workers",
+      "flag": "--num_workers",
+      "type": "int",
+      "default": 4,
+      "priority": null,
+      "tunable": false,
+      "category": "resource"
+    },
+    {
+      "name": "noise_multiplier",
+      "flag": "--noise_multiplier",
+      "type": "float",
+      "default": null,
+      "priority": null,
+      "tunable": false,
+      "category": "derived",
+      "notes": "None으로 두면 target_epsilon/epochs/sample_rate로부터 자동 계산된다(privacy/privacy_analysis.py:26). 직접 지정하면 ε 보장이 깨질 수 있으므로 에이전트는 건드리지 않는다."
+    },
+    {
+      "name": "target_epsilon",
+      "flag": "--target_epsilon",
+      "type": "float",
+      "default": 10.0,
+      "priority": null,
+      "tunable": false,
+      "category": "policy",
+      "notes": "실험 정의. 사람의 명시적 승인 없이 변경 금지."
+    },
+    {
+      "name": "target_delta",
+      "flag": "--target_delta",
+      "type": "float",
+      "default": 1e-5,
+      "priority": null,
+      "tunable": false,
+      "category": "policy"
+    }
+  ],
+
+  "search_order": {
+    "note": "루프 5번 '한 번에 하나씩 조정'의 기본 순서. decision_rules.md의 진단 결과가 있으면 그것이 이 순서를 override 한다.",
+    "sequence": ["lr", "max_grad_norm", "logical_batch", "ablation_blocks", "unet_dropout", "warmup_steps"]
+  }
+}
