@@ -18,14 +18,29 @@ _SECTION_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# The report-section modes selectable via --text_mode / --clip_text_mode.
+SECTION_MODES = ["FINDINGS", "FINDINGS/IMPRESSION", "FULL"]
 
-def extract_findings_impression(text: str) -> str:
-    """Return 'FINDINGS: ... IMPRESSION: ...' or the original text if absent."""
+
+def extract_report_sections(text: str, mode: str = "FINDINGS/IMPRESSION") -> str:
+    """
+    Reduce a radiology report to the chosen sections.
+        FINDINGS            -> only the FINDINGS section
+        FINDINGS/IMPRESSION -> both sections (default)
+        FULL                -> the whole text, unchanged
+    Falls back to the full text when the requested section(s) are absent, so a
+    prompt is never empty.
+    """
     text = text or ""
+    if mode == "FULL":
+        return text.strip()
+    keys = ("findings",) if mode == "FINDINGS" else ("findings", "impression")
     sections = {name.lower(): content.strip()
                 for name, content in _SECTION_RE.findall(text)}
-    if not sections:
-        return text.strip()
-    parts = [f"{k.upper()}: {sections[k]}"
-             for k in ("findings", "impression") if sections.get(k)]
+    parts = [f"{k.upper()}: {sections[k]}" for k in keys if sections.get(k)]
     return " ".join(parts).strip() or text.strip()
+
+
+def extract_findings_impression(text: str) -> str:
+    """Backward-compatible alias for the FINDINGS/IMPRESSION mode."""
+    return extract_report_sections(text, "FINDINGS/IMPRESSION")
