@@ -128,13 +128,21 @@ def run_clip_label(args):
     txt_emb = enc.encode_text(texts)                                  # IMPRESSION texts
     prompt_emb = enc.encode_text([tmpl.format(label=L) for L in scored])  # label prompts
 
-    # 1. zero-shot label AUROC (gen vs real)
+    ks = tuple(getattr(args, 'clip_retrieval_ks', None) or [1, 5, 10])
+    lab = np.asarray(labels, dtype=object)
+    scored_arr = np.asarray(scored, dtype=object)
+
+    # 1. zero-shot label classification: AUROC + retrieval over the K label prompts.
+    #    Candidates = the K label prompts; the ONE correct label is relevant, so
+    #    R@1 = top-1 accuracy, mAP = mean reciprocal rank. (R@k trivially 1 once k>=K.)
     gen_per, gen_macro = _zeroshot_auroc(gen_img, prompt_emb, scored, labels)
     real_per, real_macro = _zeroshot_auroc(real_img, prompt_emb, scored, labels)
-    # 2. label-level retrieval (same single label; text = IMPRESSION)
-    lab = np.asarray(labels, dtype=object)
+    zs_rel = (lab[:, None] == scored_arr[None, :])          # [N, K] correct label
+    gen_zs_ret = retrieval_with_relevance(gen_img @ prompt_emb.T, zs_rel, ks)
+    real_zs_ret = retrieval_with_relevance(real_img @ prompt_emb.T, zs_rel, ks)
+
+    # 2. label-level retrieval over IMPRESSION texts (relevance = same single label)
     rel = (lab[:, None] == lab[None, :])
-    ks = tuple(getattr(args, 'clip_retrieval_ks', None) or [1, 5, 10])
     gen_ret = retrieval_with_relevance(gen_img @ txt_emb.T, rel, ks)
     real_ret = retrieval_with_relevance(real_img @ txt_emb.T, rel, ks)
 
@@ -147,6 +155,7 @@ def run_clip_label(args):
         'clipzs_gen_macro': gen_macro, 'clipzs_real_macro': real_macro,
         'clipzs_gap': gap, 'clipzs_ratio': ratio,
         'clipzs_gen_per': gen_per, 'clipzs_real_per': real_per,
+        'clipzs_gen_ret': gen_zs_ret, 'clipzs_real_ret': real_zs_ret,   # R@k/P@k/mAP over labels
         'labelret_gen_i2t': gen_ret, 'labelret_real_i2t': real_ret,
     }
     gm = f'{gen_macro:.4f}' if gen_macro is not None else 'NA'
@@ -154,7 +163,10 @@ def run_clip_label(args):
     print(f'[clip_label] zero-shot AUROC  gen={gm}  real={rm}  '
           f'gap={gap:.4f}' if gap is not None else
           f'[clip_label] zero-shot AUROC  gen={gm}  real={rm}')
-    print(f'[clip_label] label-retrieval i2t  gen mAP={gen_ret.get("mAP"):.4f}  '
+    print(f'[clip_label] zero-shot retrieval (over labels)  '
+          f'gen R@1={gen_zs_ret.get("R@1"):.4f} mAP={gen_zs_ret.get("mAP"):.4f}  '
+          f'real R@1={real_zs_ret.get("R@1"):.4f} mAP={real_zs_ret.get("mAP"):.4f}')
+    print(f'[clip_label] label-retrieval i2t (over IMPRESSION)  gen mAP={gen_ret.get("mAP"):.4f}  '
           f'real mAP={real_ret.get("mAP"):.4f}')
     return res
 
