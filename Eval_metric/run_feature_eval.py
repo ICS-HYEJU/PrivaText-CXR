@@ -433,6 +433,11 @@ def run(args):
                 for k in ('clipzs_gen_macro', 'clipzs_real_macro', 'clipzs_gap',
                           'clipzs_ratio', 'n_single_abnormality'):
                     merged[f'clip_label_{k}'] = cl.get(k)
+                for side in ('gen', 'real'):        # zero-shot retrieval over labels
+                    zr = cl.get(f'clipzs_{side}_ret') or {}
+                    for m in ('R@1', 'R@5', 'mAP'):
+                        if m in zr:
+                            merged[f'clip_label_clipzs_{side}_{m}'] = zr[m]
                 if cl.get('labelret_gen_i2t'):
                     merged['clip_label_ret_gen_mAP'] = cl['labelret_gen_i2t'].get('mAP')
                     merged['clip_label_ret_real_mAP'] = cl['labelret_real_i2t'].get('mAP')
