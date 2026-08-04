@@ -256,13 +256,7 @@ def parse_args():
     p.add_argument('--device', default='cpu')
     p.add_argument('--batch_size', default=16, type=int)
     p.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
-                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips',
-                            'label', 'clip_diagnose'])
-    # clip_diagnose (opt-in): CLIP evaluator validity checks on REAL images
-    p.add_argument('--clip_prompt_template', default='{label}',
-                   help="zero-shot prompt template, e.g. 'findings consistent with {label}'")
-    p.add_argument('--clip_bootstrap', default=2000, type=int)
-    p.add_argument('--clip_permutations', default=5000, type=int)
+                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips', 'label'])
     p.add_argument('--paired_from_split', action='store_true',
                    help='enable paired ssim/psnr/lpips AND label-agreement: gen image '
                         'index maps to the eval-split real image / study (only valid '
@@ -418,34 +412,6 @@ def run(args):
             merged.update(clip_res)
         except Exception as e:
             print(f'[clip] skipped ({type(e).__name__}: {e})')
-
-    if 'clip_diagnose' in args.metrics:
-        try:
-            from Eval_metric.clip_diagnose import run_diagnose
-            dcfg = argparse.Namespace(
-                backend=args.clip_backend, clip_model=getattr(args, 'clip_model', 'ViT-B-32'),
-                clip_pretrained=getattr(args, 'clip_pretrained', 'openai'),
-                batch_size=getattr(args, 'clip_batch_size', 32), device=args.device,
-                root_path=args.root_path, split_csv=args.split_csv, eval_split=args.eval_split,
-                chexpert_csv=getattr(args, 'chexpert_csv', None), image_size=args.image_size,
-                max_length=args.max_length, max_real=args.max_real,
-                text_mode=getattr(args, 'clip_text_mode', 'FINDINGS/IMPRESSION'),
-                prompt_template=getattr(args, 'clip_prompt_template', '{label}'),
-                retrieval_ks=(getattr(args, 'clip_retrieval_ks', None) or [1, 5, 10]),
-                bootstrap=getattr(args, 'clip_bootstrap', 2000),
-                permutations=getattr(args, 'clip_permutations', 5000),
-                output=os.path.join(args.out_dir, 'clip_diagnose.json'))
-            diag = run_diagnose(dcfg)
-            with open(os.path.join(args.out_dir, 'clip_diagnose.json'), 'w') as f:
-                json.dump(diag, f, indent=2)
-            for k in ('signal_mean', 'signal_ci_low', 'signal_ci_high',
-                      'signal_ci_excludes_zero', 'signal_perm_pvalue',
-                      'zeroshot_label_auroc_macro'):
-                merged[f'clipdiag_{k}'] = diag.get(k)
-            if diag.get('label_retrieval_i2t'):
-                merged['clipdiag_label_retrieval_mAP_i2t'] = diag['label_retrieval_i2t'].get('mAP')
-        except Exception as e:
-            print(f'[clip_diagnose] skipped ({type(e).__name__}: {e})')
 
     summary = _merge_summary(args.out_dir, merged)
     dump_ckpt_info(args.ckpt, args.out_dir)
