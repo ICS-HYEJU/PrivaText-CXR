@@ -85,7 +85,10 @@ def parse_args():
     e.add_argument('--eval_batch_size', default=16, type=int,
                    help='batch size for feature extraction')
     e.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
-                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips', 'label'])
+                   choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips',
+                            'label', 'clip_label'])
+    e.add_argument('--clip_prompt_template', default='{label}')
+    e.add_argument('--clip_label_min_pos', default=10, type=int)
     e.add_argument('--xrv_weights', nargs='+',
                    default=['densenet121-res224-all', 'densenet121-res224-nih'])
     e.add_argument('--label_min_pos', default=10, type=int)
@@ -193,6 +196,8 @@ def build_eval_cfg(args, gen_dir):
         clip_text_mode=(args.clip_text_mode or args.text_mode),  # default: match generation
         clip_retrieval_ks=args.clip_retrieval_ks, clip_dedup=args.clip_dedup,
         clip_batch_size=args.clip_batch_size,
+        clip_prompt_template=args.clip_prompt_template,
+        clip_label_min_pos=args.clip_label_min_pos,
         xrv_weights=args.xrv_weights, chexpert_csv=args.chexpert_csv,
         label_min_pos=args.label_min_pos,
         # paired ssim/psnr/lpips are only valid when the gen index maps to the
