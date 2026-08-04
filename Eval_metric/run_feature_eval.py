@@ -257,10 +257,13 @@ def parse_args():
     p.add_argument('--batch_size', default=16, type=int)
     p.add_argument('--metrics', nargs='+', default=['fds', 'tsne'],
                    choices=['fds', 'tsne', 'fid', 'clip', 'ssim', 'psnr', 'lpips',
-                            'label', 'clip_diagnose'])
-    # clip_diagnose (opt-in): CLIP evaluator validity checks on REAL images
+                            'label', 'clip_label', 'clip_diagnose'])
+    # clip_label (primary CLIP): zero-shot label AUROC + label-level retrieval
+    #   on single-abnormality studies, IMPRESSION text, "{label}" prompt.
     p.add_argument('--clip_prompt_template', default='{label}',
-                   help="zero-shot prompt template, e.g. 'findings consistent with {label}'")
+                   help="label prompt template, e.g. 'findings consistent with {label}'")
+    p.add_argument('--clip_label_min_pos', default=10, type=int,
+                   help='min single-abnormality studies per label to score it')
     p.add_argument('--clip_bootstrap', default=2000, type=int)
     p.add_argument('--clip_permutations', default=5000, type=int)
     p.add_argument('--paired_from_split', action='store_true',
@@ -418,6 +421,23 @@ def run(args):
             merged.update(clip_res)
         except Exception as e:
             print(f'[clip] skipped ({type(e).__name__}: {e})')
+
+    if 'clip_label' in args.metrics:
+        try:
+            from Eval_metric.clip_labelret import run_clip_label
+            args.output = os.path.join(args.out_dir, 'clip_label.json')
+            cl = run_clip_label(args)
+            if cl:
+                with open(os.path.join(args.out_dir, 'clip_label.json'), 'w') as f:
+                    json.dump(cl, f, indent=2)
+                for k in ('clipzs_gen_macro', 'clipzs_real_macro', 'clipzs_gap',
+                          'clipzs_ratio', 'n_single_abnormality'):
+                    merged[f'clip_label_{k}'] = cl.get(k)
+                if cl.get('labelret_gen_i2t'):
+                    merged['clip_label_ret_gen_mAP'] = cl['labelret_gen_i2t'].get('mAP')
+                    merged['clip_label_ret_real_mAP'] = cl['labelret_real_i2t'].get('mAP')
+        except Exception as e:
+            print(f'[clip_label] skipped ({type(e).__name__}: {e})')
 
     if 'clip_diagnose' in args.metrics:
         try:

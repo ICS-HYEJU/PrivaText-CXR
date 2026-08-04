@@ -144,6 +144,23 @@ MIMIC-CXR (image + report)
   권장). 중복 프롬프트가 많으면 `duplicate_prompts`로 확인. 또한 **FINDINGS/IMPRESSION 프롬프트로
   생성한 이미지**여야 정합 해석이 맞으므로, 정책 변경 시 **모든 ε 재생성** 권장.
 
+### 4.4a CLIP 주 지표 — `clip_label` (label-level, 권장) ⭐
+
+report-level exact-text cosine은 무의미(matched≈shuffled)했지만, MedCLIP은 **병변 수준에서
+작동**함이 진단으로 확인됨(zero-shot AUROC macro≈0.68). 그래서 CLIP 주 지표를 **label-level**로 전환:
+- **대상**: **단일 이상소견(single-abnormality) 스터디만** — CheXpert 이상소견 12종 중 **정확히 1개**만
+  양성(‘No Finding’·‘Support Devices’ 제외, 2개 이상이면 제외). 각 스터디가 **깨끗한 단일 라벨**을 가짐.
+- **텍스트 = IMPRESSION 섹션**, **zero-shot 프롬프트 = 라벨명(`{label}`)**.
+- 두 지표를 gen·real 모두 산출:
+  1. **zero-shot label AUROC**: `cos(image, "{label}")` vs 스터디 단일 라벨. macro(min-support 통과 라벨).
+     키: `clip_label_clipzs_gen_macro`, `_real_macro`, **`_clipzs_gap`(=real−gen,↓)**, `_clipzs_ratio`(↑).
+  2. **label-level retrieval**(relevance=같은 단일 라벨, 후보 텍스트=IMPRESSION): `clip_label_ret_gen_mAP`,
+     `_ret_real_mAP` (+ `clip_label.json`에 R@k/P@k 전체).
+- **읽는 법**: `clipzs_gap`↓·`ratio`→1이면 생성물이 real 수준의 병변-정합. XRV label-agreement와 상호보완
+  (이건 MedCLIP 텍스트-이미지 공간 기준). `--metrics clip_label`, `--paired_from_split` 필요.
+- **주의**: 기존 `clip`(report-level cosine/exact-retrieval)은 **auxiliary(참고)** 로만. 논문 표기 권장:
+  "CLIP-based scores were treated as auxiliary semantic alignment measures."
+
 ### 4.4b CLIP 유효성 진단 — `clip_diagnose` (opt-in)
 
 real image-report cosine이 shuffled와 거의 같으면(signal≈0) CLIP 지표를 그대로 쓸 수 없다.
