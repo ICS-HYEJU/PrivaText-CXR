@@ -57,6 +57,7 @@ import os
 import sys
 import argparse
 import math
+import random
 import time
 
 import numpy as np
@@ -67,7 +68,7 @@ from torchvision import transforms
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 _this_dir  = os.path.dirname(os.path.abspath(__file__))
-_proj_root = os.path.normpath(os.path.join(_this_dir, '..'))
+_proj_root = _this_dir
 
 for _d in [_proj_root, _this_dir]:
     if _d not in sys.path:
@@ -88,6 +89,50 @@ try:
     from Modules.BioBERT_embedder import BioBERTEmbedder
 except ImportError:
     BioBERTEmbedder = None
+
+
+# =============================================================================
+# Reproducibility
+# =============================================================================
+
+def set_seed(seed: int) -> None:
+    """
+    Fix every RNG this script touches so that re-running with an identical
+    --seed (and otherwise identical config) reproduces the same run:
+      - LoRA / model weight initialisation
+      - DataLoader shuffling order (RandomSampler falls back to the global
+        torch generator when none is given explicitly)
+      - Opacus Poisson sampling (UniformWithReplacementSampler also falls
+        back to the global torch generator)
+      - DP Gaussian noise draws (opacus._generate_noise uses the global
+        generator when noise_generator=None)
+
+    Note: cudnn.deterministic trades some throughput for exact repeatability
+    of convolution/attention kernels; safe to leave on for DP fine-tuning
+    since batch sizes here are tiny (physical_batch=1).
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Best-effort only: PYTHONHASHSEED must be set *before* the interpreter
+    # starts to actually affect hash randomisation, so this line documents
+    # intent rather than guaranteeing it. Export PYTHONHASHSEED=<seed> in the
+    # launching shell for full determinism if hash order ever matters here.
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    print(f'[Seed] fixed random/np/torch(+cuda) RNGs to seed={seed}')
+
+
+def _seed_worker(worker_id: int) -> None:
+    """DataLoader worker_init_fn: re-seed python/numpy RNGs per worker from
+    torch's own per-worker seed, so num_workers > 0 stays reproducible too
+    (torch's per-worker torch RNG is already seeded automatically)."""
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 # =============================================================================
@@ -120,7 +165,9 @@ def _make_dataset(root_path: str, split: str,
                   split_csv: str = 'mimic-cxr-2.0.0-split.csv',
                   image_size: int = 256,
                   max_length: int = 512,
-                  patient_whitelist=None) -> MIMICCXRDataset:
+                  patient_whitelist=None,
+                  text_mode=None,
+                  chexpert_csv=None) -> MIMICCXRDataset:
     """
     Construct a MIMICCXRDataset for the given split.
 
@@ -133,6 +180,11 @@ def _make_dataset(root_path: str, split: str,
         max_length        : max report character length
         patient_whitelist : optional list of patient_ids (e.g. only p10 subset
                             for D_search); None = use the whole split
+        text_mode         : conditioning text source - None (default, legacy
+                            FINDINGS+IMPRESSION), 'LABEL', 'LABEL+IMPRESSION',
+                            or 'FINDINGS'
+        chexpert_csv      : CheXpert label CSV (only used when text_mode is
+                            'LABEL'/'LABEL+IMPRESSION'); see MIMICCXRDataset
     """
     valid_splits = ('train', 'validate', 'test')
     if split not in valid_splits:
@@ -145,6 +197,8 @@ def _make_dataset(root_path: str, split: str,
         image_size        = image_size,
         max_length        = max_length,
         patient_whitelist = patient_whitelist,
+        text_mode         = text_mode,
+        chexpert_csv      = chexpert_csv,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -158,6 +212,14 @@ def parse_args():
         description='DP-SGD Fine-Tuning of LDM on MIMIC-CXR (original data + split CSV)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
+    # REPRODUCIBILITY ------------------------------------------------------------
+    parser.add_argument('--seed', default=42, type=int,
+                        help='Global RNG seed (model init, DataLoader shuffling, '
+                             'Opacus Poisson sampling, DP noise draws). Keep this '
+                             'fixed across runs that should only differ in '
+                             '--target_epsilon so the comparison isolates the '
+                             'privacy-noise effect from run-to-run randomness.')
 
     # DEVICE -------------------------------------------------------------------
     parser.add_argument('--device_id', default='1',
@@ -189,6 +251,19 @@ def parse_args():
     parser.add_argument('--val_batches', default=-1, type=int)
     parser.add_argument('--image_size',  default=256,  type=int)
     parser.add_argument('--max_length',  default=512,  type=int)
+    parser.add_argument('--text_mode', default=None,
+                        choices=['LABEL', 'LABEL+IMPRESSION', 'FINDINGS'],
+                        help="Conditioning text source. Omit for the legacy "
+                             "FINDINGS+IMPRESSION concatenation. 'LABEL'/"
+                             "'LABEL+IMPRESSION' build \"LABEL: <chexpert "
+                             "positive pathologies>\" from --chexpert_csv; "
+                             "studies with no positive CheXpert label are "
+                             "dropped from the dataset in those two modes.")
+    parser.add_argument('--chexpert_csv', default=None,
+                        help='CheXpert label CSV (absolute path, or relative '
+                             'to --root_path). Only used when --text_mode is '
+                             "'LABEL' or 'LABEL+IMPRESSION'. Default: "
+                             'mimic-cxr-2.0.0-chexpert.csv under root_path.')
     parser.add_argument('--num_workers', default=0,    type=int)
     parser.add_argument('--pin_memory',  default=False)
 
@@ -266,7 +341,11 @@ def parse_args():
     parser.add_argument('--noise_multiplier', default=None,  type=float)
     parser.add_argument('--logical_batch',    default=256,   type=int)
     parser.add_argument('--physical_batch',   default=1,     type=int)
-    parser.add_argument('--ablation_blocks',  default=-1,    type=int)
+    parser.add_argument('--ablation_blocks',  default=-1,    type=int,
+                        help='Which SpatialTransformer blocks are trained '
+                             '(applies under both --use_lora and full DP-SGD): '
+                             '-1 = all 16 blocks; N = only blocks[N-1:] (the '
+                             'last len(blocks)-N+1 blocks).')
     parser.add_argument('--finetune_biobert', default=False)
 
     # LoRA (adapt-lora) --------------------------------------------------------
@@ -280,7 +359,22 @@ def parse_args():
     parser.add_argument('--eps_milestones', default=[1, 3, 5, 10],
                         nargs='+', type=float,
                         help='Save a LoRA adapter file each time epsilon crosses '
-                             'one of these budgets (LoRA mode only)')
+                             'one of these budgets (LoRA mode only). '
+                             '--target_epsilon is always treated as an implicit '
+                             'extra milestone, and a ldm_lora_final.pt is always '
+                             'saved at the end of training, so the checkpoint for '
+                             'the target privacy budget never depends on this '
+                             'list matching --target_epsilon exactly.')
+    parser.add_argument('--save_lora_snapshots', default=True,
+                        type=lambda x: str(x).lower() != 'false',
+                        help='LoRA mode only. Also save a small LoRA-only '
+                             'snapshot (adapter weights only, no base UNet '
+                             'weights or optimizer state) every --save_every '
+                             'epochs, alongside the full ldm_dp_epoch####.pt '
+                             'checkpoint - useful for sampling mid-training '
+                             'without waiting for the next eps milestone. Set '
+                             'to false to skip these and only get LoRA files '
+                             'at eps milestones / training end.')
 
     # Training -----------------------------------------------------------------
     parser.add_argument('--epochs',       default=10,    type=int)
@@ -426,27 +520,43 @@ def _dp_raw_collate_fn(samples):
     return torch.stack(images), list(reports)
 
 
-def build_dp_loader(dataset, logical_batch, num_workers=0, pin_memory=False):
+def build_dp_loader(dataset, logical_batch, num_workers=0, pin_memory=False,
+                     seed=None):
+    # Explicit generator (rather than relying on the global torch RNG) so the
+    # shuffle order - and, via opacus.DPDataLoader.from_data_loader's fallback
+    # to data_loader.generator, the Poisson-sampling order too - is pinned to
+    # --seed regardless of anything else that consumes global RNG state
+    # before this loader is constructed.
+    generator = torch.Generator()
+    if seed is not None:
+        generator.manual_seed(seed)
     return DataLoader(
         dataset,
-        batch_size  = logical_batch,
-        shuffle     = True,
-        num_workers = num_workers,
-        drop_last   = True,
-        pin_memory  = pin_memory and torch.cuda.is_available(),
-        collate_fn  = _dp_raw_collate_fn,
+        batch_size     = logical_batch,
+        shuffle        = True,
+        num_workers    = num_workers,
+        drop_last      = True,
+        pin_memory     = pin_memory and torch.cuda.is_available(),
+        collate_fn     = _dp_raw_collate_fn,
+        generator      = generator,
+        worker_init_fn = _seed_worker if num_workers > 0 else None,
     )
 
 
-def build_val_loader(dataset, batch_size, num_workers=0):
+def build_val_loader(dataset, batch_size, num_workers=0, seed=None):
+    generator = torch.Generator()
+    if seed is not None:
+        generator.manual_seed(seed)
     return DataLoader(
         dataset,
-        batch_size  = batch_size,
-        shuffle     = False,
-        num_workers = num_workers,
-        drop_last   = False,
-        pin_memory  = False,
-        collate_fn  = _raw_collate_fn,
+        batch_size     = batch_size,
+        shuffle        = False,
+        num_workers    = num_workers,
+        drop_last      = False,
+        pin_memory     = False,
+        collate_fn     = _raw_collate_fn,
+        generator      = generator,
+        worker_init_fn = _seed_worker if num_workers > 0 else None,
     )
 
 
@@ -483,8 +593,24 @@ def _fmt_hms(seconds: float) -> str:
     return f'{h}h{m:02d}m{s:02d}s'
 
 
+def compute_lora_milestones(eps_milestones, target_epsilon):
+    """
+    Merge --eps_milestones with --target_epsilon so the LoRA checkpoint for
+    the actual privacy budget being trained for is always produced, whether
+    or not the user's milestone list happens to include that exact value.
+    """
+    return sorted(set(eps_milestones) | {target_epsilon})
+
+
 def save_dp_checkpoint(save_path, model, optimizer, privacy_engine,
                        epoch, global_step, args, target_delta):
+    """
+    Save the FULL model + optimizer state (large; includes every frozen base
+    weight even in LoRA mode). This is the --resume_ckpt / crash-recovery
+    artifact, not the deployment artifact - in LoRA mode (--use_lora), the
+    lightweight adapter-only file from save_lora_checkpoint() is what
+    LDM_dp_inference.py's --lora_ckpt expects for a given privacy budget.
+    """
     eps_spent = privacy_engine.get_epsilon(target_delta)
     torch.save({
         'epoch'         : epoch,
@@ -623,6 +749,7 @@ def build_scheduler(optimizer, warmup_steps, total_steps,
 
 def main():
     args = parse_args()
+    set_seed(args.seed)
 
     # ── Devices ───────────────────────────────────────────────────────────────
     device = torch.device(f'cuda:{args.device_id}' if torch.cuda.is_available() else 'cpu')
@@ -637,6 +764,7 @@ def main():
         print(f'Offload device (VAE/BioBERT) : {offload_device}  [model parallelism ON]')
     print(f'Root path : {args.root_path}')
     print(f'Split CSV : {args.split_csv}')
+    print(f'Text mode : {args.text_mode or "FINDINGS+IMPRESSION (legacy)"}')
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     # DP budget isolation: restrict to the patient subset (e.g. p10 part) for
@@ -650,6 +778,8 @@ def main():
         image_size        = args.image_size,
         max_length        = args.max_length,
         patient_whitelist = train_whitelist,
+        text_mode         = args.text_mode,
+        chexpert_csv      = args.chexpert_csv,
     )
     n_train = len(train_dataset)
     print(f'[Train] training samples: {n_train}')
@@ -663,11 +793,13 @@ def main():
     if args.do_validation:
         try:
             val_dataset = _make_dataset(
-                root_path  = args.root_path,
-                split      = 'validate',
-                split_csv  = args.split_csv,
-                image_size = args.image_size,
-                max_length = args.max_length,
+                root_path    = args.root_path,
+                split        = 'validate',
+                split_csv    = args.split_csv,
+                image_size   = args.image_size,
+                max_length   = args.max_length,
+                text_mode    = args.text_mode,
+                chexpert_csv = args.chexpert_csv,
             )
             print(f'[Validation] validate samples: {len(val_dataset)}')
         except FileNotFoundError as e:
@@ -747,9 +879,11 @@ def main():
         logical_batch = args.logical_batch,
         num_workers   = args.num_workers,
         pin_memory    = args.pin_memory,
+        seed          = args.seed,
     )
     val_loader = (
-        build_val_loader(val_dataset, args.physical_batch, args.num_workers)
+        build_val_loader(val_dataset, args.physical_batch, args.num_workers,
+                          seed=args.seed)
         if val_dataset is not None else None
     )
 
@@ -776,6 +910,7 @@ def main():
             alpha            = args.lora_alpha,
             dropout          = args.lora_dropout,
             finetune_biobert = args.finetune_biobert,
+            ablation_blocks  = args.ablation_blocks,
         )
         if not attn_params:
             raise RuntimeError('configure_lora_params returned empty param list.')
@@ -872,8 +1007,12 @@ def main():
           f'chunks/step~{approx_chunks}  sigma={sigma:.4f}')
     print('=' * 60)
 
-    # LoRA: track which epsilon milestones have been saved (LoRA mode only)
+    # LoRA: track which epsilon milestones have been saved (LoRA mode only).
+    # target_epsilon is always folded in as an implicit milestone so the
+    # checkpoint for the actual privacy budget being trained for never
+    # depends on --eps_milestones happening to include it.
     saved_milestones = set()
+    lora_milestones  = compute_lora_milestones(args.eps_milestones, args.target_epsilon)
 
     # Loss history for CSV logging + loss_curve.png
     step_hist, step_loss_hist = [], []
@@ -968,8 +1107,9 @@ def main():
                   f'eps={args.target_epsilon}. Consider early stopping.')
 
         # LoRA: save a small adapter file each time we cross a budget milestone
+        # (includes --target_epsilon itself, see lora_milestones above)
         if args.use_lora:
-            for m in sorted(args.eps_milestones):
+            for m in lora_milestones:
                 if m not in saved_milestones and eps_now >= m:
                     saved_milestones.add(m)
                     lora_path = os.path.join(
@@ -997,6 +1137,23 @@ def main():
                 target_delta   = args.target_delta,
             )
 
+            # Optional: a small LoRA-only snapshot at the same cadence, so a
+            # lightweight deployable artifact exists without waiting for the
+            # next eps milestone. Independent of the milestone saves above -
+            # toggle with --save_lora_snapshots.
+            if args.use_lora and args.save_lora_snapshots:
+                lora_snapshot_path = os.path.join(
+                    args.save_dir, f'ldm_lora_epoch{epoch+1:04d}.pt')
+                save_lora_checkpoint(
+                    save_path      = lora_snapshot_path,
+                    model          = ldm,
+                    privacy_engine = privacy_engine,
+                    epoch          = epoch + 1,
+                    global_step    = global_step,
+                    args           = args,
+                    target_delta   = args.target_delta,
+                )
+
     final_path = os.path.join(args.save_dir, 'ldm_dp_final.pt')
     save_dp_checkpoint(
         save_path      = final_path,
@@ -1008,6 +1165,24 @@ def main():
         args           = args,
         target_delta   = args.target_delta,
     )
+
+    # LoRA: always save a final adapter-only file, regardless of whether the
+    # per-epoch milestone loop above already fired for target_epsilon. This
+    # guarantees the model at the actual final eps_final always has a small,
+    # deployable LoRA artifact - ldm_dp_final.pt above is the full-state
+    # resume checkpoint, not the deployment one.
+    if args.use_lora:
+        final_lora_path = os.path.join(args.save_dir, 'ldm_lora_final.pt')
+        save_lora_checkpoint(
+            save_path      = final_lora_path,
+            model          = ldm,
+            privacy_engine = privacy_engine,
+            epoch          = start_epoch + args.epochs,
+            global_step    = global_step,
+            args           = args,
+            target_delta   = args.target_delta,
+        )
+
     eps_final = privacy_engine.get_epsilon(args.target_delta)
     total_train = time.time() - train_start
     print(f'\nTraining complete.  Final eps={eps_final:.4f}  '
