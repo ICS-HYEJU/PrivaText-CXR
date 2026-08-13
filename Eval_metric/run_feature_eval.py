@@ -330,7 +330,9 @@ def run(args):
         from Eval_metric.fds import compute_fds
         pca_dim = getattr(args, 'pca_dim', None)
         fds = compute_fds(feats_real, feats_gen, reg=args.reg,
-                          cov=getattr(args, 'fds_cov', 'lw'), pca_dim=pca_dim)
+                          cov=getattr(args, 'fds_cov', 'lw'), pca_dim=pca_dim,
+                          perplexity=getattr(args, 'perplexity', 30.0),
+                          seed=getattr(args, 'seed', 0))
         fds.update({'eval_model': args.eval_model,
                     'n_real': int(len(feats_real)), 'n_gen': int(len(feats_gen)),
                     'feature_dim': int(feats_real.shape[1]),
@@ -338,9 +340,12 @@ def run(args):
         with open(os.path.join(args.out_dir, 'fds.json'), 'w') as f:
             json.dump(fds, f, indent=2)
         print(f'[fds] gen||real={fds["fds_gen_given_real"]:.4f}  '
-              f'real||gen={fds["fds_real_given_gen"]:.4f}  sym={fds["fds_symmetric"]:.4f}')
+              f'real||gen={fds["fds_real_given_gen"]:.4f}  '
+              f'sym={fds["fds_symmetric"]:.4f}  '
+              f'MT_DDPM_FDS={fds["MT_DDPM_FDS"]:.4f}')
         merged.update({k: fds[k] for k in
-                       ('fds_gen_given_real', 'fds_real_given_gen', 'fds_symmetric')})
+                       ('fds_gen_given_real', 'fds_real_given_gen',
+                        'fds_symmetric', 'MT_DDPM_FDS')})
 
     if 'fid' in args.metrics:
         try:
