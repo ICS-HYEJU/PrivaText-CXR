@@ -194,6 +194,7 @@ class LatentDiffusionDP(LatentDiffusion):
         dropout         : float = 0.0,
         finetune_biobert: bool  = True,
         targets         = None,
+        ablation_blocks : int   = -1,
     ) -> list:
         """
         Freeze everything, inject LoRA into cross-attention Linear layers, and
@@ -207,6 +208,9 @@ class LatentDiffusionDP(LatentDiffusion):
             finetune_biobert : also train self.embedder.proj (full, small layer)
             targets          : cross-attention attr names to adapt
                                (default to_q/to_k/to_v/to_out)
+            ablation_blocks  : which SpatialTransformer blocks get LoRA
+                               adapters, same convention as configure_dp_params
+                               (-1 = all blocks; N = only blocks[N-1:])
 
         Returns:
             list[nn.Parameter] ? LoRA params (+ BioBERT proj) for AdamW
@@ -223,7 +227,8 @@ class LatentDiffusionDP(LatentDiffusion):
 
         # 2. Inject LoRA into UNet cross-attention; only A/B are trainable
         inject_lora_cross_attention(self.model, rank=rank, alpha=alpha,
-                                    dropout=dropout, targets=targets)
+                                    dropout=dropout, targets=targets,
+                                    ablation_blocks=ablation_blocks)
         # Belt-and-suspenders: LoRALinear already places adapters on their base
         # layer's device, but ensure the whole UNet (incl. new adapters) shares
         # one device.  self.model (DiffusionWrapper+UNet) lives on the main

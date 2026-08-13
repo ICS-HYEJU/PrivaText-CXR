@@ -141,28 +141,46 @@ def inject_lora_cross_attention(model: nn.Module,
                                 rank: int = 4,
                                 alpha: float = 4.0,
                                 dropout: float = 0.0,
-                                targets=DEFAULT_TARGETS) -> int:
+                                targets=DEFAULT_TARGETS,
+                                ablation_blocks: int = -1) -> int:
     """
-    Inject LoRA into every CrossAttention module's target Linear layers.
+    Inject LoRA into CrossAttention modules' target Linear layers, restricted
+    to a subset of SpatialTransformer blocks when ablation_blocks is set.
 
     Args:
-        model   : root module (e.g. ldm.model, the UNet)
-        rank    : LoRA rank
-        alpha   : LoRA scaling numerator (scale = alpha / rank)
-        dropout : LoRA-branch dropout
-        targets : attribute names to adapt (default to_q/to_k/to_v/to_out)
+        model           : root module (e.g. ldm.model, the UNet)
+        rank            : LoRA rank
+        alpha           : LoRA scaling numerator (scale = alpha / rank)
+        dropout         : LoRA-branch dropout
+        targets         : attribute names to adapt (default to_q/to_k/to_v/to_out)
+        ablation_blocks : which SpatialTransformer blocks get LoRA adapters,
+                          in the SAME convention as configure_dp_params:
+                            -1 : every block (default, current behaviour)
+                             N : only blocks[N-1:] (the last len(blocks)-N+1
+                                 blocks) -- blocks NOT selected keep their
+                                 plain frozen nn.Linear, untouched.
 
     Returns:
         number of Linear layers wrapped
     """
+    spatial_modules = [
+        m for m in model.modules() if type(m).__name__ == 'SpatialTransformer'
+    ]
     count = 0
     n_attn = 0
-    for attn in _iter_cross_attention(model):
-        n_attn += 1
-        for attr in targets:
-            count += _wrap_attr(attn, attr, rank, alpha, dropout)
+    n_blocks_injected = 0
+    for i, block in enumerate(spatial_modules):
+        if not (ablation_blocks == -1 or (i + 1) >= ablation_blocks):
+            continue
+        n_blocks_injected += 1
+        for attn in _iter_cross_attention(block):
+            n_attn += 1
+            for attr in targets:
+                count += _wrap_attr(attn, attr, rank, alpha, dropout)
     print(f'[lora] injected into {count} Linear layer(s) across {n_attn} '
-          f'CrossAttention module(s)  (rank={rank}, alpha={alpha})')
+          f'CrossAttention module(s) in {n_blocks_injected}/{len(spatial_modules)} '
+          f'SpatialTransformer block(s)  (ablation_blocks={ablation_blocks}, '
+          f'rank={rank}, alpha={alpha})')
     return count
 
 

@@ -345,7 +345,9 @@ def build_and_load_ldm(args, device):
             # (a) dedicated adapter file (ldm_lora_eps*.pt): base = --dp_ckpt
             rank  = blob.get('lora_rank', 4)
             alpha = blob.get('lora_alpha', float(rank))
-            inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha)
+            ablation_blocks = (blob.get('args', {}) or {}).get('ablation_blocks', -1)
+            inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha,
+                                        ablation_blocks=ablation_blocks)
             _, unexpected = load_lora_state_dict(ldm, blob['lora'], strict=False)
             print(f'[lora] adapter {args.lora_ckpt}  loaded={len(blob["lora"])}  '
                   f'unexpected={len(unexpected)}  '
@@ -366,7 +368,9 @@ def build_and_load_ldm(args, device):
                     "Load it via --dp_ckpt WITHOUT --lora_ckpt instead.")
             rank  = a.get('lora_rank', 4)
             alpha = a.get('lora_alpha', float(rank))
-            inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha)
+            ablation_blocks = a.get('ablation_blocks', -1)
+            inject_lora_cross_attention(ldm.model, rank=rank, alpha=alpha,
+                                        ablation_blocks=ablation_blocks)
             missing, unexpected = ldm.load_state_dict(model_sd, strict=False)
             print(f'[lora] full ckpt {args.lora_ckpt}  (base+LoRA)  '
                   f'lora_keys={len(lora_keys)}  missing={len(missing)}  '
