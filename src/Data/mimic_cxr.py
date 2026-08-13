@@ -48,12 +48,75 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 try:
-    sys.path.insert(0, '/home/hjchoi/PycharmProjects/PrivaText-CXR')
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from Modules.BioBERT_embedder import BioBERTEmbedder
 except ImportError:
     BioBERTEmbedder = None
     print("[mimic_cxr] WARNING: BioBERTEmbedder not found. "
           "dataset_loader() will not be available.")
+
+
+# =============================================================================
+# Report section parsing (module-level, shared by the legacy path and the
+# new text_mode path so both stay in sync)
+# =============================================================================
+
+_SECTION_RE = re.compile(
+    r"(FINDINGS|IMPRESSION)\s*:(.*?)(?=\n[A-Z ]+:|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _split_sections(text: str) -> dict:
+    """Map {'findings': ..., 'impression': ...} for whichever sections are present."""
+    return {
+        name.lower(): content.strip()
+        for name, content in _SECTION_RE.findall(text)
+    }
+
+
+# =============================================================================
+# CheXpert label loading (text_mode='LABEL' / 'LABEL+IMPRESSION')
+# =============================================================================
+
+def _load_chexpert_gt(csv_path: str):
+    """
+    Load CheXpert labels keyed by (subject_id, study_id).
+
+    Returns:
+        gt         : dict[(subject_id:int, study_id:int)] -> {label_col: float}
+                      (blank cells -> NaN; -1 = uncertain, 1 = positive,
+                      0 = negative, NaN = not mentioned)
+        label_cols : list[str] - pathology columns, in the CSV's own column order
+    """
+    import pandas as pd
+
+    df = pd.read_csv(csv_path)
+    label_cols = [c for c in df.columns if c not in ("subject_id", "study_id")]
+    subj = df["subject_id"].astype(int).to_numpy()
+    stud = df["study_id"].astype(int).to_numpy()
+    vals = df[label_cols].to_numpy(dtype=float)
+
+    gt = {}
+    for i in range(len(df)):
+        gt[(int(subj[i]), int(stud[i]))] = {
+            label_cols[j]: vals[i, j] for j in range(len(label_cols))
+        }
+    return gt, label_cols
+
+
+def _labels_to_text(row: dict, label_cols) -> str:
+    """
+    Build 'LABEL: a, b, c' from a CheXpert GT row, keeping only columns that
+    are positive (== 1.0). Returns None when no column is positive (caller
+    drops the sample) - uncertain (-1) and missing (NaN) values are excluded,
+    matching the project's existing CheXpert evaluation convention
+    (see Eval_metric/downstream_cls.py).
+    """
+    positives = [col for col in label_cols if row.get(col) == 1.0]
+    if not positives:
+        return None
+    return "LABEL: " + ", ".join(positives)
 
 
 # =============================================================================
@@ -81,6 +144,20 @@ def parse_args():
                         choices=["train", "validate", "test"])
     parser.add_argument("--image_size",  type=int, default=256)
     parser.add_argument("--max_length",  type=int, default=512)
+
+    # Conditioning text mode  -  None (default) keeps the legacy
+    # FINDINGS+IMPRESSION concatenation for backward compatibility.
+    parser.add_argument("--text_mode", type=str, default=None,
+                        choices=["LABEL", "LABEL+IMPRESSION", "FINDINGS"],
+                        help="Conditioning text source. Omit for the legacy "
+                             "FINDINGS+IMPRESSION concatenation. 'LABEL' and "
+                             "'LABEL+IMPRESSION' require --chexpert_csv "
+                             "(or mimic-cxr-2.0.0-chexpert.csv under root_path).")
+    parser.add_argument("--chexpert_csv", type=str, default=None,
+                        help="CheXpert label CSV path (absolute, or relative "
+                             "to root_path). Only used when --text_mode is "
+                             "'LABEL' or 'LABEL+IMPRESSION'. Default: "
+                             "mimic-cxr-2.0.0-chexpert.csv under root_path.")
 
     # DICOM integrity filtering
     parser.add_argument("--validate_dicom", action="store_true", default=True,
@@ -130,6 +207,17 @@ class MIMICCXRDataset(Dataset):
 
         self.validate_dicom = getattr(args, "validate_dicom", True)
         self.dicom_cache    = getattr(args, "dicom_cache", None)
+
+        # Conditioning text mode. None (default) = legacy FINDINGS+IMPRESSION
+        # concatenation, unchanged for every existing caller that doesn't pass
+        # text_mode explicitly (dataset_loader(), LDM_train.py, ...).
+        self.text_mode = getattr(args, "text_mode", None)
+        if self.text_mode not in (None, "LABEL", "LABEL+IMPRESSION", "FINDINGS"):
+            raise ValueError(
+                f"[MIMICCXRDataset] unknown text_mode={self.text_mode!r}; "
+                "expected one of None, 'LABEL', 'LABEL+IMPRESSION', 'FINDINGS'"
+            )
+        self.chexpert_csv = getattr(args, "chexpert_csv", None)
 
         # Optional patient-level filter for DP budget-isolated splits
         # (D_search / D_train / D_test).  When set, only samples whose
@@ -182,6 +270,12 @@ class MIMICCXRDataset(Dataset):
             self.samples = [s for s in self.samples
                             if s["patient_id"] in self.patient_whitelist]
 
+        # LABEL / LABEL+IMPRESSION need a CheXpert row per sample. Do this
+        # before DICOM validation (which decodes pixel data - expensive) so
+        # samples without a usable label are dropped as cheaply as possible.
+        if self.text_mode in ("LABEL", "LABEL+IMPRESSION"):
+            self.samples = self._attach_chexpert_labels(self.samples)
+
         n_raw = len(self.samples)
         if self.validate_dicom:
             self.samples = self._filter_corrupted(self.samples)
@@ -203,7 +297,8 @@ class MIMICCXRDataset(Dataset):
         """
         Returns:
             image  : Tensor [1, H, W]  normalised to [-1, 1]
-            report : str  - "FINDINGS: <...> IMPRESSION: <...>"
+            report : str  - conditioning text; format depends on text_mode
+                     (default: "FINDINGS: <...> IMPRESSION: <...>")
         """
         meta = self.samples[idx]
 
@@ -213,7 +308,7 @@ class MIMICCXRDataset(Dataset):
             print(f"[MIMICCXRDataset] load error idx={idx}: {e}")
             image = self._blank_image()
 
-        report = self._load_report(meta["report_path"])
+        report = self._build_text(meta)
         return image, report
 
     # -------------------------------------------------------------------------
@@ -303,6 +398,53 @@ class MIMICCXRDataset(Dataset):
                         })
 
         return samples
+
+    # -------------------------------------------------------------------------
+    # CheXpert label matching (text_mode='LABEL' / 'LABEL+IMPRESSION')
+    # -------------------------------------------------------------------------
+
+    def _resolve_chexpert_csv(self) -> str:
+        csv_path = self.chexpert_csv or "mimic-cxr-2.0.0-chexpert.csv"
+        if not os.path.isabs(csv_path) and not os.path.isfile(csv_path):
+            root = getattr(self, "root_path", None)
+            if root:
+                csv_path = os.path.join(root, csv_path)
+        if not os.path.isfile(csv_path):
+            raise FileNotFoundError(
+                f"[MIMICCXRDataset] CheXpert CSV not found: {csv_path} "
+                "(required for text_mode='LABEL'/'LABEL+IMPRESSION'; pass an "
+                "absolute --chexpert_csv path if not using root_path mode)"
+            )
+        return csv_path
+
+    def _attach_chexpert_labels(self, samples: list) -> list:
+        """
+        Look up each sample's CheXpert row and precompute its 'LABEL: ...'
+        text (stored as sample['label_text']). Samples with no positive label
+        - all uncertain/missing, or no CheXpert row at all - are dropped.
+        """
+        csv_path = self._resolve_chexpert_csv()
+        gt, label_cols = _load_chexpert_gt(csv_path)
+        self.chexpert_label_cols = label_cols
+
+        kept = []
+        dropped = 0
+        for meta in samples:
+            subject_id = int(meta["patient_id"][1:])   # "p10000032" -> 10000032
+            study_id   = int(meta["study_id"][1:])      # "s50414267" -> 50414267
+            row = gt.get((subject_id, study_id))
+            label_text = _labels_to_text(row, label_cols) if row is not None else None
+            if label_text is None:
+                dropped += 1
+                continue
+            meta = dict(meta)
+            meta["label_text"] = label_text
+            kept.append(meta)
+
+        print(f"[MIMICCXRDataset] CheXpert label match ({csv_path}): "
+              f"kept={len(kept)}  dropped={dropped} "
+              "(no positive label / not found in CheXpert CSV)")
+        return kept
 
     # -------------------------------------------------------------------------
     # DICOM integrity filtering
@@ -415,13 +557,14 @@ class MIMICCXRDataset(Dataset):
     def _blank_image(self) -> torch.Tensor:
         return torch.zeros(1, self.image_size, self.image_size)
 
-    def _load_report(self, report_path: str) -> str:
+    def _read_report_raw(self, report_path: str) -> str:
         if not os.path.exists(report_path):
             return ""
-
         with open(report_path, "r", encoding="utf-8") as f:
-            raw = f.read()
+            return f.read()
 
+    def _load_report(self, report_path: str) -> str:
+        raw = self._read_report_raw(report_path)
         report = self._parse_report(raw)
 
         if self.max_length and len(report) > self.max_length:
@@ -431,27 +574,57 @@ class MIMICCXRDataset(Dataset):
 
     def _parse_report(self, text: str) -> str:
         """
-        Extract FINDINGS and IMPRESSION sections.
+        Extract FINDINGS and IMPRESSION sections (legacy concatenation).
         Falls back to full text if neither section is found.
         """
-        pattern = re.compile(
-            r"(FINDINGS|IMPRESSION)\s*:(.*?)(?=\n[A-Z ]+:|$)",
-            re.IGNORECASE | re.DOTALL,
-        )
-        sections = {
-            name.lower(): content.strip()
-            for name, content in pattern.findall(text)
-        }
-
+        sections = _split_sections(text)
         if not sections:
             return text.strip()
 
-        parts = []
-        for key in ("findings", "impression"):
-            if key in sections and sections[key]:
-                parts.append(f"{key.upper()}: {sections[key]}")
-
+        parts = [f"{key.upper()}: {sections[key]}"
+                 for key in ("findings", "impression") if sections.get(key)]
         return " ".join(parts).strip()
+
+    def _extract_section(self, text: str, keys) -> str:
+        """
+        Join whichever of `keys` sections are present, '' if none found.
+        Unlike _parse_report, this never falls back to the full raw text -
+        used by text_mode='FINDINGS'/'LABEL+IMPRESSION' where leaking an
+        unrelated section back in would defeat the point of the mode.
+        """
+        sections = _split_sections(text)
+        parts = [f"{key.upper()}: {sections[key]}" for key in keys if sections.get(key)]
+        return " ".join(parts).strip()
+
+    def _build_text(self, meta: dict) -> str:
+        """
+        Build the conditioning text for one sample according to self.text_mode:
+            None (default)     -> legacy FINDINGS+IMPRESSION concatenation
+            'FINDINGS'          -> "FINDINGS: ..." only; falls back to the
+                                    full report text when the section is absent
+            'LABEL'             -> "LABEL: a, b, c" from CheXpert (precomputed
+                                    in meta['label_text'] by _attach_chexpert_labels)
+            'LABEL+IMPRESSION'  -> "LABEL: a, b, c IMPRESSION: ..."; label only
+                                    when the IMPRESSION section is absent
+        """
+        if self.text_mode is None:
+            return self._load_report(meta["report_path"])
+
+        raw = self._read_report_raw(meta["report_path"])
+
+        if self.text_mode == "FINDINGS":
+            text = self._extract_section(raw, ("findings",)) or raw.strip()
+        elif self.text_mode == "LABEL":
+            text = meta["label_text"]
+        elif self.text_mode == "LABEL+IMPRESSION":
+            impression = self._extract_section(raw, ("impression",))
+            text = meta["label_text"] + (f" {impression}" if impression else "")
+        else:  # pragma: no cover - guarded in __init__
+            raise ValueError(f"Unknown text_mode: {self.text_mode!r}")
+
+        if self.max_length and len(text) > self.max_length:
+            text = text[: self.max_length]
+        return text
 
 
 # =============================================================================
