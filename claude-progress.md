@@ -18,6 +18,18 @@
   + a 1-image, 50-step generation using a known-good LoRA checkpoint. It does **not**
   run a real generate+evaluate cycle — those take 30–90 min per checkpoint on GPU and
   are invoked explicitly via `feature_list.json`'s per-feature `verification` commands.
+- `--ablation_blocks` now works under `--use_lora` too (`pipeline-007`, 2026-08-11):
+  restricts LoRA injection to `blocks[N-1:]` of the 16 SpatialTransformer blocks,
+  mirroring the pre-existing full-DP-SGD `configure_dp_params` semantics exactly.
+  Previously it was silently ignored whenever `use_lora=True` — true for every
+  checkpoint trained so far, including all three `eval-*` entries above (they all
+  trained with the equivalent of `ablation_blocks=-1`, i.e. all 16 blocks).
+- `experiment-ablation-blocks-sweep` (2026-08-11/12): two more checkpoints trained and
+  evaluated, `ablation_blocks=8` (9/16 blocks) and `ablation_blocks=16` (1/16 blocks),
+  same config as the eps10 anchor otherwise. Result is a genuine tradeoff, not a single
+  winner — FID/FDS favor more blocks, CLIP zero-shot label AUROC favors fewer (by a wide
+  margin). Full writeup: `eval_analysis/ablation_blocks_report.md` +
+  `ablation_blocks_dashboard.html`.
 
 ## Known pitfalls (read before touching generation/eval code)
 
@@ -42,8 +54,101 @@
    output in old `EVAL/metric/lr2e-3/impression/*` runs. Treat as permanently lost unless
    reimplemented from the JSON schema (see `feature_list.json` `pipeline-006`, currently
    `blocked` by user decision).
+6. **`--ablation_blocks` used to be silently ignored under `--use_lora`** (it only fed
+   `configure_dp_params`, the non-LoRA path). Fixed 2026-08-11 (`pipeline-007`) — now
+   also honored by `configure_lora_params`/`inject_lora_cross_attention`, and by
+   inference-time LoRA loading in `LDM_dp_inference.py`. Every checkpoint trained
+   *before* 2026-08-11 has `ablation_blocks=-1` recorded in its saved `args` regardless
+   of what was passed at the CLI, since it had no effect either way under LoRA — don't
+   read a pre-2026-08-11 checkpoint's `ablation_blocks` value as meaningful.
+7. **Three distinct "zero-shot" CLIP metric families exist — don't conflate them or
+   call any of them "accuracy".** `clip_label_clipzs_{gen,real}_macro/gap/ratio` is
+   zero-shot label **AUROC** (single-abnormality studies, `cos(image, "{label}")` vs
+   ground truth, real-vs-gen comparable). `clip_label_clipzs_*_R@k/mAP` is a *different*
+   zero-shot label **retrieval** metric off the same scores. `clipdiag_zeroshot_label_
+   auroc_macro` is a real-images-only encoder validity check (no gen counterpart,
+   identical across every model). Also don't confuse any of these with
+   `label_all_auroc_*`/`label_nih_auroc_*`, which are AUROC from the XRV DenseNet-121
+   classifier, not CLIP at all. Full detail in the `clip-metric-terminology` memory.
 
 ## Session log
+
+### 2026-08-12 — ablation_blocks=8/16 sweep: train, generate, evaluate, report
+
+**Goal:** Run the actual sweep enabled by `pipeline-007` — train `ablation_blocks=8`
+and `=16` LoRA checkpoints (same config as the `eps10` anchor), generate+evaluate both,
+and report results as an HTML dashboard (new standing instruction from user, see below).
+
+**Completed:**
+- Trained both on GPU0/GPU1 in parallel: `ablation16` (1/16 blocks) finished in 4h45m,
+  `ablation8` (9/16 blocks) in 5h53m. Both reached `epsilon_spent=8.591346449555628`,
+  identical to the anchor to 4 decimals — confirmed DP-SGD's noise calibration doesn't
+  depend on trainable-parameter count, so the sweep isolates block-count cleanly.
+- Generated 361 images each (reused the existing `LABEL+IMPRESSION` prompt file),
+  md5-cross-checked against the anchor and each other (all distinct).
+- Ran the full 2-stage metric suite (base + CLIP) on both, sequentially per out_dir to
+  avoid the known race-condition pitfall — but ran the two checkpoints' CLIP stages
+  *concurrently* on cuda:0 against each other (different out_dirs, no race risk there,
+  just shared GPU compute).
+- Key finding: **FID/FDS and CLIP zero-shot label AUROC disagree** on which block count
+  is best. FID/FDS improve monotonically with more trained blocks (16 best). CLIP
+  zero-shot label AUROC ratio (`clip_label_clipzs_ratio` -- an AUROC, not an accuracy;
+  see below) improves monotonically with *fewer* trained blocks (1 block best,
+  0.670 vs 16-block's 0.605) — a real, reported-honestly tradeoff, not resolved into a
+  single winner. Label-AUROC splits: the broad 7-pathology set follows FID/FDS, the
+  better-supported NIH-6 set peaks at 9 blocks.
+- New user instruction (durable, saved to memory `html-result-summaries`): all future
+  result summaries must be HTML dashboards, each as its own new artifact (new URL), not
+  a reuse/update of a prior one. Built `eval_analysis/ablation_blocks_dashboard.html`
+  (separate scratchpad file, separate Artifact URL from the first dashboard) alongside
+  the usual markdown report + CSV.
+- Caught (not a bug of mine, but worth recording): `src/Eval_metric/fds.py` gained an
+  extra `MT_DDPM_FDS` field as a local uncommitted change sometime between the anchor's
+  computation and this sweep — present in ablation8/16's summaries, absent from the
+  anchor's. Confirmed via `git status`/`git log` that it's a pre-existing local
+  modification, not something this session introduced; doesn't affect any field used in
+  the comparison.
+
+**Known unresolved / left for later:**
+- No further ablation_blocks values planned unless requested (e.g. 4, 12 for finer
+  resolution between the three tested points).
+- `eval-LI-milestones` (still `not_started`, unrelated to this sweep).
+
+### 2026-08-11 — ablation_blocks support under LoRA
+
+**Goal:** Enable sweeping `--ablation_blocks` (how many of the 16 SpatialTransformer
+blocks get fine-tuned) while keeping the rest of the config identical to the best
+model (`eval-LI-eps10`), to isolate "how many attention blocks does DP-utility
+actually need" as a single clean variable.
+
+**Completed:**
+- Diagnosed that `--ablation_blocks` had zero effect for every checkpoint trained so
+  far, since all of them used `--use_lora` and the flag was only wired into the
+  non-LoRA `configure_dp_params` path.
+- Considered switching to full DP-SGD (`use_lora=False`) to make `ablation_blocks`
+  active, but rejected it: that would also change the trainable-parameter count by
+  ~2 orders of magnitude (LoRA rank-4 adapters vs. full block weights, 44.3% of the
+  101M-param UNet), confounding "block count" with "DP noise-to-signal ratio" — two
+  different variables moving at once.
+- Implemented `ablation_blocks` support directly in the LoRA path instead (see
+  `feature_list.json` `pipeline-007`): `inject_lora_cross_attention` now walks
+  SpatialTransformer blocks and only wraps CrossAttention Linears inside
+  `blocks[N-1:]`, matching `configure_dp_params`'s existing `-1`/`N` convention
+  exactly. Wired through `configure_lora_params`, `LDM_dp_finetune.py`'s training
+  call, and both LoRA-loading paths in `LDM_dp_inference.py` (adapter-only and
+  full-checkpoint-with-embedded-LoRA).
+- Verified: unit-level block/param counts match the `blocks[N-1:]` rule exactly for
+  N ∈ {-1,1,8,16,20} (out-of-range N=20 correctly degrades to 0 blocks, which fails
+  loudly via the existing `RuntimeError('...returned empty param list')` guard rather
+  than silently training nothing); `./init.sh` regression-passed post-change with a
+  pre-existing `ablation_blocks=-1` checkpoint, confirming no behavior change for
+  anything trained before today.
+
+**Known unresolved / left for later:**
+- `experiment-ablation-blocks-sweep` (`feature_list.json`, `not_started`): the actual
+  sweep hasn't been run yet — this session only built and verified the capability.
+  `eval-LI-eps10` already IS the `ablation_blocks=-1` (all 16 blocks) anchor point;
+  don't retrain it.
 
 ### 2026-08-10 — Evaluate LABEL+IMPRESSION vs legacy-text checkpoints; harness setup
 
@@ -61,10 +166,11 @@ select the best model (Goal 1); then set up harness-engineering files for contin
   clip_diagnose) on all three (see pitfall #2/#3 for the detour this took).
 - Aggregated into `eval_analysis/label_impression_analysis_report.md` +
   3 CSVs + `label_impression_dashboard.html` (published as a Claude Artifact).
-- Verdict: `LABEL+IMPRESSION eps10` is the best model (best FID/FDS/CLIP zero-shot);
-  the expected privacy-utility tradeoff direction holds on every metric this repo's own
-  evaluation guide ranks as reliable; CLIP zero-shot diagnosis degrades ~40% real→gen
-  across all three models (the dominant, model-invariant utility cost).
+- Verdict: `LABEL+IMPRESSION eps10` is the best model (best FID/FDS/CLIP zero-shot
+  label AUROC); the expected privacy-utility tradeoff direction holds on every metric
+  this repo's own evaluation guide ranks as reliable; CLIP zero-shot label AUROC
+  degrades ~40% real→gen across all three models (the dominant, model-invariant
+  utility cost).
 - Created harness-engineering files (`CLAUDE.md` rewritten from generic template,
   `AGENTS.md` derived, `init.sh` upgraded to a real smoke test, `feature_list.json`,
   this file, `session-handoff.md`, `clean-state-checklist.md`) per user request,

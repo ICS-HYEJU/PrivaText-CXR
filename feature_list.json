@@ -1,6 +1,6 @@
 {
   "project": "PrivaText-CXR",
-  "last_updated": "2026-08-10",
+  "last_updated": "2026-08-11",
   "rules": {
     "single_active_feature": true,
     "single_active_feature_scope": "per git worktree/branch, not repo-wide — see CLAUDE.md",
@@ -141,6 +141,44 @@
         "EVAL/metric/plain_eps10/eval_summary.json -- fid=2.3527, fds_symmetric=28.141."
       ],
       "notes": ""
+    },
+    {
+      "id": "pipeline-007",
+      "priority": 2,
+      "area": "pipeline",
+      "title": "ablation_blocks support under LoRA (configure_lora_params / inject_lora_cross_attention)",
+      "user_visible_behavior": "--ablation_blocks N restricts which of the 16 SpatialTransformer blocks get LoRA adapters (blocks[N-1:], same convention as the pre-existing full-DP-SGD configure_dp_params path), instead of being silently ignored under --use_lora as it was before.",
+      "status": "passing",
+      "verification": [
+        "py_compile src/Model/lora.py src/Model/Diffusion/LDM_dp.py src/LDM_dp_finetune.py src/LDM_dp_inference.py",
+        "./init.sh -- confirm the smoke-test checkpoint (ablation_blocks=-1 in its saved args) still logs '16/16 SpatialTransformer block(s)' (regression check: old checkpoints/behavior unchanged).",
+        "Direct unit check: inject_lora_cross_attention(unet, ablation_blocks=N) for N in [-1,1,8,16,20] and confirm blocks-injected / lora-param-tensor counts match blocks[N-1:] semantics."
+      ],
+      "evidence": [
+        "2026-08-11: ablation_blocks=-1 -> 16/16 blocks, 256 lora tensors; =1 -> 16/16 (same); =8 -> 9/16, 144 tensors; =16 -> 1/16, 16 tensors; =20 -> 0/16, 0 tensors (out-of-range, degrades to empty -- configure_lora_params/configure_dp_params both raise RuntimeError on an empty param list, so this fails loudly rather than silently training nothing).",
+        "./init.sh rerun post-change: existing lr2e-3_eps10 checkpoint (ablation_blocks=-1) generated identically, log read '16/16 SpatialTransformer block(s) (ablation_blocks=-1, ...)' -- confirms backward compatibility."
+      ],
+      "notes": "Previously --ablation_blocks was only consumed by configure_dp_params (the non-LoRA path) -- it had ZERO effect whenever --use_lora was set (true for every checkpoint trained so far, including the eval-LI-* and eval-plain-eps10 entries below). LDM_dp_inference.py's build_and_load_ldm now also reads ablation_blocks back out of a checkpoint's saved args and re-applies the same injection range at inference time, for both the adapter-only ('lora' key) and full-checkpoint-with-embedded-lora ('model' key) load paths."
+    },
+    {
+      "id": "experiment-ablation-blocks-sweep",
+      "priority": 2,
+      "area": "experiment",
+      "title": "Sweep ablation_blocks under the LI_eps10 config to find how many attention blocks utility actually needs",
+      "user_visible_behavior": "Multiple LoRA checkpoints trained with the exact LI_eps10 config (EVAL/metric/LABEL_IMPRESSION/eps10/ckpt_info.json: text_mode=LABEL+IMPRESSION, target_epsilon=10, lr=2e-3, rank=4, alpha=4) but different --ablation_blocks values, each with a complete eval_summary.json, so FID/FDS/CLIP-zeroshot can be plotted against number-of-trained-blocks.",
+      "status": "passing",
+      "verification": [
+        "training: grep '[lora] injected' <save_dir>/train.log -- ablation8 must read '9/16 SpatialTransformer block(s)', ablation16 must read '1/16'.",
+        "training: ldm_dp_final.pt / ldm_lora_final.pt exist under each save_dir once training completes.",
+        "generate+evaluate each (same 2-stage chain as eval-LI-eps10), md5-cross-check samples differ from the anchor and from each other.",
+        "compare against the ablation_blocks=-1 anchor (eval-LI-eps10 itself)."
+      ],
+      "evidence": [
+        "2026-08-11/12: both runs completed cleanly. ablation16 (1 block): 4h45m, ablation8 (9 blocks): 5h53m. Both reached epsilon_spent=8.591346449555628 -- identical to the anchor to 4 decimals, confirming DP noise calibration is independent of trained-block count and this sweep isolates a single clean variable.",
+        "EVAL/metric/LABEL_IMPRESSION/eps10_ablation8/eval_summary.json, EVAL/metric/LABEL_IMPRESSION/eps10_ablation16/eval_summary.json -- both complete (fds/fid/ssim/psnr/lpips/label/clip/clip_label/clip_diagnose).",
+        "Result: FID/FDS monotonically favor MORE blocks (16 best: fid=2.271); CLIP zero-shot label AUROC ratio (clip_label_clipzs_ratio -- NOT accuracy, see clip-metric-terminology memory) monotonically favors FEWER blocks (1 block best: ratio=0.670 vs 16-block's 0.605) -- two reliable metric families disagree, no single ablation_blocks value dominates. Full writeup: eval_analysis/ablation_blocks_report.md, ablation_blocks_comparison.csv, ablation_blocks_dashboard.html (also published as a Claude Artifact)."
+      ],
+      "notes": "Depends on pipeline-007 (done). ablation_blocks=-1 anchor point already exists as eval-LI-eps10 -- not retrained. All other args identical to EVAL/metric/LABEL_IMPRESSION/eps10/ckpt_info.json (seed=42, target_epsilon=10.0, lr=0.002, physical_batch=4, logical_batch=256, epochs=10, lora_rank=4, lora_alpha=4.0, text_mode=LABEL+IMPRESSION). Caveat: ablation8/16's eval_summary.json carry an extra MT_DDPM_FDS field the anchor's lacks -- src/Eval_metric/fds.py gained it as a local uncommitted change between the two computations; doesn't affect any field used in the comparison."
     },
     {
       "id": "eval-LI-milestones",
