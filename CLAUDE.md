@@ -18,9 +18,10 @@
   `PYTHONPATH=/workspace/PrivaText-CXR/src`를 설정합니다 — top-level `Eval_metric/`와
   `src/Eval_metric/`가 (둘 다 `__init__.py`가 없는) namespace package로 병합되어 동작하는
   구조라, 이 PYTHONPATH가 없으면 `clip_label` 등 top-level 전용 지표가 임포트되지 않습니다.
-- 데이터 실측: MIMIC-CXR 로컬 사본은 **`p10`/`p11` 환자 접두사만 다운로드**되어 있습니다
-  (`p12`~`p19`는 폴더만 존재, 내용물 0). train 31,553장(legacy) / 29,888장
-  (LABEL+IMPRESSION, CheXpert 양성 라벨 없는 1,665장 제외), test 361장.
+- JPG custom split은 `docs/MIMIC_JPG_PIPELINE.md`를 먼저 읽습니다. report/metadata와
+  JPG가 서로 다른 루트에 있으며, p10/p11 official train+validate를 학습/검증에 사용하고
+  p10/p11 official test를 제외하며 p12 전체를 patient-disjoint custom test로 사용합니다.
+  JPG 경로는 `--manifest_csv`를 넘긴 경우에만 활성화되어 기존 DICOM 실행과 공존합니다.
 
 ## 시작 워크플로우
 

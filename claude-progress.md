@@ -1,6 +1,6 @@
 # Progress Log — PrivaText-CXR
 
-## Current verified state (as of 2026-08-10)
+## Current verified state (as of 2026-08-20)
 
 - Docker container `CXR_dp_medclip` is the only place this pipeline runs. Two Python
   envs inside it: `/opt/conda/bin/python` (train/generate) and
@@ -72,6 +72,30 @@
    classifier, not CLIP at all. Full detail in the `clip-metric-terminology` memory.
 
 ## Session log
+
+### 2026-08-20 — p10/p11 JPG training manifest + p12 custom test holdout
+
+**Goal:** Replace the DICOM-only input path with audited JPG/report pairing, train on
+p10/p11 without their official-test rows, reserve all p12 patients for testing, control
+single-positive No Finding imbalance, and verify at least 10,240 test images.
+
+**Completed:**
+- Added `src/Data/prepare_mimic_jpg.py` and generated reproducible manifests under
+  `data_manifests/mimic_p10_p12/` from record-list, official split, CheXpert, JPG,
+  and report files. All 112,413 p10-p12 candidate rows were checked: 1,403 JPGs
+  missing, zero present JPG decode failures, and zero report misses among readable JPGs.
+- Enforced patient-disjoint custom split: p10/p11 official train=72,249 usable,
+  validation=802, p10/p11 official test excluded, and all usable p12=37,190 test.
+  Train/validation/test patient intersections are all zero; test>=10,240 passes.
+- Deterministically capped single-positive No Finding at 6,230 (seed 42, twice the
+  largest abnormal single-positive class), reducing train to 53,857 without changing
+  validation/test. Added image/study/patient class counts and sufficiency labels.
+- Added manifest/JPG support to `MIMICCXRDataset` and `LDM_dp_finetune.py`. Verified
+  real JPG tensors and all manifest splits; LABEL+IMPRESSION usable counts are
+  train=49,907, validation=748, test=35,107.
+
+**Artifacts:** `data_manifests/mimic_p10_p12/{README.md,split_summary.json,`
+`ldm_dp_manifest.csv.gz,class_distribution.csv}`.
 
 ### 2026-08-12 — ablation_blocks=8/16 sweep: train, generate, evaluate, report
 

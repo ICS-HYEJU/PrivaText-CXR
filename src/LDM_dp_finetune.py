@@ -163,6 +163,7 @@ def _load_patient_whitelist(dp_split_json, group):
 
 def _make_dataset(root_path: str, split: str,
                   split_csv: str = 'mimic-cxr-2.0.0-split.csv',
+                  manifest_csv=None,
                   image_size: int = 256,
                   max_length: int = 512,
                   patient_whitelist=None,
@@ -193,6 +194,7 @@ def _make_dataset(root_path: str, split: str,
     ds_args = argparse.Namespace(
         root_path         = root_path,
         split_csv         = split_csv,
+        manifest_csv      = manifest_csv,
         split             = split,
         image_size        = image_size,
         max_length        = max_length,
@@ -236,6 +238,8 @@ def parse_args():
                              '(contains files/ and mimic-cxr-2.0.0-split.csv)')
     parser.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv',
                         help='Split CSV filename (relative to root_path, or absolute path)')
+    parser.add_argument('--manifest_csv', default=None,
+                        help='Audited JPG manifest with dataset_split, image_path, and report_path')
     parser.add_argument('--split',     default='train',
                         choices=['train', 'validate', 'test'])
     parser.add_argument('--dp_split_json', default=None,
@@ -775,6 +779,7 @@ def main():
         root_path         = args.root_path,
         split             = args.split,
         split_csv         = args.split_csv,
+        manifest_csv      = args.manifest_csv,
         image_size        = args.image_size,
         max_length        = args.max_length,
         patient_whitelist = train_whitelist,
@@ -796,6 +801,7 @@ def main():
                 root_path    = args.root_path,
                 split        = 'validate',
                 split_csv    = args.split_csv,
+                manifest_csv = args.manifest_csv,
                 image_size   = args.image_size,
                 max_length   = args.max_length,
                 text_mode    = args.text_mode,

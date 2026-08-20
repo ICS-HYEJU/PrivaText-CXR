@@ -207,6 +207,7 @@ class MIMICCXRDataset(Dataset):
 
         self.validate_dicom = getattr(args, "validate_dicom", True)
         self.dicom_cache    = getattr(args, "dicom_cache", None)
+        self.manifest_csv   = getattr(args, "manifest_csv", None)
 
         # Conditioning text mode. None (default) = legacy FINDINGS+IMPRESSION
         # concatenation, unchanged for every existing caller that doesn't pass
@@ -229,7 +230,12 @@ class MIMICCXRDataset(Dataset):
         prebuilt  = getattr(args, "prebuilt_split_dir", None)
         root_path = getattr(args, "root_path", None)
 
-        if prebuilt:
+        if self.manifest_csv:
+            self.mode = "manifest"
+            if not os.path.isfile(self.manifest_csv):
+                raise FileNotFoundError(f"[MIMICCXRDataset] manifest CSV not found: {self.manifest_csv}")
+            self.root_path = root_path
+        elif prebuilt:
             self.mode      = "prebuilt"
             self.scan_root = os.path.join(prebuilt, self.split)
             if not os.path.isdir(self.scan_root):
@@ -303,8 +309,10 @@ class MIMICCXRDataset(Dataset):
         meta = self.samples[idx]
 
         try:
-            image = self._load_dcm(meta["dcm_path"])
+            image = self._load_image(meta.get("image_path", meta.get("dcm_path")))
         except Exception as e:
+            if self.mode == "manifest":
+                raise RuntimeError(f"[MIMICCXRDataset] load error idx={idx}: {e}") from e
             print(f"[MIMICCXRDataset] load error idx={idx}: {e}")
             image = self._blank_image()
 
@@ -316,9 +324,31 @@ class MIMICCXRDataset(Dataset):
     # -------------------------------------------------------------------------
 
     def _build_index(self) -> list:
+        if self.mode == "manifest":
+            return self._build_index_manifest()
         if self.mode == "prebuilt":
             return self._build_index_prebuilt()
         return self._build_index_physionet()
+
+    def _build_index_manifest(self) -> list:
+        """Load an audited image manifest and retain the requested split."""
+        import pandas as pd
+        df = pd.read_csv(self.manifest_csv)
+        required = {"dicom_id", "subject_id", "study_id", "dataset_split", "image_path", "report_path"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"[MIMICCXRDataset] manifest missing columns: {sorted(missing)}")
+        df = df[df["dataset_split"].eq(self.split)].reset_index(drop=True)
+        samples = []
+        for row in df.itertuples(index=False):
+            image_path, report_path = str(row.image_path), str(row.report_path)
+            if not os.path.isfile(image_path) or not os.path.isfile(report_path):
+                continue
+            samples.append({"image_path": image_path, "dcm_path": image_path,
+                            "report_path": report_path, "dicom_id": str(row.dicom_id),
+                            "study_id": f"s{int(row.study_id)}",
+                            "patient_id": f"p{int(row.subject_id)}"})
+        return samples
 
     def _build_index_physionet(self) -> list:
         """
@@ -497,7 +527,7 @@ class MIMICCXRDataset(Dataset):
         n_total = len(samples)
 
         for i, meta in enumerate(samples):
-            path = meta["dcm_path"]
+            path = meta.get("image_path", meta.get("dcm_path"))
             try:
                 size = os.path.getsize(path)
             except OSError:
@@ -508,7 +538,7 @@ class MIMICCXRDataset(Dataset):
             if entry is not None and entry.get("size") == size:
                 valid = entry.get("valid", False)
             else:
-                valid = self._is_readable_dcm(path)
+                valid = self._is_readable_image(path)
                 cache[path] = {"size": size, "valid": valid}
                 dirty = True
 
@@ -553,6 +583,24 @@ class MIMICCXRDataset(Dataset):
 
         image = Image.fromarray(arr.astype(np.uint8)).convert("L")
         return self.transform(image)
+
+
+    @staticmethod
+    def _is_readable_image(path: str) -> bool:
+        if str(path).lower().endswith((".jpg", ".jpeg", ".png")):
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+                return True
+            except Exception:
+                return False
+        return MIMICCXRDataset._is_readable_dcm(path)
+
+    def _load_image(self, path: str) -> torch.Tensor:
+        if str(path).lower().endswith((".jpg", ".jpeg", ".png")):
+            with Image.open(path) as image:
+                return self.transform(image.convert("L"))
+        return self._load_dcm(path)
 
     def _blank_image(self) -> torch.Tensor:
         return torch.zeros(1, self.image_size, self.image_size)
