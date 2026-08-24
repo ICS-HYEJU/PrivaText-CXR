@@ -26,7 +26,7 @@ Extends LatentDiffusion (LDM.py) with DP-specific additions only:
    Broader checkpoint key unwrapping than the parent version
    ('state_dict', 'model', 'model_state_dict') to handle varied ckpt formats.
 
-All other methods (encode_first_stage, p_losses, training_step, forward, ¡¦)
+All other methods (encode_first_stage, p_losses, training_step, forward, ¢®|)
 are inherited unchanged from LatentDiffusion.
 """
 
@@ -37,7 +37,7 @@ import inspect
 import torch
 import torch.nn as nn
 
-# ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+# |¢®|¢® Path setup |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
 _this_dir  = os.path.dirname(os.path.abspath(__file__))
 _model_dir = os.path.join(_this_dir, '..', 'Model')
 for _d in [_model_dir, _this_dir]:
@@ -158,7 +158,7 @@ class LatentDiffusionDP(LatentDiffusion):
         # 2. Selectively unfreeze SpatialTransformer blocks in UNet
         spatial_modules = [
             m for m in self.model.modules()
-            if isinstance(m, SpatialTransformer)
+            if type(m).__name__ == 'SpatialTransformer'
         ]
         for i, m in enumerate(spatial_modules):
             m.requires_grad_(True)
@@ -184,6 +184,74 @@ class LatentDiffusionDP(LatentDiffusion):
         return attn_params
 
     # =========================================================================
+    # DP-specific: LoRA parameter configuration
+    # =========================================================================
+
+    def configure_lora_params(
+        self,
+        rank            : int   = 4,
+        alpha           : float = 4.0,
+        dropout         : float = 0.0,
+        finetune_biobert: bool  = True,
+        targets         = None,
+        ablation_blocks : int   = -1,
+    ) -> list:
+        """
+        Freeze everything, inject LoRA into cross-attention Linear layers, and
+        return ONLY the LoRA (A/B) parameters (+ optionally BioBERT proj) for
+        the optimizer.  This is the LoRA counterpart of configure_dp_params.
+
+        Args:
+            rank             : LoRA rank r
+            alpha            : LoRA scaling numerator (scale = alpha / rank)
+            dropout          : LoRA-branch dropout
+            finetune_biobert : also train self.embedder.proj (full, small layer)
+            targets          : cross-attention attr names to adapt
+                               (default to_q/to_k/to_v/to_out)
+            ablation_blocks  : which SpatialTransformer blocks get LoRA
+                               adapters, same convention as configure_dp_params
+                               (-1 = all blocks; N = only blocks[N-1:])
+
+        Returns:
+            list[nn.Parameter] ? LoRA params (+ BioBERT proj) for AdamW
+        """
+        from Model.lora import (inject_lora_cross_attention, lora_parameters,
+                                DEFAULT_TARGETS)
+        targets = targets or DEFAULT_TARGETS
+
+        # 1. Freeze everything
+        self.first_stage_model.requires_grad_(False)
+        self.model.requires_grad_(False)
+        if self.embedder is not None:
+            self.embedder.requires_grad_(False)
+
+        # 2. Inject LoRA into UNet cross-attention; only A/B are trainable
+        inject_lora_cross_attention(self.model, rank=rank, alpha=alpha,
+                                    dropout=dropout, targets=targets,
+                                    ablation_blocks=ablation_blocks)
+        # Belt-and-suspenders: LoRALinear already places adapters on their base
+        # layer's device, but ensure the whole UNet (incl. new adapters) shares
+        # one device.  self.model (DiffusionWrapper+UNet) lives on the main
+        # device even under model parallelism (only VAE/BioBERT are offloaded).
+        _unet_device = next(self.model.parameters()).device
+        self.model.to(_unet_device)
+        lora_params = lora_parameters(self.model)
+
+        # 3. BioBERT projection (optional, full-trainable small layer)
+        if finetune_biobert and self.embedder is not None:
+            self.embedder.proj.requires_grad_(True)
+            lora_params.extend(list(self.embedder.proj.parameters()))
+            print(f'[configure_lora_params] BioBERT proj unfrozen '
+                  f'({sum(p.numel() for p in self.embedder.proj.parameters()):,} params)')
+
+        n_trainable = sum(p.numel() for p in lora_params)
+        n_total     = sum(p.numel() for p in self.parameters())
+        print(f'[configure_lora_params] rank={rank}  alpha={alpha}  '
+              f'trainable: {n_trainable:,} / {n_total:,} '
+              f'({100 * n_trainable / max(n_total, 1):.3f}%)')
+        return lora_params
+
+    # =========================================================================
     # DP-specific: training input / step
     # =========================================================================
 
@@ -194,25 +262,37 @@ class LatentDiffusionDP(LatentDiffusion):
 
         batch format:
             {
-                'image'  : Tensor [B, 1, H, W]  ? grayscale CXR
-                'reports': list[str]             ? raw report text per sample
+                'image'  : Tensor [B, 1, H, W]
+                'reports': list[str]
             }
 
+        Model parallelism: if self.offload_device != self.device,
+        - images are sent to offload_device for VAE encoding
+        - z is moved back to self.device for UNet forward pass
+        - c is moved back to self.device after BioBERT embedding
+
         Returns:
-            z : Tensor [B, z_ch, h, w]       ? scaled latent (no grad)
-            c : Tensor [B, seq_len, out_dim] ? BioBERT context
+            z, c  - both on self.device (UNet GPU).
         """
-        # Latent: frozen VAE, no gradient
-        x = self._get_raw_image(batch).to(self.device)
+        # offload_device: GPU where frozen VAE + BioBERT live.
+        # Equals self.device in single-GPU mode; differs in model-parallel mode.
+        offload_dev = getattr(self, 'offload_device', self.device)
+
+        # Latent: frozen VAE on offload_device, no gradient.
+        # z must end up on self.device (UNet GPU) for the diffusion forward pass.
+        x = batch[self.first_stage_key].to(offload_dev)
         with torch.no_grad():
             posterior = self.first_stage_model.encode(x)
-            z = self.get_first_stage_encoding(posterior)   # scale_factor applied
+            z = self.scale_factor * posterior.sample()
+        z = z.detach().to(self.device)
 
-        # Context: gradient flows through proj when unfrozen
+        # Context: BioBERT on offload_device; c is moved to self.device.
+        # Gradient flows through proj layer when finetune_biobert=True.
         assert self.embedder is not None, (
             "embedder is None. Pass a BioBERTEmbedder to LatentDiffusionDP.__init__."
         )
-        c = self.embedder(batch['reports'])    # list[str] ¡æ [B, seq_len, output_dim]
+        c = self.embedder(batch['reports'])    # list[str] -> [B, seq_len, output_dim]
+        c = c.to(self.device)
 
         return z, c
 

@@ -3,11 +3,11 @@ Diffusion/UNetModel.py  ?  UNet with timestep + cross-attention conditioning
 =============================================================================
 
 Building blocks from Model/:
-    ResBlock, Upsample, Downsample  ¡ç  Model/UNetBlock_module.py
-    SpatialTransformer              ¡ç  Model/attention_module.py
+    ResBlock, Upsample, Downsample  ¢®c  Model/UNetBlock_module.py
+    SpatialTransformer              ¢®c  Model/attention_module.py
     TimestepBlock,
-    TimestepEmbedSequential         ¡ç  Model/timestep_block.py
-    util helpers                    ¡ç  Model/util_network.py
+    TimestepEmbedSequential         ¢®c  Model/timestep_block.py
+    util helpers                    ¢®c  Model/util_network.py
 
 AttentionBlock (self-attention fallback when use_spatial_transformer=False)
 is implemented locally.
@@ -23,7 +23,7 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ¦¡¦¡ Path setup ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+# |¢®|¢® Path setup |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
 # Supports both:
 #   python3 Diffusion/UNetModel.py          (project root as cwd)
 #   python3 UNetModel.py                    (Diffusion/ as cwd)
@@ -124,7 +124,7 @@ class UNetModel(nn.Module):
     def __init__(self, args):
         super().__init__()
 
-        # ¦¡¦¡ Validate ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Validate |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         if args.use_spatial_transformer:
             assert args.context_dim is not None, \
                 "context_dim must be set when use_spatial_transformer=True"
@@ -135,7 +135,7 @@ class UNetModel(nn.Module):
         assert not (args.num_heads == -1 and args.num_head_channels == -1), \
             "Set either --num_heads or --num_head_channels"
 
-        # ¦¡¦¡ Store config ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Store config |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         self.image_size           = args.image_size
         self.in_channels          = args.in_channels
         self.model_channels       = args.model_channels
@@ -153,9 +153,9 @@ class UNetModel(nn.Module):
         self.num_heads_upsample   = args.num_heads if args.num_heads_upsample == -1 \
                                     else args.num_heads_upsample
         self.predict_codebook_ids = args.n_embed is not None
-        self.write_json           = args.write_json   # ¡ç stored as attribute
+        self.write_json           = args.write_json   # ¢®c stored as attribute
 
-        # ¦¡¦¡ Time embedding ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Time embedding |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         time_embed_dim = args.model_channels * 4
         self.time_embed = nn.Sequential(
             linear(args.model_channels, time_embed_dim),
@@ -166,7 +166,7 @@ class UNetModel(nn.Module):
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(args.num_classes, time_embed_dim)
 
-        # ¦¡¦¡ Internal helpers ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Internal helpers |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         def _head_params(ch):
             """Return (num_heads, dim_head) for a given channel count."""
             if args.num_head_channels == -1:
@@ -206,7 +206,7 @@ class UNetModel(nn.Module):
                 **kw,
             )
 
-        # ¦¡¦¡ Input (encoder) blocks ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Input (encoder) blocks |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         self.input_blocks = nn.ModuleList([
             TimestepEmbedSequential(
                 conv_nd(args.dims, args.in_channels, args.model_channels, 3, padding=1)
@@ -233,14 +233,14 @@ class UNetModel(nn.Module):
                 input_block_chans.append(ch)
                 ds *= 2
 
-        # ¦¡¦¡ Middle block ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Middle block |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         self.middle_block = TimestepEmbedSequential(
             _resblock(ch, ch),
             _attn(ch),
             _resblock(ch, ch),
         )
 
-        # ¦¡¦¡ Output (decoder) blocks ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+        # |¢®|¢® Output (decoder) blocks |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(args.channel_mult))[::-1]:
             for i in range(args.num_res_blocks + 1):
@@ -279,14 +279,14 @@ class UNetModel(nn.Module):
         for m in [self.input_blocks, self.middle_block, self.output_blocks]:
             m.apply(lambda x: x.float() if hasattr(x, 'float') else x)
 
-    # ¦¡¦¡ Forward ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+    # |¢®|¢® Forward |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
 
     def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
         """
         Args:
             x         : [B, in_channels, H, W]
             timesteps : [B]  diffusion timesteps
-            context   : [B, seq_len, context_dim]  (None ¡æ self-attention)
+            context   : [B, seq_len, context_dim]  (None ¢®©¡ self-attention)
             y         : [B]  class labels (only when num_classes is set)
         Returns:
             [B, out_channels, H, W]
@@ -419,7 +419,7 @@ if __name__ == '__main__':
     print(f"Output : {out.shape}")
     assert out.shape == x.shape, f"Shape mismatch: {x.shape} vs {out.shape}"
 
-    # Unconditional test (only valid when use_spatial_transformer=False) ¦¡
+    # Unconditional test (only valid when use_spatial_transformer=False) |¢®
     # When use_spatial_transformer=True + context_dim is set, context=None
     # causes a shape error in SpatialTransformer's k/v projection.
     # Pass a dummy zero context instead.

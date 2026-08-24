@@ -1,0 +1,445 @@
+"""
+Eval_metric/clipscore.py  —  Text-image alignment via domain CLIP (Eval step 4)
+===============================================================================
+Concept
+-------
+A CLIP-style model has an image encoder f_img and a text encoder f_txt trained
+(contrastively) into a SHARED embedding space.  Alignment of an image x with a
+text t is their cosine similarity, and CLIPScore reports:
+
+        CLIPScore(x, t) = w * max(cos(f_img(x), f_txt(t)), 0)   (w = 2.5)
+
+Generic CLIP is trained on natural images and is unreliable on chest X-rays, so
+we use DOMAIN encoders:
+    - biovil-t : Microsoft BioViL-T (CXR image + report, temporal-aware)
+    - medclip  : MedCLIP (image-report semantic matching)
+    - cxr-clip : CXR-specific CLIP, loaded through open_clip (--clip_model/
+                 --clip_pretrained) or any open_clip checkpoint.
+
+Our LDM has NO CLIP/contrastive training loss (see docs), so these encoders are
+purely for EVALUATION — no information leakage, and different from the BioBERT
+text encoder used for conditioning.
+
+Why also a real baseline
+------------------------
+Absolute cosine scales differ per encoder, so a raw generated CLIPScore is hard
+to read.  We also measure the encoder's alignment on REAL (image, report) pairs
+from the same split — an empirical ceiling — and report the GAP:
+        gap = real_clipscore_mean - gen_clipscore_mean      (smaller = better)
+
+Usage
+-----
+    # generated images vs their prompts (descriptions.csv), + real baseline
+    python Eval_metric/clipscore.py \\
+        --gen_dir  ./EVAL/gen_out/eps1/samples \\
+        --backend  biovil-t --device cuda:0 \\
+        --root_path /storage/.../mimic-cxr/2.1.0 --eval_split test --max_real 361 \\
+        --output   ./eval/eps1/clipscore.json
+"""
+
+import os
+import csv
+import glob
+import json
+import argparse
+
+import numpy as np
+
+
+# ── encoder adapters ─────────────────────────────────────────────────────────
+def _l2norm(x, eps=1e-8):
+    return x / (np.linalg.norm(x, axis=1, keepdims=True) + eps)
+
+
+def _shim_clip_feature_extractor():
+    """
+    MedCLIP does `from transformers import CLIPFeatureExtractor`, a name REMOVED
+    from transformers v5 (now CLIPImageProcessor). We alias it before importing
+    medclip. transformers' _LazyModule intercepts setattr, so we assign into
+    __dict__ directly (what `from transformers import X` actually reads) and then
+    VERIFY it is visible; if not, tell the user to pin transformers.
+    """
+    import importlib
+    transformers = importlib.import_module('transformers')
+
+    def _try(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    ver = getattr(transformers, '__version__', '?')
+    if _try(lambda: transformers.CLIPFeatureExtractor) is not None:
+        return  # already importable
+    cls = (_try(lambda: transformers.CLIPImageProcessor)
+           or _try(lambda: transformers.CLIPImageProcessorFast)
+           or _try(lambda: importlib.import_module(
+               'transformers.models.clip.image_processing_clip').CLIPImageProcessor)
+           or _try(lambda: importlib.import_module(
+               'transformers.models.clip.feature_extraction_clip').CLIPFeatureExtractor))
+    if cls is None:
+        print(f'[medclip] WARNING: transformers=={ver} has no CLIPImageProcessor to '
+              'alias. Fix: pip install "transformers==4.35.2"  (or patch medclip)')
+        return
+    # bypass _LazyModule.__setattr__ by writing straight into the module dict
+    transformers.__dict__['CLIPFeatureExtractor'] = cls
+    # also register on the clip submodule some medclip versions import from
+    _clip = _try(lambda: importlib.import_module('transformers.models.clip'))
+    if _clip is not None:
+        _clip.__dict__.setdefault('CLIPFeatureExtractor', cls)
+    visible = _try(lambda: transformers.CLIPFeatureExtractor) is not None
+    print(f'[medclip] shim CLIPFeatureExtractor -> {cls.__name__} '
+          f'(transformers=={ver}, visible={visible})')
+    if not visible:
+        print('[medclip] WARNING: alias not visible; pin: pip install "transformers==4.35.2"')
+
+
+class _MedCLIP:
+    name = 'medclip'
+
+    def __init__(self, device, batch_size=32):
+        import torch  # noqa: F401
+        _shim_clip_feature_extractor()
+        from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
+        self.torch = __import__('torch')
+        self.device = device
+        self.batch_size = batch_size
+        self.model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
+        self.model.from_pretrained()           # downloads weights
+        self.model.to(device).eval()
+        self.proc = MedCLIPProcessor()
+
+    def encode_image(self, paths):
+        # CXR are grayscale; MedCLIPProcessor normalizes single-channel, so we
+        # feed 'L' (no RGB conversion). Batched for speed.
+        from PIL import Image
+        embs = []
+        with self.torch.no_grad():
+            for i in range(0, len(paths), self.batch_size):
+                imgs = [Image.open(p).convert('L') for p in paths[i:i + self.batch_size]]
+                inp = self.proc(images=imgs, return_tensors='pt')
+                v = self.model.encode_image(inp['pixel_values'].to(self.device))
+                embs.append(v.cpu().numpy())
+        return _l2norm(np.concatenate(embs, 0))
+
+    def encode_text(self, texts):
+        texts = list(texts)
+        embs = []
+        with self.torch.no_grad():
+            for i in range(0, len(texts), self.batch_size):
+                inp = self.proc(text=texts[i:i + self.batch_size],
+                                return_tensors='pt', padding=True, truncation=True)
+                v = self.model.encode_text(inp['input_ids'].to(self.device),
+                                           inp['attention_mask'].to(self.device))
+                embs.append(v.cpu().numpy())
+        return _l2norm(np.concatenate(embs, 0))
+
+
+class _BioViLT:
+    name = 'biovil-t'
+
+    def __init__(self, device):
+        # health_multimodal (Microsoft) provides BioViL-T image + text inference.
+        from health_multimodal.text import get_bert_inference
+        from health_multimodal.text.utils import BertEncoderType
+        from health_multimodal.image import get_image_inference
+        from health_multimodal.image.utils import ImageModelType
+        self.text_inf = get_bert_inference(BertEncoderType.BIOVIL_T_BERT)
+        self.img_inf = get_image_inference(ImageModelType.BIOVIL_T)
+
+    def encode_image(self, paths):
+        from pathlib import Path
+        embs = [self.img_inf.get_projected_global_embedding(Path(p)) for p in paths]
+        embs = np.stack([e.detach().cpu().numpy() if hasattr(e, 'detach') else np.asarray(e)
+                         for e in embs], 0)
+        return _l2norm(embs)
+
+    def encode_text(self, texts):
+        emb = self.text_inf.get_embeddings_from_prompt(list(texts), normalize=False)
+        emb = emb.detach().cpu().numpy() if hasattr(emb, 'detach') else np.asarray(emb)
+        return _l2norm(emb)
+
+
+class _OpenCLIP:
+    """Generic open_clip backend — for CXR-CLIP checkpoints or any open_clip model."""
+    name = 'openclip'
+
+    def __init__(self, device, model_name='ViT-B-32', pretrained='openai', batch_size=32):
+        import torch  # noqa: F401
+        import open_clip
+        self.torch = __import__('torch')
+        self.device = device
+        self.batch_size = batch_size
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            model_name, pretrained=pretrained)
+        self.model = self.model.to(device).eval()
+        self.tokenizer = open_clip.get_tokenizer(model_name)
+
+    def encode_image(self, paths):
+        from PIL import Image
+        embs = []
+        with self.torch.no_grad():
+            for i in range(0, len(paths), self.batch_size):
+                imgs = self.torch.stack([self.preprocess(Image.open(p).convert('RGB'))
+                                         for p in paths[i:i + self.batch_size]]).to(self.device)
+                embs.append(self.model.encode_image(imgs).cpu().numpy())
+        return _l2norm(np.concatenate(embs, 0))
+
+    def encode_text(self, texts):
+        texts = list(texts)
+        embs = []
+        with self.torch.no_grad():
+            for i in range(0, len(texts), self.batch_size):
+                tok = self.tokenizer(texts[i:i + self.batch_size]).to(self.device)
+                embs.append(self.model.encode_text(tok).cpu().numpy())
+        return _l2norm(np.concatenate(embs, 0))
+
+
+def load_encoder(backend, device='cpu', clip_model='ViT-B-32', clip_pretrained='openai',
+                 batch_size=32):
+    if backend == 'medclip':
+        return _MedCLIP(device, batch_size)
+    if backend == 'biovil-t':
+        return _BioViLT(device)
+    if backend in ('cxr-clip', 'openclip'):
+        return _OpenCLIP(device, clip_model, clip_pretrained, batch_size)
+    raise ValueError(f"unknown backend '{backend}' "
+                     "(choices: biovil-t, medclip, cxr-clip/openclip)")
+
+
+# ── scoring ──────────────────────────────────────────────────────────────────
+def _paired_cos(img_emb, txt_emb):
+    """Row-wise cosine of already-L2-normed embeddings -> [N]."""
+    d = min(img_emb.shape[1], txt_emb.shape[1])
+    return np.sum(img_emb[:, :d] * txt_emb[:, :d], axis=1)
+
+
+def retrieval_metrics(img_emb, txt_emb, prompts, ks=(1, 5, 10)):
+    """
+    Cross retrieval on the shared embeddings.
+      i2t: each image ranks all texts; relevant = texts with the SAME prompt.
+      t2i: each text ranks all images; relevant = images whose prompt matches.
+    Relevance is by TEXT EQUALITY (not index) so duplicate prompts (e.g.
+    n_samples>1 per report) are handled correctly.
+
+    Reports, for each direction:
+      R@k  : Recall@k  — fraction of queries with a relevant item in top-k (hit rate)
+      P@k  : Precision@k — mean fraction of the top-k that are relevant
+      mAP  : mean Average Precision over queries
+      median_rank / mean_rank : rank of the first relevant item
+    """
+    S = img_emb @ txt_emb.T                       # [N_img, N_txt] cosine (L2-normed)
+    prompts = np.asarray(list(prompts), dtype=object)
+    N = len(prompts)
+
+    def _side(sim):
+        Rhit = {k: 0 for k in ks}
+        Psum = {k: 0.0 for k in ks}
+        ranks, aps = [], []
+        for i in range(sim.shape[0]):
+            order = np.argsort(-sim[i])
+            rel = (prompts[order] == prompts[i])      # bool, in retrieved order
+            hits = np.where(rel)[0]                    # 0-based positions of relevant
+            first = int(hits[0]) + 1 if hits.size else N
+            ranks.append(first)
+            for k in ks:
+                if first <= k:
+                    Rhit[k] += 1
+                Psum[k] += float(rel[:k].sum()) / k    # Precision@k
+            if hits.size:                              # Average Precision
+                prec_at_hits = np.cumsum(rel)[hits] / (hits + 1.0)
+                aps.append(float(prec_at_hits.mean()))
+            else:
+                aps.append(0.0)
+        M = sim.shape[0]
+        out = {}
+        for k in ks:
+            out[f'R@{k}'] = float(Rhit[k] / M)
+            out[f'P@{k}'] = float(Psum[k] / M)
+        out['mAP'] = float(np.mean(aps))
+        out['median_rank'] = float(np.median(ranks))
+        out['mean_rank'] = float(np.mean(ranks))
+        return out
+
+    res = {}
+    for k, v in _side(S).items():
+        res[f'{k}_i2t'] = v
+    for k, v in _side(S.T).items():
+        res[f'{k}_t2i'] = v
+    res['retrieval_n'] = N
+    res['duplicate_prompts'] = int(N - len(set(prompts.tolist())))
+    return res
+
+
+def _shuffled_cos(img_emb, txt_emb, texts, seed=0):
+    """Negative control: cosine of each image vs a MISMATCHED report (derangement,
+    avoiding accidental same-text matches). Its mean is the noise floor."""
+    rng = np.random.default_rng(seed)
+    n = len(texts)
+    if n < 2:
+        return np.zeros(n)
+    perm = rng.permutation(n)
+    for i in range(n):
+        tries = 0
+        while (perm[i] == i or texts[perm[i]] == texts[i]) and tries < 25:
+            perm[i] = int(rng.integers(n)); tries += 1
+    return np.sum(img_emb * txt_emb[perm], axis=1)
+
+
+def clipscore(image_paths, prompts, encoder, w=2.5, text_mode='FINDINGS/IMPRESSION',
+              retrieval_ks=(1, 5, 10), dedup=False, verbose=True):
+    """
+    Primary metric: cos_mean (raw cosine). clipscore_mean = w*max(cos,0) is a
+    scaled convenience value (w=2.5 is calibrated for OpenAI CLIP, not MedCLIP).
+    text_mode in {FINDINGS, FINDINGS/IMPRESSION, FULL} selects report sections
+    (shared with generation). Also reports a shuffled negative control
+    (cos_shuffled_mean) and the signal above it (cos_signal = cos - shuffled).
+    retrieval_ks!=() adds R@k retrieval; dedup=True runs retrieval on the unique-
+    prompt subset (fairer when many prompts repeat).
+    """
+    from Eval_metric.text_utils import extract_report_sections
+    prompts = list(prompts)
+    text_in = [extract_report_sections(p, text_mode) for p in prompts]
+    if verbose:
+        print(f'[clip] {encoder.name}: encoding {len(image_paths)} image/text pair(s) '
+              f'(text_mode={text_mode})')
+    img_emb = encoder.encode_image(image_paths)
+    txt_emb = encoder.encode_text(text_in)
+    cos = _paired_cos(img_emb, txt_emb)
+    score = w * np.clip(cos, 0, None)
+    cos_shuf = _shuffled_cos(img_emb, txt_emb, text_in)
+    out = {'clipscore_mean': float(score.mean()), 'clipscore_std': float(score.std()),
+           'cos_mean': float(cos.mean()), 'cos_std': float(cos.std()), 'n': int(len(cos)),
+           'cos_shuffled_mean': float(cos_shuf.mean()),        # negative control (noise floor)
+           'cos_signal': float(cos.mean() - cos_shuf.mean())}  # matched - mismatched
+    if retrieval_ks:
+        if dedup:
+            seen, idx = set(), []
+            for i, t in enumerate(text_in):
+                if t not in seen:
+                    seen.add(t); idx.append(i)
+            ie, te, tt = img_emb[idx], txt_emb[idx], [text_in[i] for i in idx]
+        else:
+            ie, te, tt = img_emb, txt_emb, text_in
+        out.update(retrieval_metrics(ie, te, tt, tuple(retrieval_ks)))
+        out['retrieval_dedup'] = bool(dedup)
+    return out
+
+
+def load_pairs_from_csv(gen_dir):
+    """
+    Pair generated images with their prompts using descriptions.csv written by
+    the inference script.  descriptions.csv lives in gen_dir or its parent and
+    has columns index, description, file (file relative to the csv's folder).
+    """
+    for base in (gen_dir, os.path.dirname(os.path.abspath(gen_dir))):
+        csv_path = os.path.join(base, 'descriptions.csv')
+        if os.path.isfile(csv_path):
+            paths, prompts = [], []
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    fp = os.path.join(base, row['file'])
+                    if os.path.isfile(fp):
+                        paths.append(fp)
+                        prompts.append(row['description'])
+            if paths:
+                return paths, prompts
+    # fallback: no csv -> cannot pair prompts
+    raise FileNotFoundError(
+        f'descriptions.csv not found near {gen_dir}; cannot pair images to prompts.')
+
+
+def real_baseline(root_path, split_csv, eval_split, image_size, max_length,
+                  encoder, max_real=None, w=2.5, tmp_dir=None,
+                  text_mode='FINDINGS/IMPRESSION', retrieval_ks=(1, 5, 10), dedup=False):
+    """
+    Encoder's alignment on REAL (image, report) pairs from the split — an
+    empirical ceiling.  Real images are dumped to PNG (encoders read from path).
+    text_mode is applied inside clipscore(), identical to the generated path.
+    """
+    import argparse as _a
+    from PIL import Image
+    from Data.mimic_cxr import MIMICCXRDataset
+    ds = MIMICCXRDataset(_a.Namespace(
+        root_path=root_path, split_csv=split_csv, split=eval_split,
+        image_size=image_size, max_length=max_length, patient_whitelist=None))
+    n = len(ds) if max_real in (None, 0) else min(max_real, len(ds))
+    tmp_dir = tmp_dir or os.path.join('.', '_clip_real_tmp')
+    os.makedirs(tmp_dir, exist_ok=True)
+    paths, prompts = [], []
+    for i in range(n):
+        img, report = ds[i]                    # img [1,H,W] in [-1,1]
+        arr = ((img.squeeze(0).numpy() * 0.5 + 0.5) * 255).clip(0, 255).astype('uint8')
+        fp = os.path.join(tmp_dir, f'real_{i:05d}.png')
+        Image.fromarray(arr, mode='L').save(fp)
+        paths.append(fp)
+        prompts.append(report)
+    return clipscore(paths, prompts, encoder, w=w, text_mode=text_mode,
+                     retrieval_ks=retrieval_ks, dedup=dedup)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description='CLIPScore with domain encoders')
+    p.add_argument('--gen_dir', required=True, help='folder of generated pngs (samples/)')
+    p.add_argument('--backend', default='medclip',
+                   choices=['biovil-t', 'medclip', 'cxr-clip', 'openclip'])
+    p.add_argument('--clip_model', default='ViT-B-32', help='open_clip model name (cxr-clip/openclip)')
+    p.add_argument('--clip_pretrained', default='openai', help='open_clip weights or ckpt path')
+    p.add_argument('--w', default=2.5, type=float, help='CLIPScore scale (clipscore_mean only)')
+    from Eval_metric.text_utils import SECTION_MODES
+    p.add_argument('--text_mode', default='FINDINGS/IMPRESSION', choices=SECTION_MODES,
+                   help='report sections to embed (same set as generation --text_mode)')
+    p.add_argument('--retrieval_ks', nargs='+', type=int, default=[1, 5, 10],
+                   help='R@k cutoffs; pass nothing to disable retrieval')
+    p.add_argument('--dedup', action='store_true',
+                   help='run retrieval on the unique-prompt subset (fairer with repeats)')
+    p.add_argument('--batch_size', default=32, type=int, help='encoder batch size')
+    p.add_argument('--device', default='cpu')
+    # optional real baseline
+    p.add_argument('--root_path', default=None, help='enable real baseline from dataset split')
+    p.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv')
+    p.add_argument('--eval_split', default='test')
+    p.add_argument('--image_size', default=256, type=int)
+    p.add_argument('--max_length', default=512, type=int)
+    p.add_argument('--max_real', default=None, type=int)
+    p.add_argument('--output', default=None)
+    return p.parse_args()
+
+
+def run_clipscore(args):
+    ks = tuple(args.retrieval_ks or ())
+    enc = load_encoder(args.backend, args.device, args.clip_model, args.clip_pretrained,
+                       batch_size=args.batch_size)
+    paths, prompts = load_pairs_from_csv(args.gen_dir)
+    res = {'backend': enc.name, 'w': args.w, 'text_mode': args.text_mode}
+    gen = clipscore(paths, prompts, enc, w=args.w, text_mode=args.text_mode,
+                    retrieval_ks=ks, dedup=args.dedup)
+    res.update({f'gen_{k}': v for k, v in gen.items()})
+    print(f'[clip] gen cos_mean={gen["cos_mean"]:.4f} (primary)  '
+          f'shuffled={gen["cos_shuffled_mean"]:.4f}  signal={gen["cos_signal"]:.4f}  n={gen["n"]}')
+    if args.root_path:
+        real = real_baseline(args.root_path, args.split_csv, args.eval_split,
+                             args.image_size, args.max_length, enc,
+                             max_real=args.max_real, w=args.w,
+                             text_mode=args.text_mode, retrieval_ks=ks, dedup=args.dedup)
+        res.update({f'real_{k}': v for k, v in real.items()})
+        res['gap_cos'] = float(real['cos_mean'] - gen['cos_mean'])
+        res['gap_clipscore'] = float(real['clipscore_mean'] - gen['clipscore_mean'])
+        print(f'[clip] real cos_mean={real["cos_mean"]:.4f}  '
+              f'gap_cos(real-gen)={res["gap_cos"]:.4f}')
+    return res
+
+
+def main():
+    args = parse_args()
+    res = run_clipscore(args)
+    print(json.dumps(res, indent=2))
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+        with open(args.output, 'w') as f:
+            json.dump(res, f, indent=2)
+        print(f'[save] -> {args.output}')
+
+
+if __name__ == '__main__':
+    main()
