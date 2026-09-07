@@ -1,0 +1,520 @@
+<title>Scale, Not Synthesis</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    color-scheme: light;
+    --page:        #f9f9f7;
+    --surface:     #fcfcfb;
+    --surface-2:   #f2f1ec;
+    --ink:         #0b0b0b;
+    --ink-2:       #52514e;
+    --ink-muted:   #898781;
+    --grid:        #e1e0d9;
+    --baseline:    #c3c2b7;
+    --border:      rgba(11,11,11,0.10);
+    --border-2:    rgba(11,11,11,0.16);
+    --real:        #2a78d6;
+    --mixed:       #eb6834;
+    --synth:       #1baf7a;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --serious:     #ec835a;
+    --critical:    #d03b3b;
+    --shadow: 0 1px 2px rgba(11,11,11,0.04), 0 8px 24px -12px rgba(11,11,11,0.12);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --page:        #0d0d0d;
+      --surface:     #17171a;
+      --surface-2:   #1e1e21;
+      --ink:         #ffffff;
+      --ink-2:       #c3c2b7;
+      --ink-muted:   #8f8d87;
+      --grid:        #2c2c2a;
+      --baseline:    #3c3c39;
+      --border:      rgba(255,255,255,0.10);
+      --border-2:    rgba(255,255,255,0.16);
+      --real:        #3987e5;
+      --mixed:       #d95926;
+      --synth:       #199e70;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 12px 32px -14px rgba(0,0,0,0.55);
+    }
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #17171a;
+    --surface-2:   #1e1e21;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --ink-muted:   #8f8d87;
+    --grid:        #2c2c2a;
+    --baseline:    #3c3c39;
+    --border:      rgba(255,255,255,0.10);
+    --border-2:    rgba(255,255,255,0.16);
+    --real:        #3987e5;
+    --mixed:       #d95926;
+    --synth:       #199e70;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 12px 32px -14px rgba(0,0,0,0.55);
+  }
+
+  *{ box-sizing: border-box; }
+  body{
+    background: var(--page);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  .wrap{ max-width: 920px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1,h2,h3{ font-family: "Newsreader", Georgia, serif; font-weight: 600; text-wrap: balance; margin: 0; }
+  .mono{ font-family: "IBM Plex Mono", ui-monospace, "SF Mono", monospace; font-variant-numeric: tabular-nums; }
+  a{ color: var(--real); }
+
+  /* ── header ───────────────────────────────────────────── */
+  .eyebrow{
+    font: 600 11px/1.4 "IBM Plex Mono", monospace;
+    letter-spacing: .09em; text-transform: uppercase;
+    color: var(--ink-muted); margin-bottom: 14px;
+  }
+  h1{ font-size: 42px; letter-spacing: -0.01em; margin-bottom: 14px; }
+  .dek{ font-size: 17px; color: var(--ink-2); max-width: 62ch; margin-bottom: 22px; }
+  .meta{
+    display: flex; flex-wrap: wrap; gap: 8px 22px;
+    font-size: 12.5px; color: var(--ink-muted);
+    padding-top: 18px; border-top: 1px solid var(--border);
+  }
+  .meta b{ color: var(--ink-2); font-weight: 500; }
+
+  /* ── goal tiles ───────────────────────────────────────── */
+  .tiles{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 40px 0 48px; }
+  .tile{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 18px 20px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .tile-label{ font: 600 10.5px/1.4 "IBM Plex Mono", monospace; letter-spacing: .07em; color: var(--ink-muted); text-transform: uppercase; }
+  .tile-value{ font-size: 32px; font-weight: 600; letter-spacing: -0.01em; }
+  .tile-sub{ font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+  .chip{
+    align-self: flex-start;
+    display: inline-flex; align-items: center; gap: 5px;
+    font: 600 11px/1 "IBM Plex Sans", sans-serif; letter-spacing: .02em;
+    padding: 4px 9px 4px 7px; border-radius: 100px;
+  }
+  .chip.critical{ background: color-mix(in oklab, var(--critical) 14%, transparent); color: var(--critical); }
+  .chip.serious{ background: color-mix(in oklab, var(--serious) 16%, transparent); color: color-mix(in oklab, var(--serious) 80%, black 20%); }
+  :root:not([data-theme="light"]) .chip.serious{ color: var(--serious); }
+  :root[data-theme="dark"] .chip.serious{ color: var(--serious); }
+  .chip svg{ width: 11px; height: 11px; }
+
+  /* ── sections ─────────────────────────────────────────── */
+  section{ margin: 56px 0; }
+  .section-head{ display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 4px; }
+  h2{ font-size: 23px; }
+  .section-note{ font-size: 12.5px; color: var(--ink-muted); margin-bottom: 22px; max-width: 68ch; }
+
+  .card{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 24px 26px; box-shadow: var(--shadow);
+  }
+
+  /* ── chart legend ─────────────────────────────────────── */
+  .legend{ display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 18px; font-size: 12.5px; color: var(--ink-2); }
+  .legend-item{ display: inline-flex; align-items: center; gap: 7px; }
+  .legend-dot{ width: 9px; height: 9px; border-radius: 50%; flex: none; }
+
+  /* ── bar chart ────────────────────────────────────────── */
+  .barlabel{ font: 500 12px "IBM Plex Mono", monospace; fill: var(--ink); }
+  .barsub{ font: 400 10.5px "IBM Plex Sans", sans-serif; fill: var(--ink-muted); }
+  .barvalue{ font: 600 12.5px "IBM Plex Mono", monospace; fill: var(--ink); }
+  .axislabel{ font: 400 10.5px "IBM Plex Mono", monospace; fill: var(--ink-muted); }
+  .refline-label{ font: 600 10.5px "IBM Plex Mono", monospace; }
+  .bar-hit{ cursor: pointer; }
+  .bar-hit:focus{ outline: 2px solid var(--real); outline-offset: 2px; }
+
+  #tooltip{
+    position: fixed; z-index: 40; pointer-events: none;
+    background: var(--ink); color: var(--page);
+    font: 500 12px/1.5 "IBM Plex Sans", sans-serif;
+    padding: 8px 11px; border-radius: 7px; box-shadow: var(--shadow);
+    max-width: 240px; opacity: 0; transform: translateY(2px);
+    transition: opacity .1s ease, transform .1s ease;
+  }
+  #tooltip.show{ opacity: 1; transform: translateY(0); }
+  #tooltip .tt-title{ font-family: "IBM Plex Mono", monospace; font-weight: 600; margin-bottom: 3px; }
+  #tooltip .tt-row{ display: flex; justify-content: space-between; gap: 14px; color: color-mix(in oklab, var(--page) 78%, var(--ink)); }
+
+  /* ── dumbbell ─────────────────────────────────────────── */
+  .dumbbell-row{ display: grid; grid-template-columns: 210px 1fr 84px; align-items: center; gap: 14px; padding: 13px 0; border-top: 1px solid var(--border); }
+  .dumbbell-row:first-child{ border-top: none; }
+  .dumbbell-label{ font-size: 13px; color: var(--ink-2); }
+  .dumbbell-label b{ color: var(--ink); font-weight: 600; }
+  .delta{ font: 600 13px "IBM Plex Mono", monospace; text-align: right; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+  .delta.up{ color: var(--good); }
+  .delta.down{ color: var(--critical); }
+  .delta svg{ width: 10px; height: 10px; }
+
+  /* ── findings ─────────────────────────────────────────── */
+  .findings{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .finding{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: var(--shadow); }
+  .finding-eyebrow{ font: 600 10.5px "IBM Plex Mono", monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-muted); margin-bottom: 10px; }
+  .finding h3{ font-family: "IBM Plex Sans", sans-serif; font-size: 15.5px; font-weight: 600; margin-bottom: 8px; line-height: 1.35; }
+  .finding p{ font-size: 13px; color: var(--ink-2); line-height: 1.55; margin: 0; }
+  .finding p + p{ margin-top: 8px; }
+
+  /* ── table ────────────────────────────────────────────── */
+  .table-scroll{ overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+  table{ border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  thead th{
+    position: sticky; top: 0; background: var(--surface-2);
+    text-align: right; padding: 10px 12px; font: 600 10.5px "IBM Plex Mono", monospace;
+    letter-spacing: .03em; color: var(--ink-muted); text-transform: uppercase;
+    border-bottom: 1px solid var(--border-2); white-space: nowrap;
+  }
+  thead th:first-child, thead th:nth-child(2){ text-align: left; }
+  tbody td{ padding: 9px 12px; text-align: right; font-family: "IBM Plex Mono", monospace; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  tbody td:first-child{ text-align: left; font-family: "IBM Plex Sans", sans-serif; font-weight: 500; }
+  tbody td:nth-child(2){ text-align: left; }
+  tbody tr:last-child td{ border-bottom: none; }
+  tbody tr.v1-row td{ color: var(--ink-muted); font-style: italic; }
+  tbody tr.v1-row td:first-child{ font-style: normal; }
+  td.macro{ font-weight: 600; color: var(--ink); }
+  .type-dot{ display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .table-divider td{ padding: 6px 12px; font: 600 10px "IBM Plex Mono", monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); background: var(--surface-2); text-align: left !important; border-bottom: 1px solid var(--border-2); }
+
+  /* ── footer ───────────────────────────────────────────── */
+  footer{ margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 12px; color: var(--ink-muted); }
+  footer p{ max-width: 68ch; margin: 0 0 8px; line-height: 1.6; }
+  footer code{ font-family: "IBM Plex Mono", monospace; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+
+  @media (max-width: 720px){
+    .tiles{ grid-template-columns: 1fr; }
+    .findings{ grid-template-columns: 1fr; }
+    h1{ font-size: 32px; }
+    .dumbbell-row{ grid-template-columns: 130px 1fr 70px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <div class="eyebrow">PrivaText-CXR &middot; synth-utility v2 &middot; 2026-09-07</div>
+  <h1>Scale, Not Synthesis</h1>
+  <p class="dek">Eight downstream-classifier training runs later, the pattern is clear: growing the
+    <em>real</em>&nbsp;training pool explains almost every gain in this round &mdash; the synthetic
+    images never helped, and twice made things slightly worse. None of the session&rsquo;s three
+    target thresholds were reached.</p>
+  <div class="meta">
+    <span><b>8</b> arms trained (v2)</span>
+    <span><b>DenseNet-121</b> classifier, ImageNet-pretrained</span>
+    <span><b>5,000</b>-image fixed p12 test set</span>
+    <span><b>12/14</b> reliable CheXpert labels (min_pos=10)</span>
+    <span>checkpoints: <b>LABEL+IMPRESSION eps1 / eps10</b>, epochs=30</span>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="tile-label">Goal 1 &middot; Macro AUROC &ge; 0.80</div>
+      <div class="tile-value mono">0.763</div>
+      <div class="tile-sub">best arm: <b style="color:var(--ink)">Rfull</b> (real-only, n=49,907) &middot; target 0.800 &middot; &minus;0.037</div>
+      <span class="chip serious"><svg viewBox="0 0 12 12" fill="none"><path d="M3 6h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>NOT MET</span>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Goal 2 &middot; No synthetic-only collapse</div>
+      <div class="tile-value mono">0.518</div>
+      <div class="tile-sub">best synthetic-only arm (CLAHE, eps1) &middot; chance &asymp; 0.500</div>
+      <span class="chip critical"><svg viewBox="0 0 12 12" fill="none"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>NOT MET</span>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Goal 3 &middot; Mixing beats real-only by &ge;1%</div>
+      <div class="tile-value mono">&minus;0.9%</div>
+      <div class="tile-sub">best mixed arm (eps10) vs. Rfull &middot; eps1-mixed: &minus;1.3%</div>
+      <span class="chip critical"><svg viewBox="0 0 12 12" fill="none"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>NOT MET</span>
+    </div>
+  </div>
+
+  <section>
+    <div class="section-head"><h2>All eight arms, ranked</h2></div>
+    <p class="section-note">Macro AUROC over the same fixed 5,000-image test set, sorted descending.
+      Dashed lines mark the 0.80 target and the prior round&rsquo;s from-scratch real-only baseline.</p>
+    <div class="card">
+      <div class="legend">
+        <span class="legend-item"><span class="legend-dot" style="background:var(--real)"></span>real-only</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--mixed)"></span>real&nbsp;+&nbsp;synthetic (mixed)</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--synth)"></span>synthetic-only</span>
+      </div>
+      <svg id="barchart" viewBox="0 0 800 460" role="img" aria-label="Macro AUROC by arm, ranked descending"></svg>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>What moved the needle</h2></div>
+    <p class="section-note">Four paired comparisons isolating one variable at a time. Only real-pool
+      scale produced a reliably large, positive move.</p>
+    <div class="card">
+      <div id="dumbbell"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Reading the round</h2></div>
+    <div class="findings">
+      <div class="finding">
+        <div class="finding-eyebrow">Ruled in</div>
+        <h3>Real-pool size is the dominant lever</h3>
+        <p>Going from 1,100&rarr;49,907 real images (same backbone, same epoch count) lifted macro
+          AUROC by <b class="mono" style="color:var(--ink)">+13.6 points</b> (0.672&rarr;0.763) &mdash;
+          by far the largest move in this round.</p>
+      </div>
+      <div class="finding">
+        <div class="finding-eyebrow">Ruled out</div>
+        <h3>Backbone, epochs, and CLAHE all failed to rescue synthetic images</h3>
+        <p>ImageNet pretraining alone barely moved real-only results (+4.0%) and did <b style="color:var(--ink)">not</b>
+          rescue synthetic-only training (still &asymp;chance). Doubling epochs on the full real pool
+          made results <i>worse</i> via overfitting. CLAHE contrast-normalizing the synthetic images
+          left them at chance too (0.501&rarr;0.518).</p>
+      </div>
+      <div class="finding">
+        <div class="finding-eyebrow">Still open</div>
+        <h3>Is this fixable from the classifier side at all?</h3>
+        <p>Every downstream-classifier-side lever tried this round failed to rescue the synthetic
+          images. That points at the LDM checkpoints&rsquo; own generative fidelity as the
+          bottleneck &mdash; worth testing against longer LDM training or a different
+          <code style="font-family:inherit">ablation_blocks</code> setting before concluding further.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Full results</h2></div>
+    <p class="section-note">Per-pathology macro AUROC, all 8 v2 arms plus two v1 (from-scratch,
+      matched-pool) reference rows. &ldquo;&mdash;&rdquo; = label excluded from that arm&rsquo;s macro
+      (No Finding has zero explicit negatives in this pool, so it never clears the &ge;2-class check).</p>
+    <div class="table-scroll">
+      <table id="results-table"></table>
+    </div>
+  </section>
+
+  <footer>
+    <p>Classifier: <code>torchvision.models.densenet121</code>, ImageNet-pretrained unless noted,
+      masked multi-label BCE with inverse-prevalence <code>pos_weight</code> (clipped 20&times;).
+      Real pools built via <code>Eval_metric/build_synth_utility_pool.py</code>; training via
+      <code>Eval_metric/train_downstream_cls.py --pretrained --real_manifest</code>. Synthetic pools
+      (5,500 images each, eps1/eps10 LABEL+IMPRESSION epochs=30 checkpoints) reused unchanged from
+      the prior round &mdash; no new generation. CLAHE via <code>Eval_metric/apply_clahe.py</code>
+      (clip_limit=2.0, tile=8&times;8).</p>
+    <p>Full per-pathology CSV: <code>eval_analysis/synth_utility_v2_comparison.csv</code> &middot;
+      narrative writeup: <code>eval_analysis/synth_utility_v2_report.md</code> &middot; prior round:
+      <code>eval_analysis/synth_utility_report.md</code> &middot; tracked as
+      <code>feature_list.json</code> &rarr; <code>experiment-synth-utility-pretrained-fullreal</code>.</p>
+  </footer>
+
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+(function(){
+  var arms = [
+    { id:"Rfull",                        type:"real",  n:49907, epochs:10, auroc:0.7630547522698087,
+      pathologies:{Atelectasis:0.7836071558963126,Cardiomegaly:0.8235895773684117,Consolidation:0.8336182336182337,Edema:0.8579976195326993,"Enlarged Cardiomediastinum":0.6947524020694753,Fracture:0.5935515388373229,"Lung Lesion":0.6723431094292022,"Lung Opacity":0.7734150067571538,"Pleural Effusion":0.9261763628274581,"Pleural Other":0.9423076923076923,Pneumonia:0.7539034635808829,Pneumothorax:0.6810413903625111,"Support Devices":0.762661166958042} },
+    { id:"RfullS_eps10",                 type:"mixed", n:55407, epochs:10, auroc:0.7558731249895673,
+      pathologies:{Atelectasis:0.7635268346111719,Cardiomegaly:0.838438405992833,Consolidation:0.8444444444444444,Edema:0.8688312477437388,"Enlarged Cardiomediastinum":0.7018074312974536,Fracture:0.530532486565706,"Lung Lesion":0.706086408073163,"Lung Opacity":0.7528497561548857,"Pleural Effusion":0.9123419957603831,"Pleural Other":0.9326923076923077,Pneumonia:0.7223983514306095,Pneumothorax:0.7305067418213971,"Support Devices":0.6987133959790209} },
+    { id:"RfullS_eps1",                  type:"mixed", n:55407, epochs:10, auroc:0.7532705846226818,
+      pathologies:{Atelectasis:0.7713399050748448,Cardiomegaly:0.8318045126321287,Consolidation:0.8367806267806268,Edema:0.864745851160031,"Enlarged Cardiomediastinum":0.7103406571255795,Fracture:0.5490962383976552,"Lung Lesion":0.6483759066540524,"Lung Opacity":0.7274516716610846,"Pleural Effusion":0.9139760147601477,"Pleural Other":0.9230769230769231,Pneumonia:0.70943469128953,Pneumothorax:0.709811560565871,"Support Devices":0.7660893793706293} },
+    { id:"Rfull_ep20",                   type:"real",  n:49907, epochs:20, auroc:0.752383826190032,
+      pathologies:{Atelectasis:0.7350857977364001,Cardiomegaly:0.8196603821151387,Consolidation:0.8519658119658119,Edema:0.8593022299903138,"Enlarged Cardiomediastinum":0.6850097426594101,Fracture:0.5852467024914509,"Lung Lesion":0.685272784610533,"Lung Opacity":0.7326076737763675,"Pleural Effusion":0.9050167163905681,"Pleural Other":0.8942307692307693,Pneumonia:0.7208775857969406,Pneumothorax:0.6818564876215739,"Support Devices":0.7667039991258742} },
+    { id:"R1100_pretrained",             type:"real",  n:1100,  epochs:30, auroc:0.6720066712721083,
+      pathologies:{Atelectasis:0.7093829864914203,Cardiomegaly:0.727110006662705,Consolidation:0.7392307692307691,Edema:0.8052305943662273,"Enlarged Cardiomediastinum":0.6467110125646711,Fracture:0.5451880801172447,"Lung Lesion":0.5834121728161463,"Lung Opacity":0.6632587108525765,"Pleural Effusion":0.837018463269739,"Pleural Other":0.08653846153846154,Pneumonia:0.5450731156376317,Pneumothorax:0.5601859526967286,"Support Devices":0.7022781905594405} },
+    { id:"S5500_eps1_clahe_pretrained",  type:"synth", n:5500,  epochs:30, auroc:0.5184173283892864,
+      pathologies:{Atelectasis:0.532092004381161,Cardiomegaly:0.4942520663389336,Consolidation:0.45042735042735044,Edema:0.4096012181129971,"Enlarged Cardiomediastinum":0.6247396358261104,Fracture:0.5315095261358085,"Lung Lesion":0.5301166824345632,"Lung Opacity":0.48886538574534344,"Pleural Effusion":0.567342355604407,"Pleural Other":0.5961538461538461,Pneumonia:0.49976717920266306,Pneumothorax:0.5323759394341292,"Support Devices":0.559918597027972} },
+    { id:"S5500_eps1_pretrained",        type:"synth", n:5500,  epochs:30, auroc:0.5010161539080314,
+      pathologies:{Atelectasis:0.5487404162102957,Cardiomegaly:0.5013649541713936,Consolidation:0.4791168091168091,Edema:0.4280444782809165,"Enlarged Cardiomediastinum":0.47564335147483705,Fracture:0.5075720566682951,"Lung Lesion":0.5689057079785557,"Lung Opacity":0.4416240672189905,"Pleural Effusion":0.4867912708382403,"Pleural Other":0.5480769230769231,Pneumonia:0.47909814139652845,Pneumothorax:0.5233684239610963,"Support Devices":0.5719241695804196} },
+    { id:"S5500_eps10_pretrained",       type:"synth", n:5500,  epochs:30, auroc:0.47808873573052074,
+      pathologies:{Atelectasis:0.405074844833881,Cardiomegaly:0.5354041740946824,Consolidation:0.43680911680911677,Edema:0.3440525847371299,"Enlarged Cardiomediastinum":0.5066854800779412,Fracture:0.5989252564728872,"Lung Lesion":0.5613371176285085,"Lung Opacity":0.48053645925142485,"Pleural Effusion":0.4503447960011515,"Pleural Other":0.3269230769230769,Pneumonia:0.4741519378616153,Pneumothorax:0.447826867816092,"Support Devices":0.49591619318181823} }
+  ];
+  var v1rows = [
+    { id:"R (v1, from-scratch)",         type:"real",  n:1100, epochs:30, auroc:0.6461, note:"reference" },
+    { id:"S5500_eps1 (v1, from-scratch)",type:"synth", n:5500, epochs:30, auroc:0.5211, note:"reference" }
+  ];
+  var TYPE_COLOR = { real:"var(--real)", mixed:"var(--mixed)", synth:"var(--synth)" };
+  var TYPE_LABEL = { real:"real-only", mixed:"real+synth", synth:"synth-only" };
+  var TARGET = 0.80, V1_BASELINE = 0.6461;
+
+  // ---- bar chart ----------------------------------------------------
+  var ranked = arms.slice().sort(function(a,b){ return b.auroc - a.auroc; });
+  var svg = document.getElementById("barchart");
+  var W = 800, H = 460;
+  var padL = 210, padR = 60, padT = 12, padB = 34;
+  var plotW = W - padL - padR;
+  var rowH = (H - padT - padB) / ranked.length;
+  var barH = Math.min(22, rowH * 0.46);
+  var xMax = 0.85;
+  function xScale(v){ return padL + (v / xMax) * plotW; }
+
+  var svgns = "http://www.w3.org/2000/svg";
+  function el(tag, attrs){
+    var e = document.createElementNS(svgns, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  // gridlines + axis
+  [0, 0.2, 0.4, 0.6, 0.8].forEach(function(g){
+    var x = xScale(g);
+    svg.appendChild(el("line", {x1:x, x2:x, y1:padT, y2:H-padB, stroke:"var(--grid)", "stroke-width":1}));
+    var t = el("text", {x:x, y:H-padB+16, class:"axislabel", "text-anchor":"middle"});
+    t.textContent = g.toFixed(1);
+    svg.appendChild(t);
+  });
+  svg.appendChild(el("line", {x1:padL, x2:padL, y1:padT, y2:H-padB, stroke:"var(--baseline)", "stroke-width":1}));
+
+  // v1 baseline reference
+  var xV1 = xScale(V1_BASELINE);
+  svg.appendChild(el("line", {x1:xV1, x2:xV1, y1:padT, y2:H-padB, stroke:"var(--ink-muted)", "stroke-width":1.2, "stroke-dasharray":"2 3"}));
+  var v1lab = el("text", {x:xV1, y:padT-2, class:"refline-label", fill:"var(--ink-muted)", "text-anchor":"middle"});
+  v1lab.textContent = "v1 baseline 0.646";
+  svg.appendChild(v1lab);
+
+  // target reference
+  var xT = xScale(TARGET);
+  svg.appendChild(el("line", {x1:xT, x2:xT, y1:padT, y2:H-padB, stroke:"var(--critical)", "stroke-width":1.4, "stroke-dasharray":"5 3"}));
+  var tlab = el("text", {x:xT, y:padT-2, class:"refline-label", fill:"var(--critical)", "text-anchor":"middle"});
+  tlab.textContent = "target 0.80";
+  svg.appendChild(tlab);
+
+  ranked.forEach(function(d, i){
+    var y = padT + i * rowH + (rowH - barH) / 2;
+    var color = TYPE_COLOR[d.type];
+
+    var label = el("text", {x:padL-14, y: y + barH*0.72, class:"barlabel", "text-anchor":"end"});
+    label.textContent = d.id;
+    svg.appendChild(label);
+
+    // rough monospace-width estimate to place the type-swatch dot just left of the label
+    var dotX = padL - 14 - (d.id.length * 6.6) - 10;
+    var dot = el("circle", {cx: dotX, cy: y + barH/2 - 2, r:3.5, fill:color});
+    svg.appendChild(dot);
+
+    var w = (xScale(d.auroc) - padL);
+    var rect = el("rect", {x:padL, y:y, width:Math.max(w,2), height:barH, rx:4, fill:color, class:"bar-hit", tabindex:"0"});
+    rect.setAttribute("role","img");
+    rect.setAttribute("aria-label", d.id + ": macro AUROC " + d.auroc.toFixed(4) + ", n=" + d.n.toLocaleString() + ", " + TYPE_LABEL[d.type]);
+    svg.appendChild(rect);
+
+    var val = el("text", {x: padL + w + 8, y: y + barH*0.72, class:"barvalue"});
+    val.textContent = d.auroc.toFixed(3);
+    svg.appendChild(val);
+
+    function show(evt){
+      var tt = document.getElementById("tooltip");
+      tt.innerHTML = '<div class="tt-title">'+d.id+'</div>'+
+        '<div class="tt-row"><span>type</span><span>'+TYPE_LABEL[d.type]+'</span></div>'+
+        '<div class="tt-row"><span>n_train</span><span>'+d.n.toLocaleString()+'</span></div>'+
+        '<div class="tt-row"><span>epochs</span><span>'+d.epochs+'</span></div>'+
+        '<div class="tt-row"><span>macro AUROC</span><span>'+d.auroc.toFixed(4)+'</span></div>';
+      tt.classList.add("show");
+      moveTooltip(evt);
+    }
+    function moveTooltip(evt){
+      var tt = document.getElementById("tooltip");
+      var x = (evt.clientX!=null ? evt.clientX : rect.getBoundingClientRect().right) + 14;
+      var y2 = (evt.clientY!=null ? evt.clientY : rect.getBoundingClientRect().top) - 10;
+      tt.style.left = x + "px"; tt.style.top = y2 + "px";
+    }
+    function hide(){ document.getElementById("tooltip").classList.remove("show"); }
+    rect.addEventListener("mousemove", moveTooltip);
+    rect.addEventListener("mouseenter", show);
+    rect.addEventListener("mouseleave", hide);
+    rect.addEventListener("focus", show);
+    rect.addEventListener("blur", hide);
+  });
+
+  // ---- dumbbell -------------------------------------------------------
+  var pairs = [
+    { label:"Backbone", sub:"R (v1) → R1100_pretrained", before:0.6461, after:0.6720, note:"small pool, from-scratch → ImageNet" },
+    { label:"Data scale", sub:"R1100_pretrained → Rfull", before:0.6720, after:0.7631, note:"1,100 → 49,907 real images" },
+    { label:"Mixing (best case)", sub:"Rfull → RfullS_eps10", before:0.7631, after:0.7559, note:"+5,500 synthetic images added" },
+    { label:"Synth-only backbone", sub:"S5500_eps1 (v1) → S5500_eps1_pretrained", before:0.5211, after:0.5010, note:"from-scratch → ImageNet, synthetic-only" }
+  ];
+  var dbW = 480, dbMin = 0.44, dbMax = 0.80;
+  function dbX(v){ return ((v - dbMin) / (dbMax - dbMin)) * dbW; }
+  var dbHost = document.getElementById("dumbbell");
+  pairs.forEach(function(p){
+    var up = p.after >= p.before;
+    var rel = ((p.after - p.before) / p.before) * 100;
+    var row = document.createElement("div");
+    row.className = "dumbbell-row";
+
+    var labelCol = document.createElement("div");
+    labelCol.className = "dumbbell-label";
+    labelCol.innerHTML = "<b>"+p.label+"</b><br>"+p.note;
+    row.appendChild(labelCol);
+
+    var svgEl = document.createElementNS(svgns, "svg");
+    svgEl.setAttribute("viewBox", "0 0 "+dbW+" 28");
+    svgEl.setAttribute("width", "100%");
+    svgEl.setAttribute("height", "28");
+    svgEl.setAttribute("role", "img");
+    svgEl.setAttribute("aria-label", p.sub+": "+p.before.toFixed(4)+" to "+p.after.toFixed(4));
+    var x1 = dbX(p.before), x2 = dbX(p.after);
+    svgEl.appendChild(el("line", {x1:x1, x2:x2, y1:14, y2:14, stroke:"var(--baseline)", "stroke-width":2}));
+    svgEl.appendChild(el("circle", {cx:x1, cy:14, r:5, fill:"var(--surface)", stroke:"var(--ink-muted)", "stroke-width":1.6}));
+    svgEl.appendChild(el("circle", {cx:x2, cy:14, r:5.5, fill: up ? "var(--good)" : "var(--critical)"}));
+    row.appendChild(svgEl);
+
+    var deltaEl = document.createElement("div");
+    deltaEl.className = "delta " + (up ? "up" : "down");
+    var arrow = up
+      ? '<svg viewBox="0 0 10 10"><path d="M5 8V2M2 5l3-3 3 3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : '<svg viewBox="0 0 10 10"><path d="M5 2v6M2 5l3 3 3-3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    deltaEl.innerHTML = arrow + (up?"+":"") + rel.toFixed(1) + "%";
+    row.appendChild(deltaEl);
+
+    dbHost.appendChild(row);
+  });
+
+  // ---- table ------------------------------------------------------------
+  var PATH_COLS = ["Atelectasis","Cardiomegaly","Consolidation","Edema","Enlarged Cardiomediastinum",
+    "Fracture","Lung Lesion","Lung Opacity","No Finding","Pleural Effusion","Pleural Other","Pneumonia",
+    "Pneumothorax","Support Devices"];
+  var table = document.getElementById("results-table");
+  var thead = document.createElement("thead");
+  var htr = document.createElement("tr");
+  ["Arm","Type","n_train","Epochs","Macro"].concat(PATH_COLS).forEach(function(c){
+    var th = document.createElement("th"); th.textContent = c; htr.appendChild(th);
+  });
+  thead.appendChild(htr);
+  table.appendChild(thead);
+
+  var tbody = document.createElement("tbody");
+  function addRow(d, isV1){
+    var tr = document.createElement("tr");
+    if (isV1) tr.className = "v1-row";
+    var tdName = document.createElement("td"); tdName.textContent = d.id; tr.appendChild(tdName);
+    var tdType = document.createElement("td");
+    tdType.innerHTML = '<span class="type-dot" style="background:'+TYPE_COLOR[d.type]+'"></span>'+TYPE_LABEL[d.type];
+    tr.appendChild(tdType);
+    var tdN = document.createElement("td"); tdN.textContent = d.n.toLocaleString(); tr.appendChild(tdN);
+    var tdE = document.createElement("td"); tdE.textContent = d.epochs; tr.appendChild(tdE);
+    var tdM = document.createElement("td"); tdM.className="macro"; tdM.textContent = d.auroc.toFixed(4); tr.appendChild(tdM);
+    PATH_COLS.forEach(function(p){
+      var td = document.createElement("td");
+      var v = d.pathologies ? d.pathologies[p] : undefined;
+      td.textContent = (v===undefined || v===null) ? "—" : v.toFixed(3);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  ranked.forEach(function(d){ addRow(d, false); });
+  var divTr = document.createElement("tr");
+  var divTd = document.createElement("td");
+  divTd.colSpan = 5 + PATH_COLS.length;
+  divTd.textContent = "v1 reference (from-scratch, matched-pool)";
+  divTr.className = "table-divider";
+  divTr.appendChild(divTd);
+  tbody.appendChild(divTr);
+  v1rows.forEach(function(d){ addRow(d, true); });
+  table.appendChild(tbody);
+})();
+</script>
