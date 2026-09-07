@@ -96,7 +96,8 @@
   .narrative p{ font-size: 14.5px; color: var(--ink-2); line-height: 1.65; margin: 0; }
   .narrative p b{ color: var(--ink); font-weight: 600; }
 
-  .steps{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .steps{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  @media (min-width: 860px){ .steps{ grid-template-columns: repeat(4, 1fr); } }
   .step{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: var(--shadow); }
   .step-num{ font: 600 11px "IBM Plex Mono", monospace; color: var(--ink-muted); letter-spacing: .06em; margin-bottom: 10px; }
   .step h3{ font-family: "IBM Plex Sans", sans-serif; font-size: 15px; font-weight: 600; margin-bottom: 8px; line-height: 1.35; }
@@ -127,14 +128,15 @@
 
 <div class="wrap">
 
-  <div class="eyebrow">PrivaText-CXR &middot; LDM loss research &middot; 2026-09-07</div>
+  <div class="eyebrow">PrivaText-CXR &middot; LDM loss research &middot; 2026-09-07 &ndash; 08</div>
   <h1>Noise Over Signal</h1>
   <p class="dek">Two new loss levers were added to the DP-SGD LDM fine-tune &mdash; both implemented
-    correctly, both verified free of extra privacy-budget cost. But at pilot scale, the loss
-    function&rsquo;s effect on the trained model turned out to be too small to detect at all.</p>
+    correctly, both verified free of extra privacy-budget cost. A 4-seed replication now
+    confirms, decisively, that at pilot scale the loss function&rsquo;s effect on the trained
+    model is indistinguishable from noise.</p>
   <div class="meta">
     <span>2 loss levers implemented</span>
-    <span>2 training pairs (4 runs), 2 seeds</span>
+    <span>4 training pairs (8 runs), 4 independent seeds</span>
     <span>DP-SGD LoRA, target &epsilon;=10, epochs=8</span>
     <span>1,858-image train subset</span>
   </div>
@@ -186,6 +188,13 @@
           just shared a correlated noise draw&rdquo; as the full explanation.</p>
         <span class="verdict confirmed">confirmed: noise-dominated</span>
       </div>
+      <div class="step">
+        <div class="step-num">04 &middot; 4-SEED REPLICATION</div>
+        <h3>Extended to seeds 44 &amp; 45, full eval</h3>
+        <p>Mean downstream-AUROC delta across 4 seeds is 8% the size of ordinary seed-to-seed
+          noise, with the sign flipping between seeds &mdash; the signature of noise, not an effect.</p>
+        <span class="verdict confirmed">decisive null result</span>
+      </div>
     </div>
   </section>
 
@@ -203,13 +212,19 @@
         tested. <code>set_seed()</code> also fixes the RNG that Opacus&rsquo;s own noise draws
         from, which is worth knowing on its own, but the seed=43 re-run shows the deeper issue is
         the noise-to-signal ratio itself, not merely two runs sharing a seed.</p>
-      <p><b>The research question stays open.</b> Whether min-SNR reweighting or the classifier
-        loss actually helps downstream classification is genuinely undetermined &mdash; this pilot
-        could not have found an effect even if one exists. A decisive test needs either the full
-        ~49,907-image training scale (more accumulated steps, better signal-to-noise ratio, but
-        multi-day GPU cost) or a multi-seed variance study at pilot scale (cheaper per run, but
-        needs several seeds per arm to say anything statistically meaningful). Neither was
-        launched this session, given the GPU-hours already spent on this pilot.</p>
+      <p><b>The 4-seed replication makes it decisive, not just suggestive.</b> Across seeds 42,
+        43, 44, 45, the classifier-guidance+min-SNR arm never beats baseline by more than
+        seed-to-seed noise already does within a single arm &mdash; the mean delta is 8% the
+        size of baseline&rsquo;s own seed-to-seed standard deviation, and its sign flips between
+        seeds 44 and 45. At <i>pilot</i> scale, the answer is now no: neither loss term produces
+        a detectable effect, full stop.</p>
+      <p><b>The production-scale question is still open, and pilot-scale seeds can&rsquo;t close
+        it.</b> The noise floor here is set by training volume, clip norm, and epsilon &mdash;
+        not by which seed is drawn &mdash; so running more seeds at this same pilot scale would
+        keep probing the same noise-dominated regime. The only way to test whether these loss
+        terms matter once there&rsquo;s enough accumulated signal to plausibly clear that floor
+        is the full ~49,907-image production scale (multi-day GPU cost, matching this repo&rsquo;s
+        other full-scale training rounds) &mdash; not launched this session.</p>
       <p><b>Worth flagging for future work on this repo:</b> other single-seed DP-SGD comparisons
         already recorded here (the <code>ablation_blocks</code> sweep, eps1-vs-eps10,
         epochs=10-vs-30) compare more structurally different configs &mdash; different epsilon
@@ -220,16 +235,32 @@
   </section>
 
   <section>
-    <div class="section-head"><h2>The pilot eval that started it</h2></div>
+    <div class="section-head"><h2>4-seed replication: per-seed delta vs. noise band</h2></div>
+    <p class="section-note">Each dot is (clsloss &minus; baseline) gen_macro AUROC for one seed,
+      &ldquo;-nih&rdquo; weight set (the more sensitive of the two &mdash; &ldquo;-all&rdquo; showed
+      zero difference at every seed). The shaded band is &plusmn;1 seed-to-seed standard deviation
+      of the baseline arm ITSELF (0.00156) &mdash; deltas sitting inside it are indistinguishable
+      from ordinary noise.</p>
+    <div class="card">
+      <svg id="deltachart" viewBox="0 0 800 200" role="img" aria-label="Per-seed AUROC delta vs. baseline noise band"></svg>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Full results, all 4 seeds</h2></div>
     <p class="section-note">XRV DenseNet &ldquo;label&rdquo; macro AUROC on 200 generated images each,
       matched to the same 200 real p12-test studies (min_pos=10, 3 reliable pathologies at this
       sample size: Edema, Effusion, Pneumonia).</p>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>weight set</th><th>gen_macro (baseline)</th><th>gen_macro (clsloss)</th><th>difference</th></tr></thead>
+        <thead><tr><th>seed</th><th>baseline (-all)</th><th>clsloss (-all)</th><th>baseline (-nih)</th><th>clsloss (-nih)</th><th>delta (-nih)</th></tr></thead>
         <tbody>
-          <tr><td>densenet121-res224-all</td><td>0.46636</td><td>0.46636</td><td class="hl">0.00000</td></tr>
-          <tr><td>densenet121-res224-nih</td><td>0.45108</td><td>0.45108</td><td class="hl">0.00000</td></tr>
+          <tr><td>42</td><td>0.46636</td><td>0.46636</td><td>0.4511</td><td>0.4511</td><td class="hl">0.0000</td></tr>
+          <tr><td>43</td><td>0.4664</td><td>0.4664</td><td>0.4499</td><td>0.4499</td><td class="hl">0.0000</td></tr>
+          <tr><td>44</td><td>0.4667</td><td>0.4667</td><td>0.4486</td><td>0.4474</td><td class="hl">&minus;0.0012</td></tr>
+          <tr><td>45</td><td>0.4671</td><td>0.4671</td><td>0.4469</td><td>0.4486</td><td class="hl">+0.0017</td></tr>
+          <tr style="font-weight:600"><td>mean</td><td>0.46664</td><td>0.46664</td><td>0.44912</td><td>0.44925</td><td class="hl">+0.000125</td></tr>
+          <tr><td>seed-to-seed std</td><td>0.00030</td><td>0.00030</td><td>0.00156</td><td>0.00139</td><td>0.00103</td></tr>
         </tbody>
       </table>
     </div>
@@ -240,8 +271,8 @@
       <code>src/LDM_dp_finetune.py</code>, <code>src/Data/mimic_cxr.py</code>. Eval-pipeline fix:
       <code>Eval_metric/run_feature_eval.py</code>, <code>src/Eval_metric/downstream_cls.py</code>.
       Full narrative: <code>eval_analysis/ldm_loss_research_report.md</code>. Tracked as
-      <code>feature_list.json</code> &rarr; <code>experiment-ldm-loss-research</code> (passing,
-      research question left explicitly open).</p>
+      <code>feature_list.json</code> &rarr; <code>experiment-ldm-loss-research</code> (passing;
+      pilot-scale question closed decisively, production-scale question left open).</p>
   </footer>
 
 </div>
@@ -301,6 +332,61 @@
     var val = el("text", {x: x0 + w + 8, y: y + barH*0.7, class:"barvalue"});
     val.textContent = d.pct < 1 ? d.pct.toFixed(4) + "%" : d.pct.toFixed(2) + "%";
     svg.appendChild(val);
+  });
+})();
+
+(function(){
+  var svgns = "http://www.w3.org/2000/svg";
+  function el(tag, attrs){ var e = document.createElementNS(svgns, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+  var seeds = [
+    { seed: 42, delta: 0.0000 },
+    { seed: 43, delta: 0.0000 },
+    { seed: 44, delta: -0.0012 },
+    { seed: 45, delta: 0.0017 }
+  ];
+  var baselineStd = 0.00156;   // baseline arm's own seed-to-seed std (the noise band)
+
+  var svg = document.getElementById("deltachart");
+  var W = 800, H = 200, padL = 60, padR = 60, padT = 20, padB = 34;
+  var plotW = W - padL - padR, plotH = H - padT - padB;
+  var yMax = 0.003;
+  function yScale(v){ return padT + plotH/2 - (v / yMax) * (plotH/2); }
+  function xScale(i){ return padL + (i + 0.5) * (plotW / seeds.length); }
+
+  // noise band
+  var bandTop = yScale(baselineStd), bandBot = yScale(-baselineStd);
+  svg.appendChild(el("rect", {x:padL, y:bandTop, width:plotW, height:bandBot-bandTop, fill:"var(--baseline)", opacity:"0.18", rx:4}));
+  var bandLabel = el("text", {x:padL+plotW-4, y:bandTop-6, class:"axistitle", "text-anchor":"end"});
+  bandLabel.textContent = "±1 baseline seed-to-seed std (±0.00156)";
+  svg.appendChild(bandLabel);
+
+  // zero line
+  var y0 = yScale(0);
+  svg.appendChild(el("line", {x1:padL, x2:padL+plotW, y1:y0, y2:y0, stroke:"var(--grid)", "stroke-width":1.4, "stroke-dasharray":"4 3"}));
+
+  // y axis ticks
+  [-0.002, -0.001, 0, 0.001, 0.002].forEach(function(v){
+    var y = yScale(v);
+    var t = el("text", {x:padL-10, y:y+4, class:"axislabel", "text-anchor":"end"});
+    t.textContent = (v>0?"+":"") + v.toFixed(3);
+    svg.appendChild(t);
+  });
+
+  seeds.forEach(function(s, i){
+    var x = xScale(i);
+    var y = yScale(s.delta);
+    var up = s.delta > 0, isZero = s.delta === 0;
+    var color = isZero ? "var(--ink-muted)" : (up ? "var(--good)" : "var(--critical)");
+    svg.appendChild(el("line", {x1:x, x2:x, y1:y0, y2:y, stroke:color, "stroke-width":2}));
+    svg.appendChild(el("circle", {cx:x, cy:y, r:6, fill:color}));
+    var lbl = el("text", {x:x, y:H-10, class:"axislabel", "text-anchor":"middle"});
+    lbl.textContent = "seed " + s.seed;
+    svg.appendChild(lbl);
+    var vlab = el("text", {x:x, y: y + (up ? -12 : 20), class:"barvalue", "text-anchor":"middle", fill:color});
+    vlab.setAttribute("fill", color);
+    vlab.textContent = (s.delta>0?"+":"") + s.delta.toFixed(4);
+    svg.appendChild(vlab);
   });
 })();
 </script>

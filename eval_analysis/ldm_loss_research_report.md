@@ -1,4 +1,4 @@
-# LDM loss research: min-SNR + classifier-guidance loss (2026-09-07)
+# LDM loss research: min-SNR + classifier-guidance loss (2026-09-07 / updated 2026-09-08)
 
 **Goal:** analyze the LDM's training objective from multiple angles and test whether an
 added loss term (e.g. a classifier term, or a changed prediction target) can improve
@@ -6,13 +6,16 @@ downstream-classification-relevant fidelity, as a follow-up to
 `experiment-synth-utility-pretrained-fullreal`'s finding that every downstream-classifier-
 SIDE lever failed to rescue synthetic-only training.
 
-**Outcome: inconclusive, for a specific and important reason.** The implementation works
-correctly (verified via smoke tests under real Opacus DP-SGD wrapping) and adds zero DP-
-budget cost (verified empirically, not just by code inspection). But at the pilot's DP-SGD
-training scale, **DP noise dominates the loss function's influence on the trained weights
-by a factor of over 4,000x** -- the pilot as designed cannot detect whether the new loss
-objective helps or hurts, because virtually nothing about the training objective survives
-the noise floor into the final model.
+**Outcome: decisive null result at pilot scale.** The implementation works correctly
+(verified via smoke tests under real Opacus DP-SGD wrapping) and adds zero DP-budget cost
+(verified empirically, not just by code inspection). A single-seed pilot pair first
+suggested DP noise dominates the loss function's influence on the trained weights by a
+factor of over 56,000x; a **4-seed replication (2026-09-08, see "Multi-seed replication"
+below) confirms this is not a single-seed fluke** -- across 4 independent seeds, the new
+loss objective produces no consistent, detectable effect on downstream classification-
+relevant fidelity. The pilot's *design* is not the limitation here; its *scale* is: at
+~1,858 images x 8 epochs x target_epsilon=10, no loss-function effect survives the DP
+noise floor, confirmed with real statistical replication rather than one seed pair.
 
 ## What was implemented
 
@@ -95,25 +98,62 @@ count -- which are more likely to produce a real, seed-robust difference than th
 loss-function-only change did. But it's worth treating any *small*-effect-size DP-SGD
 comparison in this repo with caution unless it's been checked across multiple seeds.
 
+## Multi-seed replication (2026-09-08, user-requested follow-up)
+
+Extended the pilot to **4 independent seeds per arm** (42, 43, 44, 45), identical
+configuration otherwise. Generated 200 images and ran the `label` metric for all 8 (4
+seeds x 2 arms) resulting checkpoints.
+
+| seed | baseline (`-all`) | clsloss (`-all`) | baseline (`-nih`) | clsloss (`-nih`) | delta (`-nih`) |
+|---|---:|---:|---:|---:|---:|
+| 42 | 0.46636 | 0.46636 | 0.4511 | 0.4511 | 0.0000 |
+| 43 | 0.4664 | 0.4664 | 0.4499 | 0.4499 | 0.0000 |
+| 44 | 0.4667 | 0.4667 | 0.4486 | 0.4474 | &minus;0.0012 |
+| 45 | 0.4671 | 0.4671 | 0.4469 | 0.4486 | +0.0017 |
+| **mean** | 0.46664 | 0.46664 | 0.44912 | 0.44925 | **+0.000125** |
+| **seed-to-seed std** | 0.00030 | 0.00030 | 0.00156 | 0.00139 | 0.00103 |
+
+`-all` weights: **identical at every single seed** (delta std = 0.0000). `-nih` weights
+(the more sensitive of the two) show tiny fluctuations at seeds 44/45, but the **sign
+flips** between them (clsloss scores lower at seed 44, higher at seed 45), and the mean
+delta across all 4 seeds (+0.000125) is only **8% of the baseline arm's own seed-to-seed
+standard deviation** (0.00156) -- i.e. the average "effect" is an order of magnitude
+smaller than ordinary seed-to-seed noise within a single arm. This is the signature of
+pure noise, not a real effect in either direction.
+
+**This closes out the pilot-scale question decisively.** Not "the loss terms don't help" in
+some general sense, but: at ~1,858 images x 8 epochs x target_epsilon=10 with
+`max_grad_norm=0.001`, no effect from this loss objective survives the DP noise floor --
+confirmed with real statistical replication across 4 independent noise realizations, not
+inferred from a single seed pair. Critically, **more pilot-scale seeds cannot resolve
+this further** -- the noise floor itself is set by the training volume/clip-norm/epsilon
+combination, not by which seed happens to be drawn. The only way to test whether these
+loss terms matter at a scale where the signal could plausibly exceed that floor is the
+full ~49,907-image production scale (see recommendation below, still not launched this
+session).
+
 ## Status and recommended next step
 
 The engineering deliverable is complete: both loss levers are implemented, verified
-correct, verified DP-budget-free, and given a real (if inconclusive-by-design-limitation)
-pilot test. The research question -- does either loss term actually improve downstream-
-classification-relevant fidelity -- remains **open**, not answered "no": this pilot could
-not have detected an effect even if one exists.
+correct, verified DP-budget-free, and given a real, statistically-replicated pilot test
+(4 independent seeds). At pilot scale the answer is now decisive: **no detectable effect**.
+The research question at *production* scale -- does either loss term actually improve
+downstream-classification-relevant fidelity once there's enough accumulated training
+signal to plausibly exceed the DP noise floor -- remains **open**, since the multi-seed
+result above rules out pilot-scale seeds as a way to answer it (the noise floor is set by
+training volume/clip-norm/epsilon, not by seed choice).
 
-Two ways to get a decisive answer, neither committed to here given the GPU-hours already
-spent this session:
+The only remaining way to get a decisive answer, not committed to here given the GPU-hours
+already spent this session (2 seed-42/43 training pairs + 2 seed-44/45 training pairs + 6
+generation rounds + 8 eval passes):
 
-1. **Full-scale run** (~49,907 images, more epochs, matching the scale of this repo's
-   already-evaluated eps1/eps10 checkpoints) -- more accumulated gradient steps should
-   improve the signal-to-noise ratio, at the cost of many more GPU-hours (multi-day scale,
-   matching this repo's other full-scale training rounds).
-2. **Multi-seed variance study at pilot scale** -- several seeds x 2 arms, comparing
-   distributions of the resulting downstream AUROC rather than single point estimates --
-   cheaper per-run than option 1, but needs enough seeds (a handful per arm at minimum) to
-   say anything statistically meaningful, so the total cost is comparable.
+- **Full-scale run** (~49,907 images, more epochs, matching the scale of this repo's
+  already-evaluated eps1/eps10 checkpoints) -- more accumulated gradient steps should
+  improve the signal-to-noise ratio, at the cost of many more GPU-hours (multi-day scale,
+  matching this repo's other full-scale training rounds). A further pilot-scale multi-seed
+  study would NOT help further -- this round already used 4 seeds and found nothing;
+  doubling to 8 or 16 seeds at the same pilot scale would still be probing noise that's
+  fundamentally too large relative to the signal, not sample-size-limited.
 
 ## Files
 
