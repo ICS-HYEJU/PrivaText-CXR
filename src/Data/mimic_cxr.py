@@ -220,6 +220,16 @@ class MIMICCXRDataset(Dataset):
             )
         self.chexpert_csv = getattr(args, "chexpert_csv", None)
 
+        # Opt-in: also return each sample's raw CheXpert multi-hot vector from
+        # __getitem__ (3-tuple instead of the default 2-tuple), for callers
+        # that need ground-truth labels alongside the image/report (e.g. an
+        # auxiliary classification loss during LDM training). Off by default
+        # so every existing caller's (image, report) unpacking is unaffected.
+        # Only meaningful together with text_mode in ("LABEL", "LABEL+IMPRESSION"),
+        # since that's what attaches a CheXpert row to each sample in the
+        # first place.
+        self.return_chexpert_vector = bool(getattr(args, "return_chexpert_vector", False))
+
         # Optional patient-level filter for DP budget-isolated splits
         # (D_search / D_train / D_test).  When set, only samples whose
         # patient_id (e.g. "p10000032") is in this set are kept.
@@ -305,6 +315,10 @@ class MIMICCXRDataset(Dataset):
             image  : Tensor [1, H, W]  normalised to [-1, 1]
             report : str  - conditioning text; format depends on text_mode
                      (default: "FINDINGS: <...> IMPRESSION: <...>")
+            labels : Tensor [len(self.chexpert_label_cols)], float, in
+                     {1.0, 0.0, -1.0, NaN} per column - ONLY when
+                     self.return_chexpert_vector is True (3-tuple then,
+                     2-tuple otherwise - see that flag's docstring above).
         """
         meta = self.samples[idx]
 
@@ -317,7 +331,15 @@ class MIMICCXRDataset(Dataset):
             image = self._blank_image()
 
         report = self._build_text(meta)
-        return image, report
+        if not self.return_chexpert_vector:
+            return image, report
+
+        row = meta.get("chexpert_row") or {}
+        labels = torch.tensor(
+            [float(row.get(c, float("nan"))) for c in self.chexpert_label_cols],
+            dtype=torch.float32,
+        )
+        return image, report, labels
 
     # -------------------------------------------------------------------------
     # Index build
@@ -468,7 +490,8 @@ class MIMICCXRDataset(Dataset):
                 dropped += 1
                 continue
             meta = dict(meta)
-            meta["label_text"] = label_text
+            meta["label_text"]   = label_text
+            meta["chexpert_row"] = row     # raw {col: 1.0/0.0/-1.0/NaN}, for return_chexpert_vector
             kept.append(meta)
 
         print(f"[MIMICCXRDataset] CheXpert label match ({csv_path}): "

@@ -79,6 +79,10 @@ class LatentDiffusionDP(LatentDiffusion):
         scale_factor      = 1.0,
         scale_by_std      = False,
         device            = None,
+        cls_loss_weight   = 0.0,
+        cls_loss_max_t    = 300,
+        cls_loss_xrv_weights = 'densenet121-res224-nih',
+        chexpert_label_cols  = None,
         *args, **kwargs
     ):
         # Some LatentDiffusion variants take `device` as an explicit __init__
@@ -99,6 +103,17 @@ class LatentDiffusionDP(LatentDiffusion):
             *args, **kwargs,
         )
         self.embedder = embedder    # BioBERTEmbedder or None
+
+        # Auxiliary classifier-guidance loss (opt-in, off by default -- see
+        # classifier_guidance_loss() below). Adds no DP-budget cost: it's
+        # folded into the SAME per-sample backward pass Opacus already clips
+        # and noises (privacy accounting depends only on target_epsilon/
+        # target_delta/sample_rate/epochs, not on the loss function's shape).
+        self.cls_loss_weight      = float(cls_loss_weight)
+        self.cls_loss_max_t       = cls_loss_max_t          # None = apply at every t
+        self.cls_loss_xrv_weights = cls_loss_xrv_weights
+        self.chexpert_label_cols  = chexpert_label_cols     # fixed column order for label vectors
+        self._xrv_classifier      = None                    # lazy-loaded on first use
 
     # =========================================================================
     # Checkpoint (override: broader key unwrapping than parent)
@@ -264,6 +279,9 @@ class LatentDiffusionDP(LatentDiffusion):
             {
                 'image'  : Tensor [B, 1, H, W]
                 'reports': list[str]
+                'labels' : Tensor [B, len(chexpert_label_cols)], OPTIONAL --
+                           only present when the classifier-guidance loss is
+                           enabled (see LDM_dp_finetune.py's collate_fn).
             }
 
         Model parallelism: if self.offload_device != self.device,
@@ -272,7 +290,8 @@ class LatentDiffusionDP(LatentDiffusion):
         - c is moved back to self.device after BioBERT embedding
 
         Returns:
-            z, c  - both on self.device (UNet GPU).
+            z, c, labels  - z/c on self.device (UNet GPU); labels on
+                            self.device too (or None if batch has no 'labels').
         """
         # offload_device: GPU where frozen VAE + BioBERT live.
         # Equals self.device in single-GPU mode; differs in model-parallel mode.
@@ -294,7 +313,11 @@ class LatentDiffusionDP(LatentDiffusion):
         c = self.embedder(batch['reports'])    # list[str] -> [B, seq_len, output_dim]
         c = c.to(self.device)
 
-        return z, c
+        labels = batch.get('labels')
+        if labels is not None:
+            labels = labels.to(self.device)
+
+        return z, c, labels
 
     def training_step_dp(self, batch: dict):
         """
@@ -305,8 +328,140 @@ class LatentDiffusionDP(LatentDiffusion):
             loss     : scalar Tensor  (call .backward() externally)
             loss_dict: dict[str, Tensor]
         """
-        z, c = self.get_input_dp(batch)
+        z, c, labels = self.get_input_dp(batch)
         t    = torch.randint(
             0, self.num_timesteps, (z.shape[0],), device=self.device
         ).long()
-        return self.p_losses(z, c, t)
+        return self.p_losses(z, c, t, chexpert_labels=labels)
+
+    # =========================================================================
+    # DP-specific: p_losses override (adds the optional classifier-guidance
+    # term on top of the parent's diffusion loss, reusing the SAME UNet
+    # forward pass -- see LDM.py's _diffusion_forward/_loss_from_model_output).
+    # =========================================================================
+
+    def p_losses(self, x_start, cond, t, noise=None, chexpert_labels=None):
+        model_output, x_noisy, _noise, target = self._diffusion_forward(x_start, cond, t, noise)
+        loss, loss_dict = self._loss_from_model_output(model_output, target, t)
+
+        if self.cls_loss_weight > 0 and chexpert_labels is not None:
+            cls_loss = self.classifier_guidance_loss(x_noisy, t, model_output, chexpert_labels)
+            if cls_loss is not None:
+                prefix = 'train' if self.training else 'val'
+                loss = loss + self.cls_loss_weight * cls_loss
+                loss_dict[f'{prefix}/loss_cls']   = cls_loss.detach()
+                loss_dict[f'{prefix}/loss_total']  = loss.detach()
+
+        return loss, loss_dict
+
+    # =========================================================================
+    # DP-specific: auxiliary classifier-guidance loss
+    # =========================================================================
+
+    def _get_xrv_classifier(self):
+        """
+        Lazily load the frozen TorchXRayVision DenseNet used as the auxiliary
+        classification signal (same loader/convention as
+        Eval_metric/downstream_cls.py -- no duplicate logic). Loaded once,
+        cached on self, moved to offload_device (colocated with the frozen
+        VAE it consumes decoded output from).
+
+        Deliberately defaults to the '-nih' weight set (NIH ChestX-ray14
+        only) rather than '-all', since '-all' likely includes MIMIC-CXR
+        itself in its own (non-private) training data -- using '-nih' avoids
+        any question of the auxiliary signal having seen this private
+        dataset's patients, even though the formal per-run DP guarantee of
+        THIS fine-tune does not depend on that choice (the classifier is
+        frozen/non-trainable here, so it isn't part of what this run's own
+        (epsilon, delta) budget is protecting).
+        """
+        if self._xrv_classifier is None:
+            import sys as _sys
+            _this = os.path.dirname(os.path.abspath(__file__))
+            _eval_metric_root = os.path.abspath(os.path.join(_this, '..', '..', '..'))
+            if _eval_metric_root not in _sys.path:
+                _sys.path.insert(0, _eval_metric_root)
+            from Eval_metric.downstream_cls import load_xrv_classifier, XRV_TO_CHEXPERT
+            offload_dev = getattr(self, 'offload_device', self.device)
+            clf = load_xrv_classifier(self.cls_loss_xrv_weights, offload_dev)
+            for p in clf.parameters():
+                p.requires_grad_(False)
+            self._xrv_classifier = clf
+            self._xrv_to_chexpert = XRV_TO_CHEXPERT
+            print(f'[cls_loss] loaded frozen XRV classifier '
+                  f'({self.cls_loss_xrv_weights}) -> {offload_dev}')
+        return self._xrv_classifier
+
+    def classifier_guidance_loss(self, x_noisy, t, model_output, chexpert_labels):
+        """
+        BCE between the frozen XRV classifier's prediction on a VAE-decoded
+        estimate of x0, and the study's real CheXpert multi-hot label.
+
+        Only meaningful at low-to-mid noise (small t), where the x0 estimate
+        is actually informative -- gated by self.cls_loss_max_t (samples with
+        t >= cls_loss_max_t are skipped for this loss; base diffusion loss
+        still applies to them as normal). Since --physical_batch is 1 for
+        Opacus/Poisson-sampling compatibility (see LDM_dp_finetune.py), this
+        gate is a simple per-physical-batch skip, not a masked/batched op.
+
+        Args:
+            x_noisy         : [B, z_ch, h, w] noised latent actually fed to the UNet
+            t               : [B] timesteps
+            model_output    : [B, z_ch, h, w] UNet output (eps or x0 depending
+                              on self.parameterization)
+            chexpert_labels : [B, len(chexpert_label_cols)] raw values in
+                              {1.0, 0.0, -1.0, NaN}
+
+        Returns:
+            scalar Tensor, or None if every sample in the batch is gated out
+            by cls_loss_max_t (caller skips adding it to the loss that step).
+        """
+        if self.cls_loss_max_t is not None:
+            keep = t < self.cls_loss_max_t
+            if not bool(keep.any()):
+                return None
+            if not bool(keep.all()):
+                x_noisy, t, model_output, chexpert_labels = (
+                    x_noisy[keep], t[keep], model_output[keep], chexpert_labels[keep])
+
+        # Predicted x0 (latent space). eps-parameterization: invert q_sample
+        # with the existing predict_start_from_noise helper. x0-parameterization:
+        # the UNet output already IS the x0 estimate.
+        if self.parameterization == 'eps':
+            x0_hat = self.predict_start_from_noise(x_noisy, t=t, noise=model_output)
+        else:
+            x0_hat = model_output
+
+        offload_dev = getattr(self, 'offload_device', self.device)
+        x0_hat_pixel = self.first_stage_model.decode(x0_hat.to(offload_dev) / self.scale_factor)
+
+        import torch.nn.functional as F
+        x0_224 = F.interpolate(x0_hat_pixel, size=(224, 224), mode='bilinear', align_corners=False)
+        x0_224 = x0_224.clamp(-1., 1.) * 1024.   # xrv normalize convention (downstream_cls.classify)
+
+        clf = self._get_xrv_classifier()
+        probs = clf(x0_224.to(offload_dev))      # [B, 18] probabilities (xrv applies sigmoid internally)
+
+        pathologies = list(clf.pathologies)
+        if self.chexpert_label_cols is None:
+            return None    # can't align columns without the fixed label order
+        col_index = {c: i for i, c in enumerate(self.chexpert_label_cols)}
+
+        losses, n_terms = 0.0, 0
+        for xi, pname in enumerate(pathologies):
+            col = self._xrv_to_chexpert.get(pname)
+            if col is None or col not in col_index:
+                continue
+            yi = col_index[col]
+            tgt = chexpert_labels[:, yi].to(offload_dev)
+            mask = (tgt == 0.0) | (tgt == 1.0)   # drop uncertain(-1)/missing(NaN)
+            if not bool(mask.any()):
+                continue
+            pred = probs[:, xi][mask]    # torchxrayvision applies sigmoid internally -- these
+            true = tgt[mask]              # are already probabilities in [0,1], not raw logits
+            losses = losses + F.binary_cross_entropy(pred.clamp(1e-6, 1 - 1e-6), true, reduction='mean')
+            n_terms += 1
+
+        if n_terms == 0:
+            return None
+        return (losses / n_terms).to(self.device)

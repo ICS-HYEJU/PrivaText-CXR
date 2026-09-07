@@ -264,6 +264,7 @@ class DDPM(nn.Module):
                  logvar_init: float = 0.,
                  lr: float = 1e-4,
                  use_dp: bool = False,
+                 min_snr_gamma: float = None,
                  ):
         super().__init__()
         assert parameterization in ("eps", "x0"), \
@@ -280,6 +281,10 @@ class DDPM(nn.Module):
         self.v_posterior           = v_posterior
         self.original_elbo_weight  = original_elbo_weight
         self.l_simple_weight       = l_simple_weight
+        # Min-SNR-gamma loss reweighting (Hang et al. 2023): per-timestep loss
+        # weight = min(SNR(t), gamma) / SNR(t), eps-parameterization only.
+        # None (default) = off, identical to pre-existing uniform weighting.
+        self.min_snr_gamma         = min_snr_gamma
 
         # UNet wrapped for conditioning dispatch
         self.model = DiffusionWrapper(unet, conditioning_key)

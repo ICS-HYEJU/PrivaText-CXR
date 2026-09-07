@@ -168,7 +168,8 @@ def _make_dataset(root_path: str, split: str,
                   max_length: int = 512,
                   patient_whitelist=None,
                   text_mode=None,
-                  chexpert_csv=None) -> MIMICCXRDataset:
+                  chexpert_csv=None,
+                  return_chexpert_vector=False) -> MIMICCXRDataset:
     """
     Construct a MIMICCXRDataset for the given split.
 
@@ -201,6 +202,7 @@ def _make_dataset(root_path: str, split: str,
         patient_whitelist = patient_whitelist,
         text_mode         = text_mode,
         chexpert_csv      = chexpert_csv,
+        return_chexpert_vector = return_chexpert_vector,
     )
     return MIMICCXRDataset(ds_args)
 
@@ -351,6 +353,34 @@ def parse_args():
                              '-1 = all 16 blocks; N = only blocks[N-1:] (the '
                              'last len(blocks)-N+1 blocks).')
     parser.add_argument('--finetune_biobert', default=False)
+
+    # Loss / training-objective research levers (all off by default --
+    # backward-compatible with every checkpoint trained before these existed) --
+    parser.add_argument('--min_snr_gamma', default=None, type=float,
+                        help='Min-SNR-gamma loss reweighting (Hang et al. 2023): '
+                             'per-timestep weight = min(SNR(t), gamma)/SNR(t), '
+                             'eps-parameterization only. None (default) = off, '
+                             'identical to the pre-existing uniform weighting. '
+                             'Typical value from the paper: 5.0.')
+    parser.add_argument('--cls_loss_weight', default=0.0, type=float,
+                        help='Weight of an auxiliary classifier-guidance loss: '
+                             'BCE between a frozen TorchXRayVision classifier\'s '
+                             'prediction on a VAE-decoded x0 estimate, and the '
+                             'study\'s real CheXpert label. 0.0 (default) = off. '
+                             'Requires --text_mode LABEL or LABEL+IMPRESSION (needs '
+                             'a CheXpert row per sample). Adds no DP-budget cost -- '
+                             'folded into the same per-sample backward pass Opacus '
+                             'already clips and noises.')
+    parser.add_argument('--cls_loss_max_t', default=300, type=int,
+                        help='Only apply --cls_loss_weight when t < this value '
+                             '(the x0 estimate is too noisy to be informative at '
+                             'high t). Set to --timesteps to apply at every t.')
+    parser.add_argument('--cls_loss_xrv_weights', default='densenet121-res224-nih',
+                        help='TorchXRayVision weight set for the auxiliary '
+                             'classifier. Defaults to the NIH-only weights (not '
+                             '"-all", which likely includes MIMIC-CXR itself in '
+                             'its own training data) so the auxiliary signal has '
+                             'no dependency on this private dataset\'s patients.')
 
     # LoRA (adapt-lora) --------------------------------------------------------
     parser.add_argument('--use_lora', default=True,
@@ -505,7 +535,20 @@ def _pin_ldm_buffers_to_device(ldm, device, offload_device, verbose=False):
 # =============================================================================
 
 def _raw_collate_fn(samples):
-    """Collate into {'image': Tensor[B,1,H,W], 'reports': list[str]}."""
+    """Collate into {'image': Tensor[B,1,H,W], 'reports': list[str]}.
+
+    `samples` items are 2-tuples (image, report) normally, or 3-tuples
+    (image, report, labels) when dataset.return_chexpert_vector is True
+    (see --cls_loss_weight) -- detected from the tuple length so this stays
+    a single collate_fn for both cases.
+    """
+    if len(samples[0]) == 3:
+        images, reports, labels = zip(*samples)
+        return {
+            'image'  : torch.stack(images),
+            'reports': list(reports),
+            'labels' : torch.stack(labels),
+        }
     images, reports = zip(*samples)
     return {
         'image'  : torch.stack(images),
@@ -514,12 +557,16 @@ def _raw_collate_fn(samples):
 
 
 def _dp_raw_collate_fn(samples):
-    """Collate into (Tensor[B,1,H,W], list[str]) tuple.
+    """Collate into a (Tensor[B,1,H,W], list[str][, Tensor[B,n_labels]]) tuple.
 
-    Returns a tuple instead of a dict so that Opacus BatchMemoryManager can
-    split each element by index: tensor[start:end] for images and
-    list[start:end] for reports.
+    Returns a tuple (not a dict) so that Opacus BatchMemoryManager can split
+    each element by index: tensor[start:end] for images/labels, list[start:end]
+    for reports. 2-tuple when dataset.return_chexpert_vector is False (default,
+    identical to before --cls_loss_weight existed); 3-tuple when True.
     """
+    if len(samples[0]) == 3:
+        images, reports, labels = zip(*samples)
+        return torch.stack(images), list(reports), torch.stack(labels)
     images, reports = zip(*samples)
     return torch.stack(images), list(reports)
 
@@ -577,8 +624,10 @@ def evaluate(ldm, val_loader, device, max_batches=-1):
     for i, batch in enumerate(val_loader):
         if max_batches > 0 and i >= max_batches:
             break
-        batch = {'image': batch['image'].to(device), 'reports': batch['reports']}
-        loss, _ = inner.training_step_dp(batch)
+        eval_batch = {'image': batch['image'].to(device), 'reports': batch['reports']}
+        if 'labels' in batch:
+            eval_batch['labels'] = batch['labels'].to(device)
+        loss, _ = inner.training_step_dp(eval_batch)
         losses.append(loss.item())
 
     inner.train()
@@ -770,6 +819,13 @@ def main():
     print(f'Split CSV : {args.split_csv}')
     print(f'Text mode : {args.text_mode or "FINDINGS+IMPRESSION (legacy)"}')
 
+    if args.cls_loss_weight > 0 and args.text_mode not in ('LABEL', 'LABEL+IMPRESSION'):
+        raise ValueError(
+            '--cls_loss_weight > 0 requires --text_mode LABEL or LABEL+IMPRESSION '
+            '(the auxiliary classifier loss needs a CheXpert row per sample).'
+        )
+    need_labels = args.cls_loss_weight > 0
+
     # ── Datasets ──────────────────────────────────────────────────────────────
     # DP budget isolation: restrict to the patient subset (e.g. p10 part) for
     # D_search / D_train when a dp_splits.json manifest is provided.
@@ -785,6 +841,7 @@ def main():
         patient_whitelist = train_whitelist,
         text_mode         = args.text_mode,
         chexpert_csv      = args.chexpert_csv,
+        return_chexpert_vector = need_labels,
     )
     n_train = len(train_dataset)
     print(f'[Train] training samples: {n_train}')
@@ -806,6 +863,7 @@ def main():
                 max_length   = args.max_length,
                 text_mode    = args.text_mode,
                 chexpert_csv = args.chexpert_csv,
+                return_chexpert_vector = need_labels,
             )
             print(f'[Validation] validate samples: {len(val_dataset)}')
         except FileNotFoundError as e:
@@ -857,6 +915,11 @@ def main():
         lr                = args.lr,
         device            = device,
         use_dp            = args.use_dp,
+        min_snr_gamma     = args.min_snr_gamma,
+        cls_loss_weight   = args.cls_loss_weight,
+        cls_loss_max_t    = args.cls_loss_max_t,
+        cls_loss_xrv_weights = args.cls_loss_xrv_weights,
+        chexpert_label_cols  = getattr(train_dataset, 'chexpert_label_cols', None),
     )
     ldm = ldm.to(device)
     if model_parallel:
@@ -1043,13 +1106,23 @@ def main():
             max_physical_batch_size = args.physical_batch,
             optimizer               = optimizer,
         ) as memory_safe_loader:
-            for images, reports in memory_safe_loader:
+            for row in memory_safe_loader:
+                # row is (images, reports) normally, or (images, reports,
+                # labels) when --cls_loss_weight > 0 (_dp_raw_collate_fn
+                # returns a 3-tuple only in that case).
+                if len(row) == 3:
+                    images, reports, labels = row
+                else:
+                    images, reports = row
+                    labels = None
                 optimizer.zero_grad()
 
                 batch = {
                     'image'  : images.to(device),
                     'reports': list(reports),
                 }
+                if labels is not None:
+                    batch['labels'] = labels.to(device)
                 loss, loss_dict = ldm._module.training_step_dp(batch)
                 loss.backward()
                 optimizer.step()

@@ -249,20 +249,27 @@ class LatentDiffusion(DDPM):
         # dict case: passed straight to DiffusionWrapper
         return self.model(z_noisy, t, **cond)
 
-    def p_losses(self, x_start, cond, t, noise=None):
+    def _diffusion_forward(self, x_start, cond, t, noise=None):
         """
-        Core diffusion loss.
+        Single UNet forward pass: sample x_noisy, run the model, and derive
+        the regression target. Factored out of p_losses so a subclass (see
+        LatentDiffusionDP.p_losses) can reuse the SAME model_output/x_noisy
+        for an auxiliary loss without paying for a second forward pass (and
+        without risking a second set of Opacus per-sample-grad hooks firing
+        on the same physical batch).
 
-        x_start : latent z  [B, z_ch, h, w]
-        cond    : context c [B, seq, dim]
-        t       : timesteps [B]
+        Returns:
+            model_output : UNet output, [B, z_ch, h, w] (predicted eps or x0
+                           depending on self.parameterization)
+            x_noisy      : the noised latent actually fed to the UNet
+            noise        : the noise actually sampled (== target when
+                           parameterization=='eps')
+            target       : x_start (parameterization=='x0') or noise
+                           (parameterization=='eps')
         """
         noise   = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
-
-        loss_dict = {}
-        prefix = 'train' if self.training else 'val'
 
         if self.parameterization == 'x0':
             target = x_start
@@ -271,8 +278,38 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError(f'Unknown parameterization: {self.parameterization}')
 
+        return model_output, x_noisy, noise, target
+
+    def _loss_from_model_output(self, model_output, target, t):
+        """
+        The scalar diffusion loss (+ loss_dict) given an already-computed
+        model_output/target pair (see _diffusion_forward). Split out of
+        p_losses for the same reuse reason.
+        """
+        loss_dict = {}
+        prefix = 'train' if self.training else 'val'
+
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict[f'{prefix}/loss_simple'] = loss_simple.mean()
+
+        # Min-SNR-gamma reweighting (Hang et al. 2023, arXiv:2303.09556):
+        # per-sample weight = min(SNR(t), gamma) / SNR(t), where
+        # SNR(t) = alphas_cumprod[t] / (1 - alphas_cumprod[t]). Caps the loss
+        # weight of very-low-noise (huge-SNR, "easy") timesteps at gamma
+        # instead of letting them dominate uniformly-weighted training --
+        # only defined for eps-parameterization (SNR-weighting the raw x0
+        # target directly would double-count the noise-schedule scaling
+        # already implicit in predicting x0 straight from x_noisy).
+        # self.min_snr_gamma is None (default) => identical to before this
+        # change: weight==1 for every t, byte-for-byte unchanged behavior.
+        if self.min_snr_gamma is not None:
+            if self.parameterization != 'eps':
+                raise NotImplementedError(
+                    'min_snr_gamma is only implemented for parameterization="eps"')
+            snr = self.alphas_cumprod[t] / (1.0 - self.alphas_cumprod[t])
+            snr_weight = torch.clamp(snr, max=self.min_snr_gamma) / snr.clamp(min=1e-8)
+            loss_simple = loss_simple * snr_weight
+            loss_dict[f'{prefix}/loss_simple_minsnr'] = loss_simple.mean()
 
         logvar_t = self.logvar[t.cpu()].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
@@ -289,6 +326,20 @@ class LatentDiffusion(DDPM):
         loss_dict[f'{prefix}/loss'] = loss
 
         return loss, loss_dict
+
+    def p_losses(self, x_start, cond, t, noise=None):
+        """
+        Core diffusion loss (thin wrapper: see _diffusion_forward /
+        _loss_from_model_output for the actual computation, split out so
+        LatentDiffusionDP.p_losses can add an auxiliary loss on the SAME
+        model_output without a second UNet forward pass).
+
+        x_start : latent z  [B, z_ch, h, w]
+        cond    : context c [B, seq, dim]
+        t       : timesteps [B]
+        """
+        model_output, _x_noisy, _noise, target = self._diffusion_forward(x_start, cond, t, noise)
+        return self._loss_from_model_output(model_output, target, t)
 
     # ¦¡¦¡ Training / Validation steps ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
 
