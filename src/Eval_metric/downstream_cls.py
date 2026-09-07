@@ -255,6 +255,9 @@ def compute_label_agreement(args, roc_png=None):
     from Eval_metric.features import load_image_as_tensor
     ds = MIMICCXRDataset(argparse.Namespace(
         root_path=args.root_path, split_csv=args.split_csv, split=args.eval_split,
+        manifest_csv=getattr(args, 'manifest_csv', None),
+        text_mode=getattr(args, 'label_text_mode', None),
+        chexpert_csv=getattr(args, 'chexpert_csv', None),
         image_size=args.image_size, max_length=args.max_length, patient_whitelist=None))
     valid = [(fp, idx) for fp, idx in pairs if 0 <= idx < len(ds)]
     if not valid:

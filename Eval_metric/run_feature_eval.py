@@ -223,6 +223,7 @@ def load_real_features(args, cache_path):
         whitelist = manifest.get(args.dp_split_group, manifest.get('groups', {}).get(args.dp_split_group))
     ds = MIMICCXRDataset(argparse.Namespace(
         root_path=args.root_path, split_csv=args.split_csv, split=args.eval_split,
+        manifest_csv=getattr(args, 'manifest_csv', None),
         image_size=args.image_size, max_length=args.max_length,
         patient_whitelist=whitelist))
     n = len(ds) if args.max_real in (None, 0) else min(args.max_real, len(ds))
@@ -241,6 +242,23 @@ def parse_args():
                         'MIMIC dataset by split (--root_path/--eval_split) instead.')
     p.add_argument('--root_path', default=None,
                    help='MIMIC root (dataset mode, when --real_dir is not given)')
+    p.add_argument('--manifest_csv', default=None,
+                   help='JPG manifest CSV (see docs/MIMIC_JPG_PIPELINE.md); when set, '
+                        'dataset-mode real-reference construction (currently: the '
+                        "'label' metric's compute_label_agreement) reads from this "
+                        'manifest instead of --root_path DICOM scanning. --root_path '
+                        'is still required alongside it (CheXpert csv fallback root).')
+    p.add_argument('--label_text_mode', default=None,
+                   choices=[None, 'LABEL', 'LABEL+IMPRESSION', 'FINDINGS'],
+                   help="text_mode for the 'label' metric's real-reference dataset "
+                        'construction. MUST match whatever text_mode/filtering was '
+                        'used to build the generated-image prompts (--gen_dir\'s '
+                        "descriptions.csv 'index' column is a raw dataset index into "
+                        'THIS construction) -- e.g. if prompts were built from a '
+                        "text_mode='LABEL+IMPRESSION' dataset (which drops studies "
+                        'with no positive CheXpert label and reorders), pass the same '
+                        'here or index 0 in descriptions.csv will silently pair '
+                        'against the wrong real study.')
     p.add_argument('--split_csv', default='mimic-cxr-2.0.0-split.csv')
     p.add_argument('--eval_split', default='test', help='train/validate/test')
     p.add_argument('--max_length', default=512, type=int)

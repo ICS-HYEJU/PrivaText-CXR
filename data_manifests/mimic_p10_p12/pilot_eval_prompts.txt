@@ -1,0 +1,200 @@
+LABEL: No Finding IMPRESSION: 1.  No evidence of foreign body.  2.  No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: 1.  No evidence of foreign body.  2.  No acute intrathoracic process.
+LABEL: Atelectasis IMPRESSION: No previous images. There are mild atelectatic changes at the left base.  However, no evidence of acute pneumonia, vascular congestion, or pleural  effusion.
+LABEL: Atelectasis IMPRESSION: No previous images. There are mild atelectatic changes at the left base.  However, no evidence of acute pneumonia, vascular congestion, or pleural  effusion.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormalities
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormalities
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion, Pneumonia
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion, Pneumonia
+LABEL: Lung Opacity, Pleural Effusion IMPRESSION: Left base opacity compatible with component of effusion with  possible underlying consolidation.
+LABEL: Lung Opacity, Pleural Effusion IMPRESSION: Left base opacity compatible with component of effusion with  possible underlying consolidation.
+LABEL: Atelectasis IMPRESSION: Minor left basilar atelectasis.
+LABEL: No Finding IMPRESSION: No visualized acute cardiopulmonary process or fracture.
+LABEL: No Finding IMPRESSION: No visualized acute cardiopulmonary process or fracture.
+LABEL: No Finding IMPRESSION: No evidence of a pneumothorax.
+LABEL: No Finding IMPRESSION: No evidence of a pneumothorax.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: Fracture IMPRESSION: 1.  Normal chest radiograph.  2.  No displaced rib fracture identified.  However, please note that  conventional chest radiographs are not sensitive for detection of rib  fractures.
+LABEL: Fracture IMPRESSION: 1.  Normal chest radiograph.  2.  No displaced rib fracture identified.  However, please note that  conventional chest radiographs are not sensitive for detection of rib  fractures.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: Consolidation, Lung Opacity, Pleural Effusion
+LABEL: Pneumothorax, Support Devices
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion
+LABEL: Cardiomegaly, Pleural Effusion, Support Devices IMPRESSION: 1. Stable cardiomegaly with bilateral pleural effusions.    2. Left lower lobe volume loss, likely secondary to atelectasis.    3. Right-sided PICC line is seen terminating within the mid to lower SVC.
+LABEL: Atelectasis, Enlarged Cardiomediastinum, Lung Opacity, Pleural Effusion, Support Devices IMPRESSION: 1.  A dual-lead left-sided pacer remains in place.  A nasogastric tube is seen  coursing below the diaphragm with the tip not identified.  An endotracheal  tube remains in place with its tip approximately 3 cm above the carina.   Overall cardiac and mediastinal contours are stable.  There are persistent  streaky opacities at the left base most likely reflecting atelectasis.  There  is possibly a small
+LABEL: No Finding IMPRESSION: Stable chest findings, no interval change since ___.  Thus, no evidence of pulmonary vascular congestion or acute infiltrates  on PA and lateral chest examination.
+LABEL: No Finding IMPRESSION: Stable chest findings, no interval change since ___.  Thus, no evidence of pulmonary vascular congestion or acute infiltrates  on PA and lateral chest examination.
+LABEL: No Finding, Support Devices IMPRESSION: Standard positioning of the endotracheal and orogastric tubes.
+LABEL: No Finding IMPRESSION: Normal chest radiograph.
+LABEL: No Finding IMPRESSION: Normal chest radiograph.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: Cardiomegaly, Consolidation, Pleural Effusion, Pneumonia, Support Devices IMPRESSION: Consolidation in the left mid and lower lung has increased substantially over  the past 10 hr consistent with an aggressive pneumonia.  There may be a small  volume of new left pleural effusion. Right lung and right pleural space are  unremarkable.  Borderline cardiomegaly is stable.    Right IJ line ends close to the superior cavoatrial junction. Nasogastric tube  ends in the mid to distal stomach.
+LABEL: No Finding, Support Devices IMPRESSION: Nasogastric tube tip in the stomach with the proximal side port  at the gastroesophageal junction, suggest advancement by 2-4cm.
+LABEL: No Finding, Support Devices IMPRESSION: Nasogastric tube tip in the stomach with the proximal side port  at the gastroesophageal junction, suggest advancement by 2-4cm.
+LABEL: Lung Opacity IMPRESSION: 1. No free air.    2.  New opacity in the left lung may represent infection or infarct.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No evidence of pneumonia.
+LABEL: No Finding IMPRESSION: No evidence of pneumonia.
+LABEL: No Finding IMPRESSION: No evidence of pneumonia.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: Normal chest radiographs.
+LABEL: No Finding IMPRESSION: Normal chest radiographs.
+LABEL: Consolidation, Lung Opacity IMPRESSION: In comparison with the earlier study of this date, there is little change.   The patient has taken a much better inspiration, which probably is responsible  for the apparent improvement of pulmonary opacifications since the study of 7  hr previously.  Again, the descending aorta is not well seen on the frontal view. On the  lateral projection, there is some opacification overlying the lower thoracic  vertebra. Although this could merely reflect vascular structu
+LABEL: Consolidation, Lung Opacity IMPRESSION: In comparison with the earlier study of this date, there is little change.   The patient has taken a much better inspiration, which probably is responsible  for the apparent improvement of pulmonary opacifications since the study of 7  hr previously.  Again, the descending aorta is not well seen on the frontal view. On the  lateral projection, there is some opacification overlying the lower thoracic  vertebra. Although this could merely reflect vascular structu
+LABEL: Consolidation, Lung Opacity IMPRESSION: In comparison with the earlier study of this date, there is little change.   The patient has taken a much better inspiration, which probably is responsible  for the apparent improvement of pulmonary opacifications since the study of 7  hr previously.  Again, the descending aorta is not well seen on the frontal view. On the  lateral projection, there is some opacification overlying the lower thoracic  vertebra. Although this could merely reflect vascular structu
+LABEL: Consolidation, Lung Opacity IMPRESSION: In comparison with the earlier study of this date, there is little change.   The patient has taken a much better inspiration, which probably is responsible  for the apparent improvement of pulmonary opacifications since the study of 7  hr previously.  Again, the descending aorta is not well seen on the frontal view. On the  lateral projection, there is some opacification overlying the lower thoracic  vertebra. Although this could merely reflect vascular structu
+LABEL: Cardiomegaly, Consolidation, Edema, Pleural Effusion IMPRESSION: Severe heterogeneous infiltrative pulmonary abnormality which worsened  progressively from ___ to ___ has improved. The rapid sequence  suggests that at least some of this is pulmonary edema. There are large  regions of residual consolidation, particularly in the right lower lobe that  could be pneumonia, either influenza or bacterial superinfection.  Pleural  effusion is small if any.  No pneumothorax.  Moderate enlargement of the  car
+LABEL: Edema, Lung Opacity, Pleural Effusion, Pneumonia IMPRESSION: 1. Persistent though improved streaky perihilar opacities likely reflect  residual pneumonia. Possible mild superimposed pulmonary edema.  2. Trace bilateral pleural effusions.
+LABEL: Edema, Lung Opacity, Pleural Effusion, Pneumonia IMPRESSION: 1. Persistent though improved streaky perihilar opacities likely reflect  residual pneumonia. Possible mild superimposed pulmonary edema.  2. Trace bilateral pleural effusions.
+LABEL: Consolidation, Pneumonia IMPRESSION: The severe multi focal pneumonia which progressed from ___ through  ___, had improved on ___.  Subsequently the right upper lobe  component has nearly resolved, and the right middle lobe and lower lobe  components have continued to improve.  There has also been a decrease in  pulmonary vascular congestion which reflected borderline cardiac  decompensation.  Small right pleural effusion may be present, but is probably  not clinically significant in and of itself.  
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process; specifically, no evidence of pneumonia.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process; specifically, no evidence of pneumonia.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Edema, Lung Opacity IMPRESSION: In comparison with the study of ___, there are lower lung volumes.   There has been substantial increase in an opacification bilaterally,  presenting a pattern consistent with pulmonary edema.  Retrocardiac  opacification probably reflects volume loss in the left lower lobe.  The right heart border is again not well seen. In the appropriate clinical  setting, an area of pneumonia or even multifocal consolidations would have to  be considered.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No evidence of acute disease.
+LABEL: No Finding IMPRESSION: No evidence of acute disease.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Atelectasis IMPRESSION: Low lung volumes with bibasilar atelectasis.
+LABEL: Atelectasis IMPRESSION: Low lung volumes with bibasilar atelectasis.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: Atelectasis IMPRESSION: No acute cardiopulmonary process.  Minimal bibasilar atelectasis.
+LABEL: Atelectasis IMPRESSION: No acute cardiopulmonary process.  Minimal bibasilar atelectasis.
+LABEL: Atelectasis IMPRESSION: No acute cardiopulmonary process.  Minimal bibasilar atelectasis.
+LABEL: No Finding
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No evidence of acute disease.
+LABEL: No Finding IMPRESSION: Satisfactory findings on followup examination to VATS procedure.
+LABEL: No Finding IMPRESSION: Satisfactory findings on followup examination to VATS procedure.
+LABEL: Atelectasis IMPRESSION: Interval increase in moderate bibasilar atelectasis, right  greater than left.  No pneumothorax.
+LABEL: Atelectasis IMPRESSION: Interval increase in moderate bibasilar atelectasis, right  greater than left.  No pneumothorax.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Atelectasis, Pneumonia
+LABEL: Atelectasis, Pneumonia
+LABEL: Lung Opacity, Support Devices
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No evidence of acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No evidence of acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: 1.  No free intraperitoneal air.    2.  No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: 1.  No free intraperitoneal air.    2.  No acute cardiopulmonary process.
+LABEL: No Finding, Support Devices IMPRESSION: Unchanged pulmonary venous congestion.  The monitoring and support devices are  unchanged.
+LABEL: Atelectasis, Cardiomegaly IMPRESSION: Comparison to ___.  Increasing areas of atelectasis at both the  left and the right lung basis.  No larger pleural effusions.  No overt  pulmonary edema but signs of mild fluid overload are present.  Stable moderate  cardiomegaly.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Support Devices IMPRESSION: 1. Endotracheal tube in standard position.    2. Mild pulmonary vascular engorgement.  Probable bibasilar atelectasis,  though aspiration or infection is not excluded.
+LABEL: Edema, Support Devices IMPRESSION: The ET tube tip, newly inserted, terminates at the carinal and should be  pulled back at least 4 cm (as has been demonstrated on the subsequent study).  There is no substantial change in cardiomediastinal silhouette but there is  mild progression of interstitial pulmonary edema
+LABEL: Cardiomegaly, Lung Opacity, Pleural Effusion, Support Devices IMPRESSION: Heart size is substantially enlarged although potentially exaggerated by  projection. There is right basal opacity concerning for infectious process.  Small amount of pleural effusion is most likely present. No pulmonary edema is  seen. Pacemaker leads terminate in right atrium and right ventricle most  likely. Hardware within the lumbar spine is present.
+LABEL: Cardiomegaly IMPRESSION: Overall, improved appearance of the chest. Stable cardiomegaly. No focal  consolidation.
+LABEL: Cardiomegaly IMPRESSION: Overall, improved appearance of the chest. Stable cardiomegaly. No focal  consolidation.
+LABEL: Atelectasis, Pleural Effusion, Pneumonia, Support Devices IMPRESSION: As compared to the previous image, the monitoring and support devices are in  constant position. The lung volumes remain low. However, signs of mild fluid  overload and the extent of the known left pleural effusion have improved.   Mild retrocardiac atelectasis persists.  No new focal parenchymal opacities  suggesting pneumonia.
+LABEL: Pleural Effusion, Support Devices IMPRESSION: 1.  Endotracheal tube is 4.4 cm above the carina.  2. Interval worsening of moderate/severe left pleural effusion.
+LABEL: Lung Opacity, Pneumonia IMPRESSION: Subtle right upper lobe opacity could represent pneumonia.  Consider lordotic  views if possible, or short interval followup radiograph following treatment  for pneumonia.
+LABEL: Lung Opacity, Pneumonia IMPRESSION: Subtle right upper lobe opacity could represent pneumonia.  Consider lordotic  views if possible, or short interval followup radiograph following treatment  for pneumonia.
+LABEL: Cardiomegaly, Lung Opacity, Pleural Other
+LABEL: No Finding IMPRESSION: Normal chest radiograph.
+LABEL: No Finding IMPRESSION: Normal chest radiograph.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary pathology.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary pathology.
+LABEL: Edema, Pleural Effusion IMPRESSION: Increase in chronic moderate ardiomegaly with likely acute  pulmonary edema and non dependent right pleural effusion.
+LABEL: Pleural Effusion IMPRESSION: Small left pleural effusion.  No evidence of acute decompensated  heart failure.
+LABEL: Pleural Effusion IMPRESSION: Small left pleural effusion.  No evidence of acute decompensated  heart failure.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Cardiomegaly IMPRESSION: As compared to the previous radiograph, no relevant change is seen. Status  post cardiac surgery.  No pleural effusions.  No pulmonary edema. Moderate  cardiomegaly.  No lung nodules or masses. Hiatal hernia and elongation of the  descending aorta.
+LABEL: Cardiomegaly IMPRESSION: As compared to the previous radiograph, no relevant change is seen. Status  post cardiac surgery.  No pleural effusions.  No pulmonary edema. Moderate  cardiomegaly.  No lung nodules or masses. Hiatal hernia and elongation of the  descending aorta.
+LABEL: Pneumothorax IMPRESSION: Tiny right apical pneumothorax.
+LABEL: Pneumothorax IMPRESSION: Tiny right apical pneumothorax.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Atelectasis, Lung Opacity IMPRESSION: 1. Unchanged opacification in the retrocardiac space that in the appropriate  clinical setting could represent pneumonia.  2. Linear atelectasis in the left upper lobe.  3. Mild pulmonary vascular congestion without pulmonary edema.
+LABEL: Atelectasis, Lung Opacity IMPRESSION: 1. Unchanged opacification in the retrocardiac space that in the appropriate  clinical setting could represent pneumonia.  2. Linear atelectasis in the left upper lobe.  3. Mild pulmonary vascular congestion without pulmonary edema.
+LABEL: No Finding IMPRESSION: No radiographic evidence of an acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No radiographic evidence of an acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: Atelectasis, Pleural Effusion IMPRESSION: Increasing left effusion.  Persistent smaller right effusion.   Compressive lower lobe atelectasis.
+LABEL: Atelectasis, Pleural Effusion IMPRESSION: Increasing left effusion.  Persistent smaller right effusion.   Compressive lower lobe atelectasis.
+LABEL: Atelectasis, Pleural Effusion IMPRESSION: Increasing left effusion.  Persistent smaller right effusion.   Compressive lower lobe atelectasis.
+LABEL: Atelectasis, Pleural Effusion IMPRESSION: Increasing left effusion.  Persistent smaller right effusion.   Compressive lower lobe atelectasis.
+LABEL: Lung Opacity IMPRESSION: Unchanged appearance of right middle and lower lobe opacities.
+LABEL: No Finding IMPRESSION: Improved aeration of the right base.
+LABEL: No Finding IMPRESSION: Improved aeration of the right base.
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion, Support Devices
+LABEL: No Finding IMPRESSION: Persistent moderate right-sided pleural effusion; otherwise  unremarkable.
+LABEL: No Finding IMPRESSION: Persistent moderate right-sided pleural effusion; otherwise  unremarkable.
+LABEL: No Finding IMPRESSION: Persistent moderate right-sided pleural effusion; otherwise  unremarkable.
+LABEL: No Finding IMPRESSION: Persistent moderate right-sided pleural effusion; otherwise  unremarkable.
+LABEL: Cardiomegaly, Edema, Enlarged Cardiomediastinum, Pleural Effusion, Support Devices
+LABEL: Edema, Lung Opacity, Support Devices
+LABEL: Edema, Lung Opacity, Support Devices
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion, Support Devices
+LABEL: Pleural Effusion IMPRESSION: Improved left-sided pleural effusion with slightly increased  right-sided pleural effusion.  No pneumothorax.
+LABEL: Atelectasis, Cardiomegaly, Edema, Enlarged Cardiomediastinum, Lung Lesion, Lung Opacity, Pleural Effusion, Support Devices
+LABEL: Atelectasis, Cardiomegaly, Edema, Enlarged Cardiomediastinum, Lung Lesion, Lung Opacity, Pleural Effusion, Support Devices
+LABEL: Cardiomegaly, Lung Opacity, Pleural Effusion, Support Devices
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion, Support Devices
+LABEL: Cardiomegaly, Pleural Effusion, Support Devices
+LABEL: Cardiomegaly, Pleural Effusion, Support Devices
+LABEL: No Finding IMPRESSION: No focal infiltrate
+LABEL: No Finding IMPRESSION: No focal infiltrate
+LABEL: Cardiomegaly, Support Devices IMPRESSION: 3 new epicardial pacer leads project over the left paramedian chest extending  roughly to level of the diaphragm.  Without a lateral view, I cannot localize  than. There is no pneumothorax mediastinal widening or pleural effusion. Heart  size is comparable to the preprocedure study.  No pulmonary edema.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.  Possible fourth epicardial lead fragment  does not appear to be continuous with the generator on the lateral radiograph.  Suggest correlation with operative report of lead placements.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.  Possible fourth epicardial lead fragment  does not appear to be continuous with the generator on the lateral radiograph.  Suggest correlation with operative report of lead placements.
+LABEL: Atelectasis, Cardiomegaly, Consolidation, Lung Opacity, Pleural Effusion
+LABEL: Atelectasis, Cardiomegaly, Consolidation, Lung Opacity, Pleural Effusion
+LABEL: Lung Opacity, Support Devices IMPRESSION: Bilateral lung infiltrates persist.  Endotracheal tube should be  advanced.
+LABEL: Cardiomegaly, Consolidation, Lung Opacity, Pleural Effusion, Pneumonia, Support Devices
+LABEL: Edema, Lung Opacity, Pleural Effusion, Support Devices IMPRESSION: There is a right-sided PICC line with tip in the distal SVC.  The  IJ central line has been removed.  There are median sternotomy changes.  There  are bilateral pleural effusions.  Findings of pulmonary edema have improved  from the prior, with patchy opacity remaining in the right mid chest.  There  is no pneumothorax.
+LABEL: Edema, Lung Opacity, Pleural Effusion, Support Devices IMPRESSION: There is a right-sided PICC line with tip in the distal SVC.  The  IJ central line has been removed.  There are median sternotomy changes.  There  are bilateral pleural effusions.  Findings of pulmonary edema have improved  from the prior, with patchy opacity remaining in the right mid chest.  There  is no pneumothorax.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary process.
+LABEL: No Finding, Support Devices IMPRESSION: 1. No acute cardiopulmonary abnormality.  2. A right PICC terminates in the upper SVC, more proximally than on ___.  If no interval PICC replacement, patient positioning or a thrombus  attached to the PICC tip should be considered as etiologies.
+LABEL: Enlarged Cardiomediastinum, Support Devices IMPRESSION: In comparison with the study of ___, the endotracheal tube is approximately  5.5 cm above the carina.  The other monitoring and support devices are stable,  as is the cardio mediastinal silhouette.  No evidence of acute focal pneumonia or vascular congestion.  Mild blunting of  the costophrenic angles is seen bilaterally.
+LABEL: Cardiomegaly, Support Devices IMPRESSION: An endotracheal tube terminates 6.9 cm above the carina.  A left-sided  pacemaker is again demonstrated.  Multiple intact sternal wires are again  seen.  There is no pneumothorax, focal consolidation, or pleural effusion.   The heart size remains normal.  The hilar and mediastinal contours remain  within normal limits.
+LABEL: Lung Opacity, Pleural Effusion, Support Devices IMPRESSION: 1. Improving right lower lobe opacity.  2. Small bilateral pleural effusions increased from ___.  3. Right PICC terminates in the the mid SVC.  No pneumothorax.
+LABEL: Lung Opacity, Pleural Effusion, Support Devices IMPRESSION: 1. Improving right lower lobe opacity.  2. Small bilateral pleural effusions increased from ___.  3. Right PICC terminates in the the mid SVC.  No pneumothorax.
+LABEL: Atelectasis, Cardiomegaly, Pleural Effusion IMPRESSION: AP chest compared to ___ through ___:    Cardiac silhouette remains severely enlarged, due to cardiomegaly and/or  pericardial effusion.  There is no mediastinal venous engorgement to suggest  elevated central venous pressure or tamponade physiology.  Moderate left  pleural effusion, small right pleural effusion, mild-to-moderate bibasilar  atelectasis have improved.  No pneumothorax.
+LABEL: Cardiomegaly, Lung Opacity, Pleural Effusion, Pneumonia
+LABEL: Lung Opacity, Support Devices IMPRESSION: There is a new right IJ line with tip in the distal SVC.  There is no  pneumothorax.  The right-sided PICC line is again visualized with the tip in  the upper SVC.  The cardiac device appears unchanged.  Note is again made of  sternal wires, the bottom 1 is again seen to be broken. There some areas of  patchy alveolar infiltrate most marked in the lower lobe and right upper lobe
+LABEL: Pneumonia, Support Devices IMPRESSION: Right PICC terminates in the right atrium.  No focal consolidation to suggest  pneumonia. Postoperative mediastinal contours and cardiac borders are normal.  The right internal jugular central venous catheter has been removed.  No  pneumothorax.  The left-sided pacemaker appears unchanged.  No pleural  effusion.    RECOMMENDATION(S):  Withdrawal of the right PIC line by 5 cm is recommended
+LABEL: No Finding, Support Devices IMPRESSION: Right internal jugular line tip is at the level of cavoatrial junction.  ET  tube tip is 8.2 cm above the carinal.  Pacemaker leads are unchanged  positions.  Lungs are overall clear with no focal consolidation to suggest  aspiration.  There is no pleural effusion or pneumothorax.
+LABEL: No Finding, Support Devices IMPRESSION: Right internal jugular line tip is at the level of cavoatrial junction.  ET  tube tip is 8.2 cm above the carinal.  Pacemaker leads are unchanged  positions.  Lungs are overall clear with no focal consolidation to suggest  aspiration.  There is no pleural effusion or pneumothorax.
+LABEL: Lung Opacity, Pneumonia IMPRESSION: Increased opacity in the right lower lung is concerning for clinically  suspected aspiration.  Differential diagnosis includes evolving infectious  pneumonia, or less likely atelectasis.
+LABEL: Cardiomegaly, Lung Opacity, Support Devices
+LABEL: Atelectasis IMPRESSION: Interval improvement in mild pulmonary vascular congestion and bibasilar  atelectasis.  Resolution of previously noted small bilateral pleural  effusions.
+LABEL: Atelectasis IMPRESSION: Interval improvement in mild pulmonary vascular congestion and bibasilar  atelectasis.  Resolution of previously noted small bilateral pleural  effusions.
+LABEL: No Finding, Support Devices IMPRESSION: ET tube tip is relatively high, above the clavicular heads, and approximately  8 cm above the carina and might be advanced point other 2 cm.  NG tube tip is  in the stomach.  Right internal jugular line tip is at the level of lower SVC.  Pacemaker leads a approaching the in designated locations throughout  transthoracic pacing.    Lungs overall clear.  There is no appreciable pleural effusion or  pneumothorax.
+LABEL: No Finding IMPRESSION: Postoperative changes and fluid overload.
+LABEL: Cardiomegaly, Pleural Effusion, Support Devices
+LABEL: No Finding IMPRESSION: As above.
+LABEL: No Finding IMPRESSION: The lung volumes are normal. Normal size of the cardiac silhouette. Normal  hilar and mediastinal structures.  No pleural effusions.  No pneumonia, no  pulmonary edema.
+LABEL: No Finding IMPRESSION: The lung volumes are normal. Normal size of the cardiac silhouette. Normal  hilar and mediastinal structures.  No pleural effusions.  No pneumonia, no  pulmonary edema.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.
+LABEL: No Finding IMPRESSION: No previous images.  Cardiac silhouette is within normal limits and there is  no vascular congestion, pleural effusion, or acute focal pneumonia.
+LABEL: No Finding IMPRESSION: No previous images.  Cardiac silhouette is within normal limits and there is  no vascular congestion, pleural effusion, or acute focal pneumonia.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: No acute intrathoracic process.
+LABEL: No Finding IMPRESSION: Heart size is normal.  Mediastinum is normal.  Lungs are clear.  There is no  pleural effusion.  There is no pneumothorax.
+LABEL: No Finding IMPRESSION: Heart size is normal.  Mediastinum is normal.  Lungs are clear.  There is no  pleural effusion.  There is no pneumothorax.
