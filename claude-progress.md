@@ -108,6 +108,77 @@
 
 ## Session log
 
+### 2026-09-07 (2) — LDM loss research: min-SNR + classifier-guidance loss, DP-noise dominates at pilot scale
+
+**Goal:** analyze the LDM's training objective (loss target, conditioning, architecture)
+from multiple angles per user request, implement the most promising lever(s), and test
+whether they improve downstream-classification-relevant fidelity -- follow-up to the same-
+day synth-utility v2 finding that every downstream-classifier-SIDE lever had already
+failed, shifting suspicion to the LDM checkpoints' own generative fidelity.
+
+**Completed:**
+- Grounded multi-angle analysis of the actual DP-SGD fine-tuning code (not literature
+  alone): current setup is plain eps-parameterization simple-MSE loss, uniform timestep
+  weighting, cross-attention-only trainable (ResBlock backbone + output layer stay frozen
+  even under full DP-SGD), text-only conditioning. Key grounding fact used throughout:
+  Opacus's privacy accounting depends only on `(target_epsilon, target_delta, sample_rate,
+  epochs)`, not the loss function's shape -- so a new loss term folded into the same
+  per-sample backward pass is DP-budget-free.
+- Implemented `--min_snr_gamma` (ddpm.py/LDM.py, Hang et al. 2023 min-SNR-gamma
+  reweighting) and `--cls_loss_weight`/`--cls_loss_max_t`/`--cls_loss_xrv_weights`
+  (LDM_dp.py, an auxiliary BCE loss between a frozen TorchXRayVision classifier's
+  prediction on a VAE-decoded x0 estimate and the study's real CheXpert label, timestep-
+  gated). Refactored LDM.py's `p_losses` into `_diffusion_forward`+
+  `_loss_from_model_output` so the DP subclass reuses the SAME UNet forward for the
+  auxiliary term (no duplicate forward, no risk to Opacus's per-sample-grad hooks).
+  Extended `Data/mimic_cxr.py` with an opt-in `return_chexpert_vector` flag (3-tuple
+  `__getitem__`, default off) for the raw label vector the auxiliary loss needs.
+- Verified on real GPU under real Opacus wrapping: a regression smoke test (all new flags
+  off) and a new-path smoke test (both on) both complete cleanly; the timestep gate
+  correctly fires the classifier loss only on samples with `t < cls_loss_max_t`; both
+  smoke tests produce IDENTICAL `eps_spent`/`sigma` given identical
+  `(target_epsilon, epochs, steps)` -- empirical confirmation of the zero-DP-budget claim.
+- Extended `run_feature_eval.py`/`downstream_cls.py`'s `label` metric with
+  `--manifest_csv`/`--label_text_mode` support (previously DICOM-only, unusable for the
+  p12 test split which has no local DICOMs).
+- Ran a real pilot A/B: baseline vs (min-SNR + classifier loss), same 1,858-image train
+  subset + full validate split, `target_epsilon=10`/`epochs=8`, `--seed 42` both --
+  finished in ~35min each (much faster than the ~5h/round precedent this repo's older
+  `search`-split rounds used, since this pilot's images/epochs count is far smaller).
+  Generated 200 images each, ran the `label` metric (XRV AUROC) -- **result was IDENTICAL
+  to 4+ decimals for every pathology between the two arms.**
+- Root-caused via a direct weight-diff on the saved LoRA adapters:
+  `||baseline_seed42 - clsloss_seed42|| / ||baseline_seed42|| = 0.0000`. Re-ran BOTH arms
+  with `--seed 43` to test whether it was just correlated noise from sharing a seed
+  (`set_seed()` fixes the global RNG that Opacus's own noise injection also draws from):
+  same result under the independent seed too (`0.0000`), while cross-seed diffs (same loss
+  function, different seed) are **>4,000x larger** (`1.4105` relative). **Corrected
+  conclusion: at this training scale (~1,858 images x 8 epochs, `max_grad_norm=0.001`), DP
+  noise doesn't just dominate the loss-function signal -- it appears to be essentially the
+  ONLY determinant of the final weights.** The loss function's gradient signal does not
+  survive the noise floor into the trained model in any numerically detectable way, under
+  either seed tested.
+- Published `eval_analysis/ldm_loss_research_report.md` with full detail + a new Claude
+  Artifact HTML dashboard: (see below, published after this log entry).
+
+**Known unresolved / left for later:**
+- The underlying research question (does either loss term help?) is genuinely open, not
+  answered "no" -- this pilot could not have detected an effect at its scale even if one
+  exists. Two paths to a decisive answer, neither committed to this session given the
+  GPU-hours already spent: (a) a full ~49,907-image scale run (many more accumulated
+  steps -> better signal-to-noise ratio, multi-day cost matching this repo's other
+  full-scale rounds), or (b) a multi-seed variance study at pilot scale (several seeds x 2
+  arms, compare distributions not single points).
+- Project-level flag for future sessions: other single-seed DP-SGD comparisons already in
+  this repo (`ablation_blocks` sweep, eps1-vs-eps10, epochs=10-vs-30) compare more
+  structurally different configs (different epsilon changes the noise multiplier itself;
+  different block counts change trainable-parameter count) which are more likely to show
+  a real, seed-robust difference than this round's loss-function-only change did -- but
+  worth treating any *small*-effect-size single-seed DP-SGD comparison in this repo with
+  caution unless checked across multiple seeds.
+- Did not re-run generate+eval for the seed=43 pair (the weight-level evidence already
+  answers the question conclusively).
+
 ### 2026-09-07 — synth-utility v2: pretrained backbone + full real pool, all 3 session goals tested (none met)
 
 **Goal (user-set for this session):** push the synth-utility downstream classifier to
