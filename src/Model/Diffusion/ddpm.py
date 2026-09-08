@@ -192,7 +192,7 @@ class DiffusionWrapper(nn.Module):
         self.conditioning_key = conditioning_key
 
     def forward(self, x: torch.Tensor, t: torch.Tensor,
-                c_concat: list = None, c_crossattn: list = None) -> torch.Tensor:
+                c_concat: list = None, c_crossattn: list = None, context_mask=None) -> torch.Tensor:
         key = self.conditioning_key
 
         if key is None:
@@ -204,12 +204,12 @@ class DiffusionWrapper(nn.Module):
 
         if key == 'crossattn':
             cc = torch.cat(c_crossattn, dim=1)
-            return self.diffusion_model(x, t, context=cc)
+            return self.diffusion_model(x, t, context=cc, context_mask=context_mask)
 
         if key == 'hybrid':
             xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, dim=1)
-            return self.diffusion_model(xc, t, context=cc)
+            return self.diffusion_model(xc, t, context=cc, context_mask=context_mask)
 
         if key == 'adm':
             return self.diffusion_model(x, t, y=c_crossattn[0])

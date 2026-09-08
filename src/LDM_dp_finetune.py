@@ -350,7 +350,9 @@ def parse_args():
                              '(applies under both --use_lora and full DP-SGD): '
                              '-1 = all 16 blocks; N = only blocks[N-1:] (the '
                              'last len(blocks)-N+1 blocks).')
-    parser.add_argument('--finetune_biobert', default=False)
+    parser.add_argument('--finetune_biobert', default=False, type=lambda x: x.lower() == 'true')
+    parser.add_argument('--context_masking', action='store_true')
+    parser.add_argument('--frozen_bert_eval', action='store_true')
 
     # LoRA (adapt-lora) --------------------------------------------------------
     parser.add_argument('--use_lora', default=True,
@@ -859,6 +861,8 @@ def main():
         use_dp            = args.use_dp,
     )
     ldm = ldm.to(device)
+    ldm.context_masking = args.context_masking
+    embedder.frozen_eval = args.frozen_bert_eval
     if model_parallel:
         ldm.first_stage_model.to(offload_device)
         ldm.embedder.to(offload_device)

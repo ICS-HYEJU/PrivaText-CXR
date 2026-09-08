@@ -385,6 +385,9 @@ def build_and_load_ldm(args, device):
         merge_lora(ldm)                        # fold ¥ÄW into base for sampling
         ldm.to(device)
 
+    saved_args = blob.get('args', {}) if args.lora_ckpt else _torch_load(args.dp_ckpt, 'cpu').get('args', {})
+    ldm.context_masking = bool(saved_args.get('context_masking', False))
+    embedder.frozen_eval = bool(saved_args.get('frozen_bert_eval', False))
     ldm.eval()
     return ldm, embedder
 
@@ -407,8 +410,11 @@ def main():
     all_images, all_caps, all_idx = [], [], []
     for d_idx, desc in enumerate(descriptions):
         with torch.no_grad():
-            c1 = embedder([desc]).to(device)             # [1, seq, 512]
-            c  = c1.repeat(args.n_samples, 1, 1)         # [n, seq, 512]
+            if ldm.context_masking:
+                c = ldm.encode_condition([desc] * args.n_samples)
+            else:
+                c1 = embedder([desc]).to(device)
+                c = c1.repeat(args.n_samples, 1, 1)
             imgs = ldm.sample(c, batch_size=args.n_samples,
                               verbose=False, timesteps=args.sample_timesteps)
         imgs = imgs.detach().cpu()                       # [n, 1, H, W]

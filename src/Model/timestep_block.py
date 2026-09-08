@@ -27,13 +27,13 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     Compatible with both MT-DDPM and DP-LDM architectures.
     """
 
-    def forward(self, x, emb, context=None):
+    def forward(self, x, emb, context=None, context_mask=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
                 # If using 'class SpatialTransformer', passing context. (for CrossAttention)
-                x = layer(x, context)
+                x = layer(x, context, context_mask=context_mask)
             else:
                 x = layer(x)
         return x

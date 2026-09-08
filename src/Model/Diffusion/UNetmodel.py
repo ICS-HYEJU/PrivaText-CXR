@@ -281,7 +281,7 @@ class UNetModel(nn.Module):
 
     # |¢®|¢® Forward |¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®|¢®
 
-    def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+    def forward(self, x, timesteps=None, context=None, y=None, context_mask=None, **kwargs):
         """
         Args:
             x         : [B, in_channels, H, W]
@@ -314,20 +314,20 @@ class UNetModel(nn.Module):
         hs = []
         h  = x.type(self.dtype)
         for i, module in enumerate(self.input_blocks):
-            h = module(h, emb, context)
+            h = module(h, emb, context, context_mask=context_mask)
             hs.append(h)
             if log is not None:
                 log["input_blocks"].append({"idx": i, "shape": _shape(h)})
 
         # Bottleneck
-        h = self.middle_block(h, emb, context)
+        h = self.middle_block(h, emb, context, context_mask=context_mask)
         if log is not None:
             log["middle_block"] = {"shape": _shape(h)}
 
         # Decoder path
         for i, module in enumerate(self.output_blocks):
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
+            h = module(h, emb, context, context_mask=context_mask)
             if log is not None:
                 log["output_blocks"].append({"idx": i, "shape": _shape(h)})
 

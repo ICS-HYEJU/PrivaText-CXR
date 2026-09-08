@@ -291,10 +291,15 @@ class LatentDiffusionDP(LatentDiffusion):
         assert self.embedder is not None, (
             "embedder is None. Pass a BioBERTEmbedder to LatentDiffusionDP.__init__."
         )
-        c = self.embedder(batch['reports'])    # list[str] -> [B, seq_len, output_dim]
-        c = c.to(self.device)
+        c = self.encode_condition(batch['reports'])
 
         return z, c
+
+    def encode_condition(self, reports):
+        if getattr(self, 'context_masking', False):
+            c, mask = self.embedder(reports, return_mask=True)
+            return {'c_crossattn': [c.to(self.device)], 'context_mask': mask.to(self.device)}
+        return self.embedder(reports).to(self.device)
 
     def training_step_dp(self, batch: dict):
         """

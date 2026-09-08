@@ -1,0 +1,10 @@
+{
+  "trained_unet_masked_padding_max_diff": 3.5762786865234375e-07,
+  "unmasked_padding_max_diff": 0.10065722465515137,
+  "bert_eval_while_projection_training": true,
+  "projection_gradient_nonzero": true,
+  "mask_shape": [
+    2,
+    19
+  ]
+}

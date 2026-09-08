@@ -28,6 +28,7 @@ class BioBERTEmbedder(nn.Module):
     ):
         super().__init__()
         self.max_length = max_length
+        self.frozen_eval = False
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.bert      = AutoModel.from_pretrained(model_path)
@@ -46,7 +47,13 @@ class BioBERTEmbedder(nn.Module):
     def device(self):
         return next(self.bert.parameters()).device
 
-    def forward(self, texts: list) -> torch.Tensor:
+    def train(self, mode=True):
+        super().train(mode)
+        if self.frozen_eval and not any(p.requires_grad for p in self.bert.parameters()):
+            self.bert.eval()
+        return self
+
+    def forward(self, texts: list, return_mask=False):
         """
         Args:
             texts : list[str]
@@ -64,5 +71,6 @@ class BioBERTEmbedder(nn.Module):
         with ctx:
             out = self.bert(**enc)
 
-        return self.proj(out.last_hidden_state)
+        context = self.proj(out.last_hidden_state)
+        return (context, enc["attention_mask"].bool()) if return_mask else context
 False
