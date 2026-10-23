@@ -1,0 +1,409 @@
+{
+  "status": "complete_screening_no_improvement",
+  "config": {
+    "target_epsilon": 10.0,
+    "epsilon_spent": 8.267175479543877,
+    "target_delta": 1e-05,
+    "max_grad_norm": 0.001,
+    "seed": 42,
+    "epochs": 3,
+    "logical_batch": 256,
+    "physical_batch": 4,
+    "projection_lr": 0.002,
+    "lora_lr": 0.002,
+    "lora_rank": 4,
+    "lora_alpha": 4.0,
+    "aux_weight": 0.01,
+    "aux_timestep_max": 250
+  },
+  "training": {
+    "epochs": [
+      {
+        "epoch": 1,
+        "global_step": 194,
+        "train_loss": 0.2474807707274594,
+        "epsilon": 6.285075799231499
+      },
+      {
+        "epoch": 2,
+        "global_step": 388,
+        "train_loss": 0.24198292850086592,
+        "epsilon": 7.399983384388962
+      },
+      {
+        "epoch": 3,
+        "global_step": 582,
+        "train_loss": 0.24161265454846287,
+        "epsilon": 8.267175479543877
+      }
+    ],
+    "wall_time_seconds": 5583.0,
+    "checkpoint": "classification_experiments/artifacts/ablation/xrv_aux/ldm_dp_final.pt"
+  },
+  "smoke": {
+    "status": "passed",
+    "vae_frozen": true,
+    "xrv_frozen": true,
+    "checkpoint_projection_lora_exact": true,
+    "xrv_absent_from_checkpoint": true,
+    "uncertain_missing_mask": true,
+    "physical_batch": 4,
+    "aux_weight": 0.01,
+    "aux_timestep_max": 250,
+    "teacher": "densenet121-res224-all",
+    "opacus_training_complete": true,
+    "epsilon_spent": 8.748811492340863,
+    "auxiliary_preflight": {
+      "aux_loss": 1.583390235900879,
+      "projection_grad_norm": 0.47927266031956484,
+      "lora_grad_norm": 0.1179372264838081,
+      "active_records": 1
+    }
+  },
+  "ddim50_validation": {
+    "xrv": {
+      "per_label": {
+        "Atelectasis": {
+          "auroc": 0.6881720430107526,
+          "auprc": 0.9923330170079137,
+          "positive": 155,
+          "negative": 3,
+          "reliable": false
+        },
+        "Consolidation": {
+          "auroc": 0.5376845376845377,
+          "auprc": 0.6014430086004757,
+          "positive": 39,
+          "negative": 33,
+          "reliable": true
+        },
+        "Pneumothorax": {
+          "auroc": 0.5368912219305919,
+          "auprc": 0.193741280246381,
+          "positive": 27,
+          "negative": 127,
+          "reliable": true
+        },
+        "Edema": {
+          "auroc": 0.5394123606889564,
+          "auprc": 0.4950169624746134,
+          "positive": 94,
+          "negative": 105,
+          "reliable": true
+        },
+        "Pleural Effusion": {
+          "auroc": 0.5959351424389145,
+          "auprc": 0.7936744403818121,
+          "positive": 214,
+          "negative": 83,
+          "reliable": true
+        },
+        "Pneumonia": {
+          "auroc": 0.5411140583554377,
+          "auprc": 0.49269661526149594,
+          "positive": 58,
+          "negative": 78,
+          "reliable": true
+        },
+        "Cardiomegaly": {
+          "auroc": 0.570168404170008,
+          "auprc": 0.8199319301772756,
+          "positive": 145,
+          "negative": 43,
+          "reliable": true
+        },
+        "Lung Lesion": {
+          "auroc": 0.5,
+          "auprc": 0.8182810245310246,
+          "positive": 12,
+          "negative": 3,
+          "reliable": false
+        },
+        "Lung Opacity": {
+          "auroc": 0.4525043177892919,
+          "auprc": 0.9658054109870184,
+          "positive": 193,
+          "negative": 6,
+          "reliable": false
+        },
+        "Enlarged Cardiomediastinum": {
+          "auroc": 0.6107142857142857,
+          "auprc": 0.6103904106790861,
+          "positive": 20,
+          "negative": 28,
+          "reliable": true
+        }
+      },
+      "macro": 0.5617028587118188
+    },
+    "medclip": {
+      "per_label": {
+        "Atelectasis": {
+          "auroc": 0.6666666666666667,
+          "auprc": 0.9912339902663795,
+          "positive": 155,
+          "negative": 3,
+          "reliable": false
+        },
+        "Cardiomegaly": {
+          "auroc": 0.5416198877305533,
+          "auprc": 0.778557980230786,
+          "positive": 145,
+          "negative": 43,
+          "reliable": true
+        },
+        "Consolidation": {
+          "auroc": 0.5337995337995337,
+          "auprc": 0.5650380567073215,
+          "positive": 39,
+          "negative": 33,
+          "reliable": true
+        },
+        "Edema": {
+          "auroc": 0.5426545086119554,
+          "auprc": 0.5032226858628295,
+          "positive": 94,
+          "negative": 105,
+          "reliable": true
+        },
+        "Enlarged Cardiomediastinum": {
+          "auroc": 0.4928571428571429,
+          "auprc": 0.43868124893505966,
+          "positive": 20,
+          "negative": 28,
+          "reliable": true
+        },
+        "Lung Lesion": {
+          "auroc": 0.5833333333333334,
+          "auprc": 0.8354869667369668,
+          "positive": 12,
+          "negative": 3,
+          "reliable": false
+        },
+        "Lung Opacity": {
+          "auroc": 0.32210708117443865,
+          "auprc": 0.9526944979007339,
+          "positive": 193,
+          "negative": 6,
+          "reliable": false
+        },
+        "Pleural Effusion": {
+          "auroc": 0.5392973764215742,
+          "auprc": 0.7240201972008036,
+          "positive": 214,
+          "negative": 83,
+          "reliable": true
+        },
+        "Pneumonia": {
+          "auroc": 0.4699381078691424,
+          "auprc": 0.392230061662298,
+          "positive": 58,
+          "negative": 78,
+          "reliable": true
+        },
+        "Pneumothorax": {
+          "auroc": 0.48993875765529316,
+          "auprc": 0.1846694953274972,
+          "positive": 27,
+          "negative": 127,
+          "reliable": true
+        }
+      },
+      "macro": 0.5157293307064564
+    }
+  },
+  "e004_paired_comparison": {
+    "xrv": {
+      "delta": 0.000396834037053706,
+      "ci95": [
+        -0.0054708031478645095,
+        0.007018139785992421
+      ]
+    },
+    "medclip": {
+      "delta": -0.0008626142777606871,
+      "ci95": [
+        -0.0137592762569615,
+        0.010852350935854098
+      ]
+    }
+  },
+  "prompt_response": {
+    "projection": {
+      "xrv": {
+        "Cardiomegaly": {
+          "auroc": 0.52734375,
+          "paired_mean_score_delta": 0.013703436590731144,
+          "delta_ci95": [
+            0.001524721196619794,
+            0.028121665911749007
+          ],
+          "positive_direction_fraction": 0.65625,
+          "pairs": 32
+        },
+        "Pleural Effusion": {
+          "auroc": 0.5576171875,
+          "paired_mean_score_delta": 0.027846194803714752,
+          "delta_ci95": [
+            0.012535567511804402,
+            0.043232225161045745
+          ],
+          "positive_direction_fraction": 0.84375,
+          "pairs": 32
+        },
+        "Edema": {
+          "auroc": 0.51171875,
+          "paired_mean_score_delta": -0.004213687963783741,
+          "delta_ci95": [
+            -0.029176337597891688,
+            0.011299541452899572
+          ],
+          "positive_direction_fraction": 0.75,
+          "pairs": 32
+        },
+        "Atelectasis": {
+          "auroc": 0.533203125,
+          "paired_mean_score_delta": 0.009958083741366863,
+          "delta_ci95": [
+            0.00518834397662431,
+            0.014873003750108171
+          ],
+          "positive_direction_fraction": 0.8125,
+          "pairs": 32
+        }
+      },
+      "medclip": {
+        "Cardiomegaly": {
+          "auroc": 0.5234375,
+          "paired_mean_score_delta": 0.0009965067729353905,
+          "delta_ci95": [
+            -0.000624748325208202,
+            0.0026041939854621887
+          ],
+          "positive_direction_fraction": 0.6875,
+          "pairs": 32
+        },
+        "Pleural Effusion": {
+          "auroc": 0.5634765625,
+          "paired_mean_score_delta": 0.0008368121343664825,
+          "delta_ci95": [
+            -6.0465453134384004e-05,
+            0.0016810812201583758
+          ],
+          "positive_direction_fraction": 0.75,
+          "pairs": 32
+        },
+        "Edema": {
+          "auroc": 0.5068359375,
+          "paired_mean_score_delta": -0.0001313531829509884,
+          "delta_ci95": [
+            -0.0008574262639740482,
+            0.000517568724171724
+          ],
+          "positive_direction_fraction": 0.625,
+          "pairs": 32
+        },
+        "Atelectasis": {
+          "auroc": 0.5107421875,
+          "paired_mean_score_delta": 0.0006333715282380581,
+          "delta_ci95": [
+            -0.001159126465790905,
+            0.0022448379371780903
+          ],
+          "positive_direction_fraction": 0.59375,
+          "pairs": 32
+        }
+      }
+    },
+    "xrv_aux": {
+      "xrv": {
+        "Cardiomegaly": {
+          "auroc": 0.525390625,
+          "paired_mean_score_delta": 0.013685319572687149,
+          "delta_ci95": [
+            0.0015113858011318372,
+            0.026579179195687173
+          ],
+          "positive_direction_fraction": 0.71875,
+          "pairs": 32
+        },
+        "Pleural Effusion": {
+          "auroc": 0.556640625,
+          "paired_mean_score_delta": 0.02870228886604309,
+          "delta_ci95": [
+            0.011942961276508868,
+            0.04482696587219834
+          ],
+          "positive_direction_fraction": 0.84375,
+          "pairs": 32
+        },
+        "Edema": {
+          "auroc": 0.513671875,
+          "paired_mean_score_delta": -0.000993492198176682,
+          "delta_ci95": [
+            -0.024644277337938548,
+            0.015547171747311943
+          ],
+          "positive_direction_fraction": 0.71875,
+          "pairs": 32
+        },
+        "Atelectasis": {
+          "auroc": 0.53515625,
+          "paired_mean_score_delta": 0.010566959157586098,
+          "delta_ci95": [
+            0.00566232311539352,
+            0.01587433461099863
+          ],
+          "positive_direction_fraction": 0.8125,
+          "pairs": 32
+        }
+      },
+      "medclip": {
+        "Cardiomegaly": {
+          "auroc": 0.525390625,
+          "paired_mean_score_delta": 0.0012886665062978864,
+          "delta_ci95": [
+            -0.0003404549002880231,
+            0.003007155616069212
+          ],
+          "positive_direction_fraction": 0.6875,
+          "pairs": 32
+        },
+        "Pleural Effusion": {
+          "auroc": 0.53125,
+          "paired_mean_score_delta": 0.00036360096419230103,
+          "delta_ci95": [
+            -0.0007540206323028542,
+            0.0013061447243671856
+          ],
+          "positive_direction_fraction": 0.6875,
+          "pairs": 32
+        },
+        "Edema": {
+          "auroc": 0.5078125,
+          "paired_mean_score_delta": 0.00011804560199379921,
+          "delta_ci95": [
+            -0.0006027491035638377,
+            0.0008071013347944241
+          ],
+          "positive_direction_fraction": 0.59375,
+          "pairs": 32
+        },
+        "Atelectasis": {
+          "auroc": 0.513671875,
+          "paired_mean_score_delta": 0.0006408893968909979,
+          "delta_ci95": [
+            -0.0008958077451097779,
+            0.0020868972991593174
+          ],
+          "positive_direction_fraction": 0.625,
+          "pairs": 32
+        }
+      }
+    }
+  },
+  "decision": {
+    "full_ddpm_run": false,
+    "reason": "Prespecified gate failed: XRV and MedCLIP did not both improve over E004, and both paired confidence intervals include zero."
+  }
+}
