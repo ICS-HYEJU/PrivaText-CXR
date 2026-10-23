@@ -186,7 +186,7 @@ def xrv_auxiliary_per_sample(ldm, x_noisy, predicted_noise, timesteps, reports,
 
 
 def combined_loss(ldm, z, context, timesteps, noise, reports, teacher_holder,
-                  aux_weight, timestep_max):
+                  aux_weight, timestep_max, diffusion_weights=None):
     """Exact existing diffusion loss plus prespecified per-record XRV loss."""
     x_noisy = ldm.q_sample(x_start=z, t=timesteps, noise=noise)
     predicted_noise = ldm.apply_model(x_noisy, timesteps, context)
@@ -203,12 +203,16 @@ def combined_loss(ldm, z, context, timesteps, noise, reports, teacher_holder,
     aux_per_sample, active, label_mask = xrv_auxiliary_per_sample(
         ldm, x_noisy, predicted_noise, timesteps, reports,
         teacher_holder, timestep_max)
-    total = (diffusion_per_sample + aux_weight * aux_per_sample).mean()
+    if diffusion_weights is None:
+        diffusion_weights = torch.ones_like(diffusion_per_sample)
+    weighted_diffusion = diffusion_per_sample * diffusion_weights
+    total = (weighted_diffusion + aux_weight * aux_per_sample).mean()
     prefix = "train" if ldm.training else "val"
     loss_dict = {
         f"{prefix}/loss_simple": loss_simple.mean(),
         f"{prefix}/loss_vlb": (ldm.lvlb_weights[timesteps] * loss_simple).mean(),
         f"{prefix}/loss_diffusion": diffusion_per_sample.mean(),
+        f"{prefix}/loss_diffusion_weighted": weighted_diffusion.mean(),
         f"{prefix}/loss_xrv_raw": aux_per_sample[active].mean() if active.any() else aux_per_sample.mean(),
         f"{prefix}/loss_xrv_weighted": aux_weight * aux_per_sample.mean(),
         f"{prefix}/xrv_active_fraction": active.float().mean(),
@@ -230,6 +234,10 @@ def install_and_train(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--aux-weight", type=float, default=0.01)
     parser.add_argument("--aux-timestep-max", type=int, default=250)
+    parser.add_argument("--aux-timestep-sampling", choices=("uniform", "stratified_low"),
+                        default="uniform")
+    parser.add_argument("--experiment-id", default="024")
+    parser.add_argument("--smoke-save-dir", type=Path)
     parser.add_argument("--smoke", action="store_true")
     control, remaining = parser.parse_known_args(argv)
     if control.aux_weight <= 0:
@@ -238,7 +246,13 @@ def install_and_train(argv):
         raise ValueError("--aux-timestep-max must be in [0, 999]")
 
     teacher_holder = {}
-    runtime = {"seed": 42, "ldm": None, "vae_digest": None, "smoke": control.smoke}
+    smoke_save_dir = control.smoke_save_dir or (
+        ROOT / "classification_experiments/artifacts/xrv_aux_smoke")
+    runtime = {"seed": 42, "ldm": None, "vae_digest": None, "smoke": control.smoke,
+               "experiment_id": control.experiment_id, "aux_weight": control.aux_weight,
+               "aux_timestep_max": control.aux_timestep_max,
+               "aux_timestep_sampling": control.aux_timestep_sampling,
+               "smoke_save_dir": Path(smoke_save_dir)}
     original_main = ft.main
 
     def intercepted_main():
@@ -257,6 +271,7 @@ def install_and_train(argv):
             args = cached_parse_args()
             args.xrv_aux_weight = control.aux_weight
             args.xrv_aux_timestep_max = control.aux_timestep_max
+            args.xrv_aux_timestep_sampling = control.aux_timestep_sampling
             args.xrv_aux_teacher = "densenet121-res224-all"
             runtime["seed"] = args.seed
             if control.smoke:
@@ -268,7 +283,7 @@ def install_and_train(argv):
                 args.save_every = 1
                 args.log_every = 1
                 args.do_validation = False
-                args.save_dir = str(ROOT / "classification_experiments/artifacts/xrv_aux_smoke")
+                args.save_dir = str(smoke_save_dir)
             return args
 
         generators = {}
@@ -285,15 +300,39 @@ def install_and_train(argv):
                     posterior.mean + posterior.std * torch.randn(
                         posterior.mean.shape, device=device, generator=generator))
             context = self.encode_condition(batch["reports"])
-            timesteps = torch.randint(
-                0, self.num_timesteps, (len(z),), device=device, generator=generator)
+            diffusion_weights = None
+            if control.aux_timestep_sampling == "stratified_low":
+                batch_size = len(z)
+                low_count = max(1, batch_size // 2)
+                high_count = batch_size - low_count
+                low = torch.randint(0, control.aux_timestep_max + 1, (low_count,),
+                                    device=device, generator=generator)
+                if high_count:
+                    high = torch.randint(control.aux_timestep_max + 1, self.num_timesteps,
+                                         (high_count,), device=device, generator=generator)
+                    timesteps = torch.cat((low, high))
+                else:
+                    timesteps = low
+                proposal_low = low_count / batch_size
+                target_low = (control.aux_timestep_max + 1) / self.num_timesteps
+                diffusion_weights = torch.cat((
+                    torch.full((low_count,), target_low / proposal_low, device=device),
+                    torch.full((high_count,), (1.0 - target_low) / (1.0 - proposal_low),
+                               device=device) if high_count else torch.empty(0, device=device),
+                ))
+                order = torch.randperm(batch_size, device=device, generator=generator)
+                timesteps = timesteps[order]
+                diffusion_weights = diffusion_weights[order]
+            else:
+                timesteps = torch.randint(
+                    0, self.num_timesteps, (len(z),), device=device, generator=generator)
             noise = torch.randn(z.shape, device=device, generator=generator)
             runtime["ldm"] = self
             if control.smoke and runtime["vae_digest"] is None:
                 runtime["vae_digest"] = module_digest(self.first_stage_model)
             return combined_loss(
                 self, z, context, timesteps, noise, batch["reports"], teacher_holder,
-                control.aux_weight, control.aux_timestep_max)
+                control.aux_weight, control.aux_timestep_max, diffusion_weights)
 
         # Run one real auxiliary-only backward pass before Opacus wraps the
         # trainable module. This proves that the frozen teacher path reaches
@@ -386,7 +425,7 @@ def verify_smoke(runtime, teacher_holder):
     if teacher_after != teacher_holder["initial_digest"]:
         raise AssertionError("frozen XRV changed during smoke training")
 
-    save_dir = ROOT / "classification_experiments/artifacts/xrv_aux_smoke"
+    save_dir = runtime["smoke_save_dir"]
     checkpoint = torch.load(save_dir / "ldm_dp_final.pt", map_location="cpu", weights_only=False)
     saved = checkpoint["model"]
     current = ldm.state_dict()
@@ -415,17 +454,19 @@ def verify_smoke(runtime, teacher_holder):
         "xrv_absent_from_checkpoint": True,
         "uncertain_missing_mask": True,
         "physical_batch": 4,
-        "aux_weight": 0.01,
-        "aux_timestep_max": 250,
+        "aux_weight": runtime["aux_weight"],
+        "aux_timestep_max": runtime["aux_timestep_max"],
+        "aux_timestep_sampling": runtime["aux_timestep_sampling"],
         "teacher": "densenet121-res224-all",
         "opacus_training_complete": True,
         "epsilon_spent": float(checkpoint["epsilon_spent"]),
         "auxiliary_preflight": runtime.get("preflight"),
     }
-    evidence_path = ROOT / "classification_experiments/evidence/024_smoke.json"
+    evidence_path = ROOT / (
+        f"classification_experiments/evidence/{runtime['experiment_id']}_smoke.json")
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(evidence, indent=2) + "\n")
-    print("E024_SMOKE_OK", evidence_path, flush=True)
+    print(f"E{runtime['experiment_id']}_SMOKE_OK", evidence_path, flush=True)
 
 
 def main():
