@@ -20,7 +20,12 @@ E006은 정답 report의 denoising 이득이 최대 0.08%에 불과했고 E027�
 - epsilon-10 DP 후속 실험 승인 기준은 `label_flip_clip - structured_clip_control`에서 다음을 모두 충족하는 경우로 사전 고정한다: (1) XRV와 MedCLIP macro AUROC가 각각 최소 `+0.01`이고 paired CI 하한이 0보다 큼, (2) 4개 timestep 중 최소 3개에서 correct-vs-flipped relative gap이 `0.5%` 이상이고 patient CI 하한이 0보다 큼, (3) XRV와 MedCLIP prompt intent AUROC 평균이 각각 최소 `+0.02`, (4) gradient audit에서 rank gradient가 finite이고 clipping 후 aggregate가 diffusion-only 방향과 음의 cosine을 보이지 않음. 하나라도 실패하면 DP arm은 실행하지 않는다.
 
 ## 4. 실험 결과
-실행 대기 중이다. 현재 E027 학습이 GPU 1에서 진행 중이므로 핸드오프의 충돌 방지 지시에 따라 E027 학습·자동 평가·엄격 판정이 끝나기 전에는 E028 GPU 스모크나 학습을 시작하지 않는다. E028의 사전 명세와 승인 기준만 고정했다.
+실행 대기 중이다. 구현과 정적 검증을 완료했으며 현재 E027 학습이 GPU 1에서 진행 중이다. 핸드오프의 순서 조건에 따라 E027 학습·자동 평가·엄격 판정이 끝나기 전에는 E028 GPU 스모크나 학습을 시작하지 않는다.
+
+- `label_flip_training.py`: 한 양성 병변만 stable-hash로 선택해 positive→negative 반전, 상대 MSE margin loss, matched structured control, clipping-only 실행을 구현했다.
+- 정적 검증: exactly-one flip과 No-Finding-only 제외 규칙, Python compile, launcher shell syntax를 통과했다.
+- gradient audit: 표본별 diffusion/rank norm과 cosine, projection/LoRA/label-token rank gradient, `C=0.001` 모의 clipping 전후 aggregate cosine을 기록하도록 구현했다.
+- `queue_028_after_027.sh`: E027의 전체 자동 평가 완료 marker를 기다린 뒤 E027 adjudication을 저장하고, E028 candidate/control 스모크가 모두 통과할 때만 두 arm 전체 학습을 시작하도록 기동했다.
 
 ## 5. 실험 결과 분석
 결과 대기 중이다. clipping-only에서도 승인 기준을 충족하지 못하면 label-flip 목적함수 계열을 폐기한다. clipping-only는 성공하지만 후속 DP가 실패하면 조건 loss를 추가 탐색하지 않고 DP gradient SNR 개선을 별도 연구 질문으로 전환한다.
