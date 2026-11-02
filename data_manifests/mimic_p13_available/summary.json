@@ -1,0 +1,29 @@
+{
+  "prefix": "p13",
+  "policy": "MIMIC-CXR official split; available readable JPG and existing TXT only",
+  "image_decode_verified": true,
+  "expected": {
+    "images": 37857,
+    "studies": 22945,
+    "patients": 6548
+  },
+  "paired": {
+    "images": 37809,
+    "studies": 22923,
+    "patients": 6539
+  },
+  "missing_images": 48,
+  "unreadable_images": 0,
+  "missing_reports": 0,
+  "reports_without_any_jpg": 22,
+  "counts_by_official_split": {
+    "test": 752,
+    "train": 36683,
+    "validate": 374
+  },
+  "patient_overlap": {
+    "train_validate": 0,
+    "train_test": 0,
+    "validate_test": 0
+  }
+}
