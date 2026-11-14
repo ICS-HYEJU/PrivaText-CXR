@@ -1,50 +1,37 @@
-pathology,pool_index,selection_score,synthetic_png,real_png,real_image_path,subject_id,study_id,prompt_text
-Atelectasis,17284,1.6052041536240922,atelectasis__synthetic.png,atelectasis__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12931492/s54649542/1ec0e752-920ffc2a-5f185ce5-5df7ef53-931317dc.jpg,12931492,54649542,"LABEL: Atelectasis, Cardiomegaly IMPRESSION: 1. No acute cardiopulmonary process.
+pathology,pool_index,eps1_dual_consistency,eps10_dual_consistency,eps1_png,eps10_png,real_png,real_image_path,subject_id,study_id,prompt_text
+Atelectasis,6481,0.8519800941278769,0.8515586846385865,atelectasis__eps1.png,atelectasis__eps10.png,atelectasis__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12423759/s59663985/c7276769-9c7a7712-4e5ec5ab-f7f92442-5d81a1c0.jpg,12423759,59663985,"LABEL: Atelectasis, Pleural Effusion IMPRESSION: Comparison to ___.  Low lung volumes.  Right pleural effusion. 
+ Subsequent right basilar atelectasis.  Mild fluid overload but no overt
+ pulmonary edema.  No pneumonia."
+Cardiomegaly,10917,0.8514088904691277,0.8262365381619275,cardiomegaly__eps1.png,cardiomegaly__eps10.png,cardiomegaly__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p13/p13672788/s54830802/3a26a4ab-3f2af1ef-75945d87-ff06b192-14505dc2.jpg,13672788,54830802,LABEL: Cardiomegaly
+Consolidation,20584,0.743857122716229,0.7597608657984676,consolidation__eps1.png,consolidation__eps10.png,consolidation__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p14/p14691641/s59786764/6b4440d6-afa3c524-d0668d9b-3ac2ba3c-adf3b100.jpg,14691641,59786764,"LABEL: Consolidation, Lung Opacity, Support Devices IMPRESSION: 1. ET tube and NG tube in expected position.
  
- 2. Mild cardiomegaly and lower lobe atelectasis."
-Cardiomegaly,21798,1.800042475136299,cardiomegaly__synthetic.png,cardiomegaly__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15455517/s52987469/a9c034b8-361bd589-a2ee112e-e6662282-d1766c60.jpg,15455517,52987469,"LABEL: Cardiomegaly, Edema IMPRESSION: Moderate pulmonary edema with stable cardiomegaly."
-Consolidation,19538,1.2182549120194546,consolidation__synthetic.png,consolidation__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p11/p11313834/s55750147/1318a54c-d2e40d96-66ac02dd-12895090-6ef0b0eb.jpg,11313834,55750147,"LABEL: Consolidation, Pleural Effusion, Support Devices IMPRESSION: ET tube tip is 4 cm above the Carina.  A right central venous line tip is at
- the level of mid SVC. NG tube tip is in the stomach.  Left pleural effusion is
- moderate, unchanged. Bibasal consolidations have substantially improved in the
- interim.  No appreciable pneumothorax is present."
-Edema,21798,1.800042475136299,edema__synthetic.png,edema__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15455517/s52987469/a9c034b8-361bd589-a2ee112e-e6662282-d1766c60.jpg,15455517,52987469,"LABEL: Cardiomegaly, Edema IMPRESSION: Moderate pulmonary edema with stable cardiomegaly."
-Enlarged Cardiomediastinum,4857,1.44790941555735,enlarged_cardiomediastinum__synthetic.png,enlarged_cardiomediastinum__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15388623/s51589656/ce207256-85ea1424-ea00ee33-14462568-6e61e1c0.jpg,15388623,51589656,"LABEL: Enlarged Cardiomediastinum, Lung Opacity, Support Devices"
-Fracture,21216,1.5683569890594597,fracture__synthetic.png,fracture__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p10/p10770896/s59679312/5fc8f7ed-ff2f5ccb-025dc946-53b85718-9c900297.jpg,10770896,59679312,"LABEL: Fracture, Support Devices IMPRESSION: No displaced rib fracture is seen.  The PA and lateral chest radiograph is
- insensitive in detecting subtle rib fractures. If there is ongoing clinical
- concern, please obtain dedicated rib series with marker placed at the site of
- pain."
-Lung Lesion,307,1.3156471350267012,lung_lesion__synthetic.png,lung_lesion__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p13/p13407751/s52893564/0508a400-6dce85e5-50f22a09-fa1062c4-2ca3d87d.jpg,13407751,52893564,"LABEL: Atelectasis, Lung Lesion, Pleural Effusion, Support Devices IMPRESSION: 1.  Lines and tubes appropriate in position.
- 2.  New moderate left pleural effusion with compressive atelectasis.
- 3.  Upper mediastinal widening compatible with a combination of vascular
- engorgement and underlying adenopathy.
- 4.  Dominant left supraclavicular nodal mass."
-Lung Opacity,4991,1.7735035560219539,lung_opacity__synthetic.png,lung_opacity__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12122040/s54786003/2e8c4994-a3e92e89-33fdc6ae-5f0a905b-96a3519c.jpg,12122040,54786003,"LABEL: Lung Opacity, Support Devices IMPRESSION: 1. ET tube ends above the clavicles and could be advanced by approximately 3
- cm for more secure positioning.
- 
- 2. Enteric tube with the tip in the stomach but the side hole above the level
- of the GE junction.
- 
- 3. Left subclavian central venous catheter in appropriate position.
- 
- 4. Right lower lung and retrocardiac opacities most likely represent
- aspiration.
- 
- Impression posted to the ED dashboard by Dr ___ at 07:00 on ___, ___ min after review"
-Pleural Effusion,10241,1.6968908370943094,pleural_effusion__synthetic.png,pleural_effusion__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15388943/s59544988/1e486837-49737df8-c35c45fc-941957b6-d86ec238.jpg,15388943,59544988,"LABEL: Pleural Effusion IMPRESSION: Findings suggesting mild vascular congestion including new small
- pleural effusions."
-Pleural Other,9373,1.4348382015539511,pleural_other__synthetic.png,pleural_other__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p14/p14861499/s53873568/4b807fb1-73101a27-2921efdf-10e32c28-e54949f9.jpg,14861499,53873568,"LABEL: Pleural Other IMPRESSION: No evidence of pulmonary edema.  Chronic interstitial fibrosis
- makes superimposed infection difficult to exclude.
- 
- Wet reading was relayed by Dr. ___ to ___ at the office of Dr.
- ___ by phone at 2:40 p.m. on ___."
-Pneumonia,15928,1.314280445093869,pneumonia__synthetic.png,pneumonia__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p14/p14067009/s51654428/38867b5e-ac7df4df-96b684d1-f5b734ae-33aae161.jpg,14067009,51654428,"LABEL: Edema, Pleural Effusion, Pneumonia IMPRESSION: Compared to chest radiographs ___ through ___.
- 
- Moderate pulmonary edema, moderate bilateral pleural effusions have increased.
- Left upper lobe pneumonia shown to better advantage by subsequent chest CT
- available time of this review."
-Pneumothorax,1120,1.2288330350859211,pneumothorax__synthetic.png,pneumothorax__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12144619/s52937896/0ed68046-3a356b38-02cc0aae-75a71b15-500e2f5b.jpg,12144619,52937896,"LABEL: Atelectasis, Pleural Effusion, Pneumothorax, Support Devices IMPRESSION: As compared to the previous image, the position of the right chest tube is
+ 2. Worsening bilateral alveolar opacities could reflect worsening pulmonary
+ edema, multifocal pneumonia or ARDS.
+ 3. Retrocardiac consolidation with air bronchograms could reflect atelectasis
+ or pneumonia"
+Edema,7604,0.7599793151275012,0.8873190041857528,edema__eps1.png,edema__eps10.png,edema__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p14/p14767018/s50394302/74b4461f-72c65180-c0bfeab1-809c7920-1d9a5c0f.jpg,14767018,50394302,"LABEL: Edema, Lung Opacity IMPRESSION: Interval improvement in bilateral opacities and pulmonary edema, now mild."
+Enlarged Cardiomediastinum,8264,0.8272275896768764,0.8663344190619936,enlarged_cardiomediastinum__eps1.png,enlarged_cardiomediastinum__eps10.png,enlarged_cardiomediastinum__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15523346/s51241188/035a12f2-8fccab65-efb8e531-88808886-be79da9a.jpg,15523346,51241188,"LABEL: Enlarged Cardiomediastinum IMPRESSION: No evidence of a pneumonia.  Convexity of the right upper mediastinal contours
+ suggest dilatation or tortuosity of the ascending aorta, uncertain if changed
+ from previous."
+Fracture,18507,0.7886317845185642,0.8281116808600956,fracture__eps1.png,fracture__eps10.png,fracture__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12191647/s51745536/5ecb9f7b-c209347d-364d6cd6-b769d5f5-c9fd6f30.jpg,12191647,51745536,LABEL: Fracture
+Lung Lesion,19027,0.6653846083146475,0.7019168489542237,lung_lesion__eps1.png,lung_lesion__eps10.png,lung_lesion__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p13/p13528989/s58310891/8d85f1ea-e57c160e-84cf3370-6c1cb8ec-b51307ec.jpg,13528989,58310891,"LABEL: Lung Lesion IMPRESSION: 1.  A ___-mm nodule projecting over the left lung base may represent confluence
+ of shadows.  Shallow obliques may be helpful for further evaluation.
+ 2.  No pneumonia, edema, or effusion."
+Lung Opacity,15608,0.9388961659785786,0.9305287774240241,lung_opacity__eps1.png,lung_opacity__eps10.png,lung_opacity__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12245451/s51383248/d8678de8-dd871334-5e33afc9-a3cecff6-e521c581.jpg,12245451,51383248,"LABEL: Lung Opacity IMPRESSION: Bibasilar opacities may represent atelectasis in the setting of
+ low lung volumes; however, infection cannot be excluded."
+Pleural Effusion,6481,0.8519800941278769,0.8515586846385865,pleural_effusion__eps1.png,pleural_effusion__eps10.png,pleural_effusion__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12423759/s59663985/c7276769-9c7a7712-4e5ec5ab-f7f92442-5d81a1c0.jpg,12423759,59663985,"LABEL: Atelectasis, Pleural Effusion IMPRESSION: Comparison to ___.  Low lung volumes.  Right pleural effusion. 
+ Subsequent right basilar atelectasis.  Mild fluid overload but no overt
+ pulmonary edema.  No pneumonia."
+Pleural Other,15720,0.8961857815315314,0.714462482748782,pleural_other__eps1.png,pleural_other__eps10.png,pleural_other__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12172036/s53891386/b7f55d5f-8708d295-cfa18d07-3bf35780-b99b6d91.jpg,12172036,53891386,"LABEL: Lung Opacity, Pleural Other IMPRESSION: No acute cardiopulmonary process.  Right apical pleural
+ parenchymal scarring."
+Pneumonia,10574,0.7262506181042033,0.74024794823804,pneumonia__eps1.png,pneumonia__eps10.png,pneumonia__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15405111/s53669693/6d4dda35-99a5e257-4176bbba-17b05382-b59e5236.jpg,15405111,53669693,"LABEL: Enlarged Cardiomediastinum, Lung Opacity, Pleural Effusion, Pneumonia, Support Devices"
+Pneumothorax,1120,0.7188405800886635,0.6755159499433103,pneumothorax__eps1.png,pneumothorax__eps10.png,pneumothorax__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p12/p12144619/s52937896/0ed68046-3a356b38-02cc0aae-75a71b15-500e2f5b.jpg,12144619,52937896,"LABEL: Atelectasis, Pleural Effusion, Pneumothorax, Support Devices IMPRESSION: As compared to the previous image, the position of the right chest tube is
  unchanged. The intrafissural pleural effusion is also constant.  Constant
  position of the right central venous access line.  On the current image, there
  is no evidence for the presence of a pneumothorax.  Slight increase of a left
  lower lobe atelectasis, in retrocardiac location."
-Support Devices,13269,1.8659037818379929,support_devices__synthetic.png,support_devices__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p13/p13366982/s56706773/26e18928-6f8eb8af-a242ccdb-f78d635b-c731373e.jpg,13366982,56706773,"LABEL: No Finding, Support Devices"
+Support Devices,1383,0.9293663280122069,0.9107073637752502,support_devices__eps1.png,support_devices__eps10.png,support_devices__real.png,/storage/hjchoi/physionet.org/files/mimic-cxr-jpg/2.1.0/p15/p15582088/s59682263/52b8cf3e-5eaff9a9-ebb3d6ab-4989bf54-58409bba.jpg,15582088,59682263,"LABEL: Lung Opacity, Support Devices IMPRESSION: As compared to the previous image, there is now complete opacification of the
+ right hemithorax.  On the image acquired at 11:20 a feeding tube is seen, with
+ the tip projecting over the upper trachea.  On the image acquired at 23:28 the
+ feeding tube is removed.  Normal appearance of the left heart border and the
+ left lung."
