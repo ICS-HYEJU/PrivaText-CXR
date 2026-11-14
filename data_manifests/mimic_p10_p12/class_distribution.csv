@@ -1,0 +1,57 @@
+split,label,images,studies,patients,sufficiency
+train_before,Atelectasis,1593,944,815,sufficient
+train_before,Cardiomegaly,2738,1503,1136,sufficient
+train_before,Consolidation,234,143,134,limited
+train_before,Edema,911,582,450,limited
+train_before,Enlarged Cardiomediastinum,280,153,147,limited
+train_before,Fracture,522,258,243,limited
+train_before,Lung Lesion,493,248,201,limited
+train_before,Lung Opacity,3115,1782,1352,sufficient
+train_before,No Finding,24622,12389,7961,sufficient
+train_before,Pleural Effusion,1625,910,644,sufficient
+train_before,Pleural Other,179,89,79,insufficient
+train_before,Pneumonia,1166,596,530,sufficient
+train_before,Pneumothorax,541,334,185,limited
+train_before,Support Devices,675,500,397,limited
+train_balanced,Atelectasis,1593,944,815,sufficient
+train_balanced,Cardiomegaly,2738,1503,1136,sufficient
+train_balanced,Consolidation,234,143,134,limited
+train_balanced,Edema,911,582,450,limited
+train_balanced,Enlarged Cardiomediastinum,280,153,147,limited
+train_balanced,Fracture,522,258,243,limited
+train_balanced,Lung Lesion,493,248,201,limited
+train_balanced,Lung Opacity,3115,1782,1352,sufficient
+train_balanced,No Finding,6230,5372,4233,sufficient
+train_balanced,Pleural Effusion,1625,910,644,sufficient
+train_balanced,Pleural Other,179,89,79,insufficient
+train_balanced,Pneumonia,1166,596,530,sufficient
+train_balanced,Pneumothorax,541,334,185,limited
+train_balanced,Support Devices,675,500,397,limited
+validation,Atelectasis,20,12,8,insufficient
+validation,Cardiomegaly,23,14,12,insufficient
+validation,Consolidation,2,2,2,insufficient
+validation,Edema,7,5,4,insufficient
+validation,Enlarged Cardiomediastinum,2,1,1,insufficient
+validation,Fracture,1,1,1,insufficient
+validation,Lung Lesion,2,1,1,insufficient
+validation,Lung Opacity,37,21,12,insufficient
+validation,No Finding,230,114,60,insufficient
+validation,Pleural Effusion,27,15,9,insufficient
+validation,Pleural Other,1,1,1,insufficient
+validation,Pneumonia,10,6,6,insufficient
+validation,Pneumothorax,6,3,3,insufficient
+validation,Support Devices,12,10,4,insufficient
+test,Atelectasis,989,578,493,limited
+test,Cardiomegaly,1190,666,532,sufficient
+test,Consolidation,131,76,71,insufficient
+test,Edema,382,252,211,limited
+test,Enlarged Cardiomediastinum,169,92,89,insufficient
+test,Fracture,282,142,134,limited
+test,Lung Lesion,216,108,97,insufficient
+test,Lung Opacity,1714,987,768,sufficient
+test,No Finding,13123,6605,4145,sufficient
+test,Pleural Effusion,776,441,315,limited
+test,Pleural Other,61,32,29,insufficient
+test,Pneumonia,563,287,260,limited
+test,Pneumothorax,242,147,85,insufficient
+test,Support Devices,384,284,241,limited

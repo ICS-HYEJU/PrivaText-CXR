@@ -1,0 +1,15 @@
+{
+  "synthetic_input_only": true,
+  "opacus_projection_grad_sample_shape": [
+    2,
+    512,
+    768
+  ],
+  "projection_grad_sample_norm": [
+    0.0009294404298998415,
+    0.0013096542097628117
+  ],
+  "projection_updated": true,
+  "bert_training": false,
+  "loss": 0.009649375453591347
+}

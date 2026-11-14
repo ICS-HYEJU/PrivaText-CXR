@@ -1,0 +1,174 @@
+{
+  "eps1_ep30": {
+    "xrv": {
+      "Cardiomegaly": {
+        "auroc": 0.505859375,
+        "paired_mean_score_delta": 0.0007080372888594866,
+        "delta_ci95": [
+          -0.003552493138704449,
+          0.004299820656888184
+        ],
+        "positive_direction_fraction": 0.625,
+        "pairs": 32
+      },
+      "Pleural Effusion": {
+        "auroc": 0.50390625,
+        "paired_mean_score_delta": 0.0008302628993988037,
+        "delta_ci95": [
+          -0.004145425593014806,
+          0.005248512711841611
+        ],
+        "positive_direction_fraction": 0.59375,
+        "pairs": 32
+      },
+      "Edema": {
+        "auroc": 0.5087890625,
+        "paired_mean_score_delta": 0.0013202843256294727,
+        "delta_ci95": [
+          -6.64632116240682e-05,
+          0.0029877938621211794
+        ],
+        "positive_direction_fraction": 0.5625,
+        "pairs": 32
+      },
+      "Atelectasis": {
+        "auroc": 0.4990234375,
+        "paired_mean_score_delta": 0.0006506361532956362,
+        "delta_ci95": [
+          -0.00378759148879908,
+          0.0065124257467686995
+        ],
+        "positive_direction_fraction": 0.4375,
+        "pairs": 32
+      }
+    },
+    "medclip": {
+      "Cardiomegaly": {
+        "auroc": 0.5068359375,
+        "paired_mean_score_delta": 0.0004690482746809721,
+        "delta_ci95": [
+          5.60744338145014e-05,
+          0.0008819143695291131
+        ],
+        "positive_direction_fraction": 0.71875,
+        "pairs": 32
+      },
+      "Pleural Effusion": {
+        "auroc": 0.498046875,
+        "paired_mean_score_delta": 0.000155588990310207,
+        "delta_ci95": [
+          -0.000374171316070715,
+          0.0007521820414694956
+        ],
+        "positive_direction_fraction": 0.46875,
+        "pairs": 32
+      },
+      "Edema": {
+        "auroc": 0.5166015625,
+        "paired_mean_score_delta": 0.000522349844686687,
+        "delta_ci95": [
+          -3.797234967350956e-06,
+          0.0011494730424601576
+        ],
+        "positive_direction_fraction": 0.625,
+        "pairs": 32
+      },
+      "Atelectasis": {
+        "auroc": 0.501953125,
+        "paired_mean_score_delta": -0.0001246544998139143,
+        "delta_ci95": [
+          -0.0007033390284050256,
+          0.00045607658903463734
+        ],
+        "positive_direction_fraction": 0.53125,
+        "pairs": 32
+      }
+    }
+  },
+  "eps10_ep30": {
+    "xrv": {
+      "Cardiomegaly": {
+        "auroc": 0.513671875,
+        "paired_mean_score_delta": 0.0026566358283162117,
+        "delta_ci95": [
+          -0.00019553663660190068,
+          0.005607127782423047
+        ],
+        "positive_direction_fraction": 0.6875,
+        "pairs": 32
+      },
+      "Pleural Effusion": {
+        "auroc": 0.501953125,
+        "paired_mean_score_delta": -0.0013984693214297295,
+        "delta_ci95": [
+          -0.007288451178465038,
+          0.0038307477487251147
+        ],
+        "positive_direction_fraction": 0.53125,
+        "pairs": 32
+      },
+      "Edema": {
+        "auroc": 0.5068359375,
+        "paired_mean_score_delta": 0.00010875408770516515,
+        "delta_ci95": [
+          -0.0045166932977736,
+          0.004314101056661457
+        ],
+        "positive_direction_fraction": 0.5625,
+        "pairs": 32
+      },
+      "Atelectasis": {
+        "auroc": 0.5048828125,
+        "paired_mean_score_delta": -0.0005367748672142625,
+        "delta_ci95": [
+          -0.002955473866313696,
+          0.0013352690672036257
+        ],
+        "positive_direction_fraction": 0.5625,
+        "pairs": 32
+      }
+    },
+    "medclip": {
+      "Cardiomegaly": {
+        "auroc": 0.50390625,
+        "paired_mean_score_delta": 0.00010041365749202669,
+        "delta_ci95": [
+          -0.00032340734906028957,
+          0.00047938263523974317
+        ],
+        "positive_direction_fraction": 0.5625,
+        "pairs": 32
+      },
+      "Pleural Effusion": {
+        "auroc": 0.5029296875,
+        "paired_mean_score_delta": 0.00012949315714649856,
+        "delta_ci95": [
+          -0.00028918708630953915,
+          0.0005537103046663104
+        ],
+        "positive_direction_fraction": 0.53125,
+        "pairs": 32
+      },
+      "Edema": {
+        "auroc": 0.51171875,
+        "paired_mean_score_delta": 0.0003609023115132004,
+        "delta_ci95": [
+          -2.1067219495307655e-05,
+          0.0007903820383944549
+        ],
+        "positive_direction_fraction": 0.625,
+        "pairs": 32
+      },
+      "Atelectasis": {
+        "auroc": 0.5029296875,
+        "paired_mean_score_delta": 0.00010408280650153756,
+        "delta_ci95": [
+          -0.0007898184383520856,
+          0.0009353107408969654
+        ],
+        "positive_direction_fraction": 0.40625,
+        "pairs": 32
+      }
+    }
+  }
+}
