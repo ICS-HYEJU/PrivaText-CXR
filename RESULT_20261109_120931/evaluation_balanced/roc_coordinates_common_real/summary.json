@@ -1,0 +1,76 @@
+{
+  "common_real_n": 4873,
+  "eps1_synthetic_n": 9259,
+  "eps10_synthetic_n": 9259,
+  "pathologies": [
+    "Atelectasis",
+    "Consolidation",
+    "Pneumothorax",
+    "Edema",
+    "Effusion",
+    "Pneumonia",
+    "Cardiomegaly",
+    "Lung Lesion",
+    "Fracture",
+    "Lung Opacity",
+    "Enlarged Cardiomediastinum"
+  ],
+  "protocol": "top38 XRV label agreement; one common Real set from combined validate+test manifest",
+  "auroc": {
+    "Atelectasis": {
+      "real": 0.658611238008223,
+      "eps1": 0.8047296634285154,
+      "eps10": 0.8515184455465725
+    },
+    "Consolidation": {
+      "real": 0.8222222222222222,
+      "eps1": 0.6878620985623346,
+      "eps10": 0.7161422330365537
+    },
+    "Pneumothorax": {
+      "real": 0.5810962729583616,
+      "eps1": 0.5380083833692081,
+      "eps10": 0.5521655278818602
+    },
+    "Edema": {
+      "real": 0.8211112501564259,
+      "eps1": 0.8508518230161108,
+      "eps10": 0.863161967748546
+    },
+    "Effusion": {
+      "real": 0.8517884487792861,
+      "eps1": 0.8117176497981645,
+      "eps10": 0.8324152997569938
+    },
+    "Pneumonia": {
+      "real": 0.6826708125025402,
+      "eps1": 0.7585854199835962,
+      "eps10": 0.7635177520301334
+    },
+    "Cardiomegaly": {
+      "real": 0.7782118493419931,
+      "eps1": 0.8114496132486206,
+      "eps10": 0.8125406584777107
+    },
+    "Lung Lesion": {
+      "real": 0.6418269230769231,
+      "eps1": 0.7088162978573938,
+      "eps10": 0.7415730337078652
+    },
+    "Fracture": {
+      "real": 0.7057613168724279,
+      "eps1": 0.63883217639853,
+      "eps10": 0.649074074074074
+    },
+    "Lung Opacity": {
+      "real": 0.618494965553789,
+      "eps1": 0.7607665940632766,
+      "eps10": 0.7794379310400352
+    },
+    "Enlarged Cardiomediastinum": {
+      "real": 0.7897834274952918,
+      "eps1": 0.7473667828685259,
+      "eps10": 0.7736756991283082
+    }
+  }
+}
