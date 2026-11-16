@@ -1,0 +1,11 @@
+{
+  "vae_ckpt": "/workspace/PrivaText-CXR/checkpoints/vae/vae_ep0070.pt",
+  "feature_extractor": "torchvision InceptionV3 pool3",
+  "feature_dim": 2048,
+  "dataset_manifest": "/workspace/PrivaText-CXR/RESULT_20261109_120931/combined_validate_test_manifest.csv.gz",
+  "dataset_split": "combined validate+test legacy evaluation manifest",
+  "n_images": 4873,
+  "reconstruction": "posterior.mode deterministic decode",
+  "mean_batch_mse": 0.011054525687740962,
+  "fid_inception_v3": 51.07762821539671
+}

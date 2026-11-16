@@ -1,0 +1,326 @@
+{
+  "a": "projection",
+  "b": "xrv_aux_stratified",
+  "results": {
+    "projection": {
+      "xrv": {
+        "per_label": {
+          "Atelectasis": {
+            "auroc": 0.6752688172043011,
+            "auprc": 0.9919940432832333,
+            "positive": 155,
+            "negative": 3,
+            "reliable": false
+          },
+          "Consolidation": {
+            "auroc": 0.5415695415695416,
+            "auprc": 0.6069843210343553,
+            "positive": 39,
+            "negative": 33,
+            "reliable": true
+          },
+          "Pneumothorax": {
+            "auroc": 0.5290172061825605,
+            "auprc": 0.19342862939414868,
+            "positive": 27,
+            "negative": 127,
+            "reliable": true
+          },
+          "Edema": {
+            "auroc": 0.5355623100303952,
+            "auprc": 0.4911016277627043,
+            "positive": 94,
+            "negative": 105,
+            "reliable": true
+          },
+          "Pleural Effusion": {
+            "auroc": 0.5979619412228352,
+            "auprc": 0.7936707390532468,
+            "positive": 214,
+            "negative": 83,
+            "reliable": true
+          },
+          "Pneumonia": {
+            "auroc": 0.5324933687002653,
+            "auprc": 0.48783619395009203,
+            "positive": 58,
+            "negative": 78,
+            "reliable": true
+          },
+          "Cardiomegaly": {
+            "auroc": 0.5728949478748998,
+            "auprc": 0.8180495744478427,
+            "positive": 145,
+            "negative": 43,
+            "reliable": true
+          },
+          "Lung Lesion": {
+            "auroc": 0.5,
+            "auprc": 0.8182810245310246,
+            "positive": 12,
+            "negative": 3,
+            "reliable": false
+          },
+          "Lung Opacity": {
+            "auroc": 0.4585492227979275,
+            "auprc": 0.9661109753838727,
+            "positive": 193,
+            "negative": 6,
+            "reliable": false
+          },
+          "Enlarged Cardiomediastinum": {
+            "auroc": 0.6196428571428572,
+            "auprc": 0.6203660372337141,
+            "positive": 20,
+            "negative": 28,
+            "reliable": true
+          }
+        },
+        "macro": 0.5613060246747651
+      },
+      "medclip": {
+        "per_label": {
+          "Atelectasis": {
+            "auroc": 0.6645161290322581,
+            "auprc": 0.9910419213896464,
+            "positive": 155,
+            "negative": 3,
+            "reliable": false
+          },
+          "Cardiomegaly": {
+            "auroc": 0.5457898957497995,
+            "auprc": 0.781423515118722,
+            "positive": 145,
+            "negative": 43,
+            "reliable": true
+          },
+          "Consolidation": {
+            "auroc": 0.5477855477855478,
+            "auprc": 0.5793807020565613,
+            "positive": 39,
+            "negative": 33,
+            "reliable": true
+          },
+          "Edema": {
+            "auroc": 0.5505572441742654,
+            "auprc": 0.5136694083821669,
+            "positive": 94,
+            "negative": 105,
+            "reliable": true
+          },
+          "Enlarged Cardiomediastinum": {
+            "auroc": 0.4910714285714286,
+            "auprc": 0.4336028255786043,
+            "positive": 20,
+            "negative": 28,
+            "reliable": true
+          },
+          "Lung Lesion": {
+            "auroc": 0.5277777777777778,
+            "auprc": 0.8233176545676546,
+            "positive": 12,
+            "negative": 3,
+            "reliable": false
+          },
+          "Lung Opacity": {
+            "auroc": 0.33506044905008636,
+            "auprc": 0.954654390234708,
+            "positive": 193,
+            "negative": 6,
+            "reliable": false
+          },
+          "Pleural Effusion": {
+            "auroc": 0.530796081522351,
+            "auprc": 0.7222891971726,
+            "positive": 214,
+            "negative": 83,
+            "reliable": true
+          },
+          "Pneumonia": {
+            "auroc": 0.4803271441202476,
+            "auprc": 0.4003564680341825,
+            "positive": 58,
+            "negative": 78,
+            "reliable": true
+          },
+          "Pneumothorax": {
+            "auroc": 0.46981627296587924,
+            "auprc": 0.17403451814004756,
+            "positive": 27,
+            "negative": 127,
+            "reliable": true
+          }
+        },
+        "macro": 0.5165919449842171
+      }
+    },
+    "xrv_aux_stratified": {
+      "xrv": {
+        "per_label": {
+          "Atelectasis": {
+            "auroc": 0.6494623655913979,
+            "auprc": 0.9907757912144421,
+            "positive": 155,
+            "negative": 3,
+            "reliable": false
+          },
+          "Consolidation": {
+            "auroc": 0.543900543900544,
+            "auprc": 0.6066699574356905,
+            "positive": 39,
+            "negative": 33,
+            "reliable": true
+          },
+          "Pneumothorax": {
+            "auroc": 0.5296004666083407,
+            "auprc": 0.19179087826579255,
+            "positive": 27,
+            "negative": 127,
+            "reliable": true
+          },
+          "Edema": {
+            "auroc": 0.5295845997973657,
+            "auprc": 0.49421646368937355,
+            "positive": 94,
+            "negative": 105,
+            "reliable": true
+          },
+          "Pleural Effusion": {
+            "auroc": 0.5922193446683932,
+            "auprc": 0.7815008920397738,
+            "positive": 214,
+            "negative": 83,
+            "reliable": true
+          },
+          "Pneumonia": {
+            "auroc": 0.5442086648983201,
+            "auprc": 0.487931798882579,
+            "positive": 58,
+            "negative": 78,
+            "reliable": true
+          },
+          "Cardiomegaly": {
+            "auroc": 0.5788291900561346,
+            "auprc": 0.8111988684162335,
+            "positive": 145,
+            "negative": 43,
+            "reliable": true
+          },
+          "Lung Lesion": {
+            "auroc": 0.4722222222222222,
+            "auprc": 0.8129391441891443,
+            "positive": 12,
+            "negative": 3,
+            "reliable": false
+          },
+          "Lung Opacity": {
+            "auroc": 0.41968911917098445,
+            "auprc": 0.9636048933009452,
+            "positive": 193,
+            "negative": 6,
+            "reliable": false
+          },
+          "Enlarged Cardiomediastinum": {
+            "auroc": 0.6214285714285714,
+            "auprc": 0.5941518612168524,
+            "positive": 20,
+            "negative": 28,
+            "reliable": true
+          }
+        },
+        "macro": 0.5628244830510957
+      },
+      "medclip": {
+        "per_label": {
+          "Atelectasis": {
+            "auroc": 0.6623655913978495,
+            "auprc": 0.9913510819842914,
+            "positive": 155,
+            "negative": 3,
+            "reliable": false
+          },
+          "Cardiomegaly": {
+            "auroc": 0.5270248596631917,
+            "auprc": 0.7748347786262546,
+            "positive": 145,
+            "negative": 43,
+            "reliable": true
+          },
+          "Consolidation": {
+            "auroc": 0.526029526029526,
+            "auprc": 0.5594419663850067,
+            "positive": 39,
+            "negative": 33,
+            "reliable": true
+          },
+          "Edema": {
+            "auroc": 0.5243161094224923,
+            "auprc": 0.49945210924996064,
+            "positive": 94,
+            "negative": 105,
+            "reliable": true
+          },
+          "Enlarged Cardiomediastinum": {
+            "auroc": 0.47321428571428575,
+            "auprc": 0.48653338736423035,
+            "positive": 20,
+            "negative": 28,
+            "reliable": true
+          },
+          "Lung Lesion": {
+            "auroc": 0.638888888888889,
+            "auprc": 0.8486182798682799,
+            "positive": 12,
+            "negative": 3,
+            "reliable": false
+          },
+          "Lung Opacity": {
+            "auroc": 0.3411053540587219,
+            "auprc": 0.9613015488554937,
+            "positive": 193,
+            "negative": 6,
+            "reliable": false
+          },
+          "Pleural Effusion": {
+            "auroc": 0.5368201779078933,
+            "auprc": 0.726933439008136,
+            "positive": 214,
+            "negative": 83,
+            "reliable": true
+          },
+          "Pneumonia": {
+            "auroc": 0.4606542882404952,
+            "auprc": 0.3912298544371231,
+            "positive": 58,
+            "negative": 78,
+            "reliable": true
+          },
+          "Pneumothorax": {
+            "auroc": 0.4709827938174395,
+            "auprc": 0.17945546173410354,
+            "positive": 27,
+            "negative": 127,
+            "reliable": true
+          }
+        },
+        "macro": 0.5027202915421891
+      }
+    }
+  },
+  "paired_patient_ci": {
+    "xrv": {
+      "delta": 0.0015184583763305781,
+      "ci95": [
+        -0.015540303037378172,
+        0.016545929753372747
+      ]
+    },
+    "medclip": {
+      "delta": -0.013871653442028009,
+      "ci95": [
+        -0.037355117475856986,
+        0.00438709290196549
+      ]
+    }
+  }
+}

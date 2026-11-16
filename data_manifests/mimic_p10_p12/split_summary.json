@@ -1,0 +1,31 @@
+{
+  "seed": 42,
+  "no_finding_ratio": 2.0,
+  "no_finding_cap": 6230,
+  "image_decode_verified": true,
+  "input_sha256": {
+    "/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0/mimic-cxr-2.0.0-split.csv": "1fb1d5964ca4b64af0e64d36cfc26fb12de415bffacc34530cd7d5ea312c9da8",
+    "/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0/mimic-cxr-2.0.0-chexpert.csv": "efb1eac787b0b65fb40d8553c4d04861ea1899578c31c97844ba85c7d16ace1a",
+    "/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0/cxr-record-list.csv.gz": "161cb75e043a405db856634851b39a276acf1b0b28676addec560f6c29caac9a"
+  },
+  "counts": {
+    "all": 112413,
+    "train_before_balance": 72249,
+    "train_balanced": 53857,
+    "validation": 802,
+    "test_p12": 37190,
+    "excluded": 20564,
+    "missing_image": 1403,
+    "unreadable_image": 0,
+    "missing_report": 0,
+    "no_finding_before": 24622,
+    "no_finding_after": 6230
+  },
+  "patient_overlap": {
+    "train_validation": 0,
+    "train_test": 0,
+    "validation_test": 0
+  },
+  "test_at_least_10240": true,
+  "split_policy": "p10/p11 official train+validate; p10/p11 official test excluded; p12 all test"
+}

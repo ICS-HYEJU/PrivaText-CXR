@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "vae_frozen": true,
+  "xrv_frozen": true,
+  "checkpoint_projection_lora_exact": true,
+  "xrv_absent_from_checkpoint": true,
+  "uncertain_missing_mask": true,
+  "physical_batch": 4,
+  "aux_weight": 0.1,
+  "aux_timestep_max": 250,
+  "teacher": "densenet121-res224-all",
+  "opacus_training_complete": true,
+  "epsilon_spent": 8.748811492340863,
+  "auxiliary_preflight": {
+    "aux_loss": 1.583390235900879,
+    "projection_grad_norm": 0.4792714071969059,
+    "lora_grad_norm": 0.11793358410311094,
+    "active_records": 1
+  },
+  "decision": "stopped_before_full_training",
+  "reason": "weighted auxiliary loss exceeded diffusion loss in active DP smoke step",
+  "active_step": {
+    "diffusion_loss": 0.3543,
+    "weighted_xrv_loss": 0.5715,
+    "total_loss": 0.9258,
+    "weighted_to_diffusion_ratio": 1.6130397967823877
+  },
+  "full_training_run": false
+}

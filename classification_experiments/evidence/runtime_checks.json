@@ -1,0 +1,7 @@
+{
+  "pretrained_vae_equals_external": true,
+  "eps10_ep30_vae_equals_external": true,
+  "init_before_md5": "4f2e5395b69c576622f4a7bed1a2b229",
+  "init_after_md5": "4f2e5395b69c576622f4a7bed1a2b229",
+  "ddim_oracle_max_error": 0.0
+}

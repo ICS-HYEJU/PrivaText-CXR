@@ -1,0 +1,88 @@
+{
+  "xrv_aux_stratified": {
+    "xrv": {
+      "Cardiomegaly": {
+        "auroc": 0.517578125,
+        "paired_mean_score_delta": 0.018282286822795868,
+        "delta_ci95": [
+          -0.0015770574595080687,
+          0.04447291810065507
+        ],
+        "positive_direction_fraction": 0.65625,
+        "pairs": 32
+      },
+      "Pleural Effusion": {
+        "auroc": 0.5634765625,
+        "paired_mean_score_delta": 0.02563680149614811,
+        "delta_ci95": [
+          -0.002163565321825443,
+          0.047378871124237776
+        ],
+        "positive_direction_fraction": 0.90625,
+        "pairs": 32
+      },
+      "Edema": {
+        "auroc": 0.5322265625,
+        "paired_mean_score_delta": 0.008745374158024788,
+        "delta_ci95": [
+          -0.002901216223835945,
+          0.021556628076359625
+        ],
+        "positive_direction_fraction": 0.84375,
+        "pairs": 32
+      },
+      "Atelectasis": {
+        "auroc": 0.5439453125,
+        "paired_mean_score_delta": 0.008999068289995193,
+        "delta_ci95": [
+          0.005309282895177602,
+          0.012896997295320034
+        ],
+        "positive_direction_fraction": 0.71875,
+        "pairs": 32
+      }
+    },
+    "medclip": {
+      "Cardiomegaly": {
+        "auroc": 0.5205078125,
+        "paired_mean_score_delta": 0.0010233535431325436,
+        "delta_ci95": [
+          -0.00013243650901131331,
+          0.0021269517543260003
+        ],
+        "positive_direction_fraction": 0.65625,
+        "pairs": 32
+      },
+      "Pleural Effusion": {
+        "auroc": 0.4970703125,
+        "paired_mean_score_delta": -6.21826620772481e-06,
+        "delta_ci95": [
+          -0.0016728053335100413,
+          0.0013714755419641721
+        ],
+        "positive_direction_fraction": 0.65625,
+        "pairs": 32
+      },
+      "Edema": {
+        "auroc": 0.501953125,
+        "paired_mean_score_delta": -9.349649189971387e-05,
+        "delta_ci95": [
+          -0.0007937730100820772,
+          0.0005900540068978443
+        ],
+        "positive_direction_fraction": 0.5,
+        "pairs": 32
+      },
+      "Atelectasis": {
+        "auroc": 0.541015625,
+        "paired_mean_score_delta": 0.002002268796786666,
+        "delta_ci95": [
+          -0.00018750042872852643,
+          0.004157722066156565
+        ],
+        "positive_direction_fraction": 0.59375,
+        "pairs": 32
+      }
+    }
+  }
+}

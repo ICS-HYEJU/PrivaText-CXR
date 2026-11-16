@@ -1,0 +1,20 @@
+{
+  "status": "passed",
+  "dp_per_record_negative": true,
+  "counterfactual": "LABEL: No Finding IMPRESSION: No acute cardiopulmonary abnormality.",
+  "rank_margin": 0.01,
+  "rank_weight": 0.1,
+  "vae_frozen": true,
+  "checkpoint_projection_lora_exact": true,
+  "physical_batch": 4,
+  "opacus_two_forward_complete": true,
+  "epsilon_spent": 8.748811492340863,
+  "preflight": {
+    "correct_mse": 0.41095781326293945,
+    "counterfactual_mse": 0.41091683506965637,
+    "condition_gap": -4.09930944442749e-05,
+    "rank_loss": 0.01004098355770111,
+    "projection_grad_norm": 0.007702889517416821,
+    "lora_grad_norm": 0.0006444536613279638
+  }
+}
