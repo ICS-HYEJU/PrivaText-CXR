@@ -24,7 +24,7 @@ def read_gz(path):
         return list(csv.DictReader(f))
 
 
-def main(device="cuda:0"):
+def main(device="cuda:0", weights="densenet121-res224-all"):
     from Eval_metric.downstream_cls import (
         auroc_per_pathology, classify, load_chexpert_gt, load_xrv_classifier,
     )
@@ -42,13 +42,16 @@ def main(device="cuda:0"):
     real_paths = [r["image_path"] for r in real_rows]
     real_keys = [(int(r["subject_id"]), int(r["study_id"])) for r in real_rows]
     gt = load_chexpert_gt("/storage/hjchoi/physionet.org/files/mimic-cxr/2.1.0/mimic-cxr-2.0.0-chexpert.csv.gz")
-    model = load_xrv_classifier("densenet121-res224-all", device)
+    model = load_xrv_classifier(weights, device)
+    labels = (LABELS if not weights.endswith("-nih") else
+              ["Atelectasis", "Consolidation", "Pneumothorax", "Edema",
+               "Effusion", "Pneumonia", "Cardiomegaly"])
 
     def score(paths, keys):
         tensors = [load_image_as_tensor(p, 224) for p in paths]
         raw = classify(model, tensors, device, batch_size=32)
         _, _, _, included, curves = auroc_per_pathology(raw, model, gt, keys, 10)
-        if set(included) != set(LABELS):
+        if set(included) != set(labels):
             raise RuntimeError(f"Unexpected reliable labels: {included}")
         return curves
 
@@ -60,10 +63,16 @@ def main(device="cuda:0"):
             [(int(r["subject_id"]), int(r["study_id"])) for r in rows],
         )
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = RESULT / "evaluation_balanced" / (
+        "roc_coordinates_common_real_nih" if weights.endswith("-nih")
+        else "roc_coordinates_common_real"
+    )
+    out.mkdir(parents=True, exist_ok=True)
+    global OUT
+    OUT = out
     all_rows = []
-    mat = {"pathologies": np.asarray(LABELS, dtype=object)}
-    for pathology in LABELS:
+    mat = {"pathologies": np.asarray(labels, dtype=object)}
+    for pathology in labels:
         for arm in ("real", "eps1", "eps10"):
             y, s = curves[arm][pathology]
             fpr, tpr, _ = roc_curve(y, s)
@@ -87,12 +96,18 @@ def main(device="cuda:0"):
         mat[k] = np.asarray(mat[k], dtype=float).reshape(-1, 1)
     savemat(OUT / "top38_common_real_roc_coordinates.mat", mat, do_compression=True)
     summary = {"common_real_n": len(real_rows), "eps1_synthetic_n": len(selected["1"]),
-               "eps10_synthetic_n": len(selected["10"]), "pathologies": LABELS,
-               "protocol": "top38 XRV label agreement; one common Real set from combined validate+test manifest",
-               "auroc": {p: {a: mat[f"{a}_auroc"][i] for a in ("real", "eps1", "eps10")} for i, p in enumerate(LABELS)}}
+               "eps10_synthetic_n": len(selected["10"]), "pathologies": labels,
+               "protocol": f"top38 XRV label agreement ({weights}); one common Real set from combined validate+test manifest",
+               "xrv_weights": weights,
+               "auroc": {p: {a: mat[f"{a}_auroc"][i] for a in ("real", "eps1", "eps10")} for i, p in enumerate(labels)}}
     (OUT / "summary.json").write_text(json.dumps(summary, indent=2, default=float) + "\n")
     print(json.dumps({"out": str(OUT), "common_real_n": len(real_rows), "eps1_n": len(selected["1"]), "eps10_n": len(selected["10"])}, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--weights", default="densenet121-res224-all")
+    parser.add_argument("--device", default="cuda:0")
+    args = parser.parse_args()
+    main(args.device, args.weights)

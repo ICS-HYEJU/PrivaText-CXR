@@ -1,0 +1,53 @@
+{
+  "common_real_n": 4873,
+  "eps1_synthetic_n": 9259,
+  "eps10_synthetic_n": 9259,
+  "pathologies": [
+    "Atelectasis",
+    "Consolidation",
+    "Pneumothorax",
+    "Edema",
+    "Effusion",
+    "Pneumonia",
+    "Cardiomegaly"
+  ],
+  "protocol": "top38 XRV label agreement (densenet121-res224-nih); one common Real set from combined validate+test manifest",
+  "xrv_weights": "densenet121-res224-nih",
+  "auroc": {
+    "Atelectasis": {
+      "real": 0.5243490178163545,
+      "eps1": 0.7283141988028653,
+      "eps10": 0.7754263197228072
+    },
+    "Consolidation": {
+      "real": 0.7191860465116279,
+      "eps1": 0.6199732604138584,
+      "eps10": 0.6327987612674888
+    },
+    "Pneumothorax": {
+      "real": 0.4935662883534424,
+      "eps1": 0.5261666855481288,
+      "eps10": 0.5456012468906452
+    },
+    "Edema": {
+      "real": 0.7212267446710883,
+      "eps1": 0.7167123195939425,
+      "eps10": 0.7210798647298464
+    },
+    "Effusion": {
+      "real": 0.7742722047876733,
+      "eps1": 0.7641525486341685,
+      "eps10": 0.7804254089615932
+    },
+    "Pneumonia": {
+      "real": 0.6036611388855018,
+      "eps1": 0.6603677742626939,
+      "eps10": 0.6399603282585968
+    },
+    "Cardiomegaly": {
+      "real": 0.7166656810188583,
+      "eps1": 0.7122701533371509,
+      "eps10": 0.7217273550684222
+    }
+  }
+}
